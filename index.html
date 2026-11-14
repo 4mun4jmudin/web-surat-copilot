@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Document Builder - Word Copilot Persuratan Sekolah</title>
+  <link rel="stylesheet" href="css/app.css?v=20261114_fix5">
+  <style id="critical-layout-fix">
+    @media screen {
+      html, body {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      #app.app-layout {
+        position: fixed !important;
+        inset: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+      }
+      .app-header {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+        min-height: 44px !important;
+        height: auto !important;
+        padding: 4px 14px !important;
+        gap: 8px !important;
+        box-sizing: border-box !important;
+        overflow: visible !important;
+        flex-shrink: 0 !important;
+        z-index: 60 !important;
+      }
+      .brand-group {
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        flex-shrink: 0 !important;
+        min-width: max-content !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+      }
+      .brand-title {
+        font-size: 13.5px !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+        line-height: 1.15 !important;
+        margin: 0 !important;
+        white-space: nowrap !important;
+        display: block !important;
+      }
+      .brand-subtitle {
+        font-size: 10px !important;
+        color: #475569 !important;
+        line-height: 1.15 !important;
+        white-space: nowrap !important;
+        display: block !important;
+      }
+      #main-content-view, .word-workspace {
+        flex: 1 1 0% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+      }
+      .word-ribbon {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: stretch !important;
+        justify-content: flex-start !important;
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+        padding: 4px 12px !important;
+        gap: 6px !important;
+        box-sizing: border-box !important;
+        overflow: visible !important;
+        flex-shrink: 0 !important;
+        z-index: 50 !important;
+      }
+      .ribbon-group {
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: space-between !important;
+        flex-shrink: 0 !important;
+        padding-right: 6px !important;
+        padding-left: 2px !important;
+        border-right: 1px solid #cbd5e1 !important;
+      }
+      .ribbon-group:last-child {
+        border-right: none !important;
+      }
+      .word-desk {
+        flex: 1 1 0% !important;
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        overflow-y: auto !important;
+        overflow-x: auto !important;
+        box-sizing: border-box !important;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app" class="app-layout">
+    <!-- HEADER UTAMA -->
+    <header class="app-header">
+      <div class="brand-group" style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+        <div class="brand-logo" style="color: #2563eb; display: flex; align-items: center; flex-shrink: 0;">
+          <svg class="svg-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
+            <path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5" />
+          </svg>
+        </div>
+        <div style="display: flex; flex-direction: column; justify-content: center; flex-shrink: 0;">
+          <h1 class="brand-title" style="font-size: 13.5px; font-weight: 700; color: #0f172a; margin: 0; line-height: 1.15;">AI DocBuilder</h1>
+          <span class="brand-subtitle" style="font-size: 10px; color: #475569; display: block; line-height: 1.15;">Persuratan SMKS IT Al-Hawari</span>
+        </div>
+      </div>
+
+      <nav class="app-nav-header">
+        <button class="btn btn-sm btn-primary nav-tab active" data-tab="canvas" title="Lembar Kerja Persuratan Word">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+            <line x1="10" y1="9" x2="8" y2="9" />
+          </svg>
+          <span>Lembar Kerja</span>
+        </button>
+        <button class="btn btn-sm btn-secondary nav-tab" data-tab="vault" title="Gudang Arsip Surat & Referensi AI">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            <line x1="12" y1="11" x2="12" y2="17" />
+            <line x1="9" y1="14" x2="15" y2="14" />
+          </svg>
+          <span>Gudang Surat</span>
+        </button>
+        <button class="btn btn-sm btn-secondary nav-tab" data-tab="school" title="Profil Sekolah & Koleksi Kop Resmi">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
+            <path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5" />
+          </svg>
+          <span>Profil & Kop</span>
+        </button>
+        <button class="btn btn-sm btn-secondary nav-tab" data-tab="settings"
+          title="Gudang API & Model AI Multi-Provider">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="7.5" cy="15.5" r="4.5" />
+            <path d="m21 3-9.5 9.5" />
+            <path d="m15.5 7.5 3 3M18 5l2 2" />
+          </svg>
+          <span>Gudang API</span>
+        </button>
+      </nav>
+
+      <div class="header-actions">
+        <button id="header-btn-download" class="btn btn-sm btn-success" title="Unduh berkas .docx">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span>Unduh .docx</span>
+        </button>
+        <button id="header-btn-print" class="btn btn-sm btn-secondary" title="Cetak atau Simpan PDF">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 6 2 18 2 18 9" />
+            <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+            <rect x="6" y="14" width="12" height="8" />
+          </svg>
+          <span>Cetak/PDF</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- AREA KONTEN UTAMA -->
+    <main id="main-content-view"
+      style="flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; width: 100%; height: 100%;">
+    </main>
+  </div>
+
+  <!-- CONTAINER TOAST NOTIFIKASI -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- PUSTAKA LOKAL DI /vendor/ -->
+  <script src="vendor/jszip.min.js"></script>
+  <script src="vendor/docx-preview.min.js"></script>
+
+  <!-- APLIKASI UTAMA (ES MODULES MURNI) -->
+  <script type="module" src="js/main.js?v=20261114_fix5"></script>
+</body>
+
+</html>

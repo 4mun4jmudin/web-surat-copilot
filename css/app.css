@@ -1,0 +1,1035 @@
+/* app.css - Styling Microsoft Word Canvas Asli & AI Copilot Persuratan */
+
+:root {
+  --primary: #1d4ed8;
+  --primary-hover: #1e40af;
+  --primary-light: #eff6ff;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --dark: #0f172a;
+  --surface: #ffffff;
+  --background: #f1f5f9;
+  --ribbon-bg: #f8fafc;
+  --border: #cbd5e1;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --radius: 6px;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Times New Roman", Times, Georgia, serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden !important;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  color: var(--text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-layout {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden !important;
+}
+
+/* HEADER UTAMA */
+.app-header {
+  min-height: 44px;
+  height: auto;
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 14px;
+  gap: 8px;
+  flex-shrink: 0;
+  z-index: 60;
+  width: 100%;
+  max-width: 100vw;
+  min-width: 0;
+  overflow: visible;
+}
+
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: max-content;
+}
+.brand-logo { font-size: 20px; flex-shrink: 0; }
+.brand-title { font-size: 13.5px; font-weight: 700; color: var(--dark); line-height: 1.15; white-space: nowrap; }
+.brand-subtitle { font-size: 10px; color: var(--text-muted); display: block; line-height: 1.15; white-space: nowrap; }
+
+.app-nav-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.app-nav-header .nav-tab {
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  gap: 4px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.header-actions .btn {
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* WORKSPACE UTAMA WORD */
+.word-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  width: 100%;
+  max-width: 100vw;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* RIBBON TOOLBAR MICROSOFT WORD (2-ROW PROFESSIONAL LAYOUT) */
+.word-ribbon {
+  background-color: var(--ribbon-bg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 4px 12px;
+  gap: 6px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 50;
+  width: 100%;
+  max-width: 100vw;
+  min-width: 0;
+  overflow: visible;
+}
+
+.ribbon-group {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border-right: 1px solid #e2e8f0;
+  padding-right: 6px;
+  padding-left: 2px;
+  flex-shrink: 0;
+}
+.ribbon-group:last-child { border-right: none; }
+
+.ribbon-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+  margin-top: 2px;
+  user-select: none;
+  letter-spacing: 0.3px;
+}
+
+.ribbon-rows-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ribbon-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ribbon-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ribbon-select {
+  height: 25px;
+  padding: 1px 5px;
+  font-size: 11.5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: white;
+  color: var(--dark);
+  outline: none;
+}
+.ribbon-select:focus { border-color: var(--primary); }
+
+.ribbon-btn {
+  height: 25px;
+  padding: 2px 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+.ribbon-btn:hover { background: #f1f5f9; border-color: #94a3b8; }
+
+.ribbon-btn-icon {
+  width: 25px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: white;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  color: #334155;
+  transition: all 0.1s;
+  flex-shrink: 0;
+}
+.ribbon-btn-icon:hover {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+.ribbon-btn-icon.active {
+  background: #bfdbfe;
+  border-color: #3b82f6;
+  color: #1e3a8a;
+}
+
+.ribbon-btn-icon-sq {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  color: #334155;
+  transition: all 0.12s ease;
+}
+.ribbon-btn-icon-sq:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+.ribbon-btn-icon-sq.active {
+  background: #e0f2fe;
+  border-color: #38bdf8;
+  color: #0369a1;
+}
+
+.ribbon-btn-compact {
+  height: 25px;
+  padding: 0 6px;
+  font-size: 11px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.badge-count {
+  background: #e2e8f0;
+  color: #1e293b;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+.badge-floating {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  font-size: 8px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #2563eb;
+  color: white;
+  border-radius: 7px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ribbon-btn-ai {
+  font-weight: 600;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  height: 25px;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.ribbon-btn-polish {
+  background: #f59e0b;
+  color: white;
+  font-weight: 600;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  height: 25px;
+  border-color: #d97706;
+  gap: 4px;
+  white-space: nowrap;
+}
+.ribbon-btn-polish:hover {
+  background: #d97706;
+}
+
+.ribbon-btn-action {
+  font-size: 11.5px;
+  padding: 2px 8px;
+  height: 25px;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.svg-icon {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.ribbon-btn-color-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.ribbon-color-picker-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ribbon-divider {
+  width: 1px;
+  height: 20px;
+  background-color: var(--border);
+  margin: 0 3px;
+}
+
+/* DROPDOWN & FIX Z-INDEX CLIPPING (Screenshots 1 & 2) */
+.dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22), 0 4px 10px rgba(0, 0, 0, 0.1);
+  z-index: 1000; /* Selalu di depan lembar kertas dan desk */
+}
+
+/* DESK & LEMBAR KERTAS SKALA NYATA */
+.word-desk {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  background-color: #85929e;
+  padding: 24px 20px 60px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.word-sheet-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 100%;
+  transition: transform 0.15s ease-out;
+  transform-origin: top center;
+}
+
+.imported-docx-banner {
+  width: 100%;
+  max-width: 820px;
+  background: #eff6ff;
+  border: 1.5px solid #3b82f6;
+  border-radius: 8px;
+  padding: 12px 18px;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.08);
+  box-sizing: border-box;
+}
+
+.docx-native-preview-card {
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.15);
+  box-sizing: border-box;
+  margin: 0 auto;
+  max-width: 215mm;
+  min-height: 297mm;
+  padding: 10px;
+  border-radius: 4px;
+}
+
+.word-paper-sheet {
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.15);
+  box-sizing: border-box;
+  font-family: var(--font-serif);
+  color: #000000;
+  font-size: 12pt;
+  line-height: 1.35;
+  margin: 0 auto;
+}
+
+/* DIMENSI KERTAS A4, F4, LETTER & LEGAL (PORTRAIT & LANDSCAPE) */
+.paper-a4 {
+  width: 210mm;
+  min-height: 297mm;
+  padding: var(--margin-top, 20mm) var(--margin-right, 20mm) var(--margin-bottom, 20mm) var(--margin-left, 25mm);
+}
+.paper-a4.landscape {
+  width: 297mm;
+  min-height: 210mm;
+}
+
+.paper-f4 {
+  width: 215mm;
+  min-height: 330mm;
+  padding: var(--margin-top, 20mm) var(--margin-right, 20mm) var(--margin-bottom, 20mm) var(--margin-left, 25mm);
+}
+.paper-f4.landscape {
+  width: 330mm;
+  min-height: 215mm;
+}
+
+.paper-letter {
+  width: 215.9mm;
+  min-height: 279.4mm;
+  padding: var(--margin-top, 20mm) var(--margin-right, 20mm) var(--margin-bottom, 20mm) var(--margin-left, 25mm);
+}
+.paper-letter.landscape {
+  width: 279.4mm;
+  min-height: 215.9mm;
+}
+
+.paper-legal {
+  width: 215.9mm;
+  min-height: 355.6mm;
+  padding: var(--margin-top, 20mm) var(--margin-right, 20mm) var(--margin-bottom, 20mm) var(--margin-left, 25mm);
+}
+.paper-legal.landscape {
+  width: 355.6mm;
+  min-height: 215.9mm;
+}
+
+/* KOP SURAT BANNER */
+.sheet-kop-container {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.sheet-kop-image {
+  width: 100%;
+  height: auto;
+  display: block;
+  user-select: none;
+}
+
+/* KONTEN SURAT WYSIWYG */
+.sheet-content-editable {
+  outline: none;
+}
+
+.sheet-section-title {
+  margin: 12px 0 10px 0;
+}
+
+.font-title {
+  font-size: 14pt;
+  font-weight: bold;
+  text-decoration: underline;
+  letter-spacing: 0.5px;
+}
+
+.font-nomor {
+  font-size: 12pt;
+  margin-top: 2px;
+}
+
+/* BLOK SIFAT, PERIHAL & KEPADA YTH (SEJAJAR MARGIN KIRI SURAT RESMI) */
+.sheet-meta-recipient-wrapper {
+  position: relative;
+  margin-bottom: 12px;
+}
+
+.sheet-meta-recipient-wrapper.is-empty {
+  margin-bottom: 0;
+}
+
+.meta-hover-actions {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.sheet-meta-recipient-wrapper:hover .meta-hover-actions,
+.sheet-meta-recipient-wrapper.is-empty:hover .meta-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.btn-meta-quick-action {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+  color: #b91c1c;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.btn-meta-quick-action:hover {
+  background: #fee2e2;
+}
+
+.btn-meta-restore {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.btn-meta-restore:hover {
+  background: #dbeafe;
+}
+
+.meta-recipient-box {
+  text-align: left;
+  min-height: 4px;
+}
+
+.sheet-meta-recipient-wrapper.is-empty .meta-recipient-box {
+  min-height: 10px;
+  padding: 0;
+  border-color: transparent;
+}
+
+.meta-perihal-table {
+  border-collapse: collapse;
+  margin-bottom: 10px;
+  width: auto;
+}
+
+.meta-perihal-table td {
+  padding: 0.5px 4px 0.5px 0;
+  vertical-align: top;
+  line-height: 1.3;
+}
+
+.meta-perihal-table .meta-label {
+  width: 72px;
+}
+
+.meta-perihal-table .meta-colon {
+  width: 10px;
+  padding: 0.5px 4px;
+}
+
+.meta-perihal-table .meta-val {
+  padding-left: 2px;
+}
+
+.recipient-address-block {
+  text-align: left;
+  line-height: 1.3;
+}
+
+.recipient-address-block .recipient-line {
+  line-height: 1.05;
+  margin-bottom: 8px;
+}
+
+.recipient-address-block .recipient-di {
+  margin-top: 8px;
+}
+
+.paragraph-box {
+  margin-bottom: 10px;
+  text-align: justify;
+}
+
+/* TABEL IDENTITAS WORD */
+.identity-table-word {
+  width: calc(100% - 20px);
+  margin-left: 20px;
+  border-collapse: collapse;
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
+.identity-table-word td {
+  padding: 2px 4px;
+  vertical-align: top;
+}
+
+.identity-table-word .id-label {
+  width: 28%;
+}
+
+.identity-table-word .id-val {
+  width: 72%;
+  font-weight: bold;
+}
+
+/* BLOK TANDA TANGAN */
+.sheet-signature-wrapper {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sig-box {
+  width: 260px;
+  text-align: left;
+}
+
+.sig-space-holder {
+  height: 60px;
+}
+
+.font-bold-underline {
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+.font-nip {
+  font-size: 12pt;
+}
+
+/* EDITABLE FIELD FOCUS HIGHLIGHT */
+.editable-field {
+  outline: none;
+  border: 1px dashed transparent;
+  border-radius: 2px;
+  padding: 1px 2px;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.editable-field:hover {
+  border-color: #93c5fd;
+  background-color: rgba(239, 246, 255, 0.4);
+}
+
+.editable-field:focus {
+  border-color: #2563eb;
+  background-color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.text-center { text-align: center; }
+.text-left { text-align: left; }
+.text-right { text-align: right; }
+
+/* STATUS BAR MICROSOFT WORD (DI BAGIAN BAWAH DENGAN ZOOM SLIDER) */
+.word-status-bar {
+  height: 28px;
+  background: #f1f5f9;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  user-select: none;
+  flex-shrink: 0;
+  z-index: 40;
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.zoom-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.zoom-slider-wrap input[type="range"] {
+  width: 100px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+.zoom-btn {
+  background: none;
+  border: none;
+  font-weight: bold;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--dark);
+  padding: 0 4px;
+}
+.zoom-btn:hover { color: var(--primary); }
+
+/* DRAWER AI COPILOT */
+.copilot-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 410px;
+  max-width: 90vw;
+  height: 100%;
+  background: white;
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  z-index: 200;
+  transition: transform 0.25s ease;
+}
+
+.copilot-header {
+  height: 48px;
+  background: #1e3a8a;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+}
+
+.copilot-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.copilot-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.copilot-desc {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin-bottom: 12px;
+}
+
+.copilot-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.copilot-chip {
+  padding: 4px 8px;
+  font-size: 11px;
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.copilot-chip:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1e40af;
+}
+
+.copilot-status-area {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  text-align: center;
+  font-size: 12px;
+  color: #166534;
+}
+
+/* BUTTONS & FORMS */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-sm { padding: 4px 8px; font-size: 12px; }
+.btn-primary { background-color: var(--primary); color: white; }
+.btn-primary:hover { background-color: var(--primary-hover); }
+.btn-secondary { background-color: white; color: var(--text); border-color: var(--border); }
+.btn-secondary:hover { background-color: #f1f5f9; }
+.btn-success { background-color: var(--success); color: white; }
+.btn-danger { background-color: var(--danger); color: white; }
+
+.btn-icon {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.form-control {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-family: inherit;
+  font-size: 13px;
+}
+.form-control:focus { outline: none; border-color: var(--primary); }
+
+.form-row { display: flex; gap: 8px; }
+.col { flex: 1; }
+
+.hidden { display: none !important; }
+
+/* SPINNER & TOAST */
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(37, 99, 235, 0.2);
+  border-radius: 50%;
+  border-top-color: var(--primary);
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.toast-container {
+  position: fixed;
+  bottom: 34px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 99999;
+}
+.toast {
+  padding: 10px 14px;
+  background: var(--dark);
+  color: white;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toast-success { background: #15803d; }
+.toast-error { background: #b91c1c; }
+.toast-warning { background: #b45309; }
+
+/* PRINT MEDIA CETAK DOKUMEN (PREVIEW & PRINT PRESISI 1 HALAMAN TANPA HALAMAN KOSONG) */
+@page {
+  size: A4 portrait;
+  margin: 0mm;
+}
+
+@media print {
+  html, body {
+    position: static !important;
+    width: 100% !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    overflow: hidden !important; /* Mencegah overflow subpixel memicu halaman kedua kosong */
+  }
+
+  .app-header, 
+  .word-ribbon, 
+  .word-status-bar, 
+  .copilot-drawer, 
+  .toast-container, 
+  .modal-overlay,
+  .imported-docx-banner,
+  .sheet-meta-recipient-wrapper.is-empty,
+  .meta-hover-actions,
+  .no-print {
+    display: none !important;
+  }
+
+  #app,
+  .app-layout, 
+  #main-content-view,
+  .word-workspace, 
+  .word-desk, 
+  .word-sheet-wrapper {
+    position: static !important;
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    display: block !important;
+    transform: none !important;
+  }
+
+  .word-paper-sheet,
+  .paper-a4,
+  .paper-f4 {
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 auto !important;
+    min-height: 0 !important;
+    height: auto !important;
+    max-height: 295mm !important;
+    padding-top: calc(var(--margin-top, 20mm) * 0.75) !important;
+    padding-bottom: 0 !important;
+    padding-left: var(--margin-left, 20mm) !important;
+    padding-right: var(--margin-right, 20mm) !important;
+    box-sizing: border-box !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
+    page-break-before: avoid !important;
+    break-after: avoid !important;
+    break-inside: avoid !important;
+    break-before: avoid !important;
+  }
+
+  .paper-a4 {
+    width: 210mm !important;
+    max-width: 210mm !important;
+  }
+
+  .paper-f4 {
+    width: 215mm !important;
+    max-width: 215mm !important;
+  }
+
+  /* Rapatkan spasi vertikal saat cetak agar pas presisi 1 lembar kertas penuh */
+  .sheet-kop-container {
+    margin-bottom: 8px !important;
+  }
+
+  .sheet-section-title {
+    margin: 8px 0 10px 0 !important;
+  }
+
+  .paragraph-box {
+    margin-bottom: 8px !important;
+    line-height: 1.3 !important;
+  }
+
+  .identity-table-word td {
+    padding: 2px 4px !important;
+  }
+
+  .sheet-signature-wrapper {
+    margin-top: 14px !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .sig-space-holder {
+    height: 44px !important;
+  }
+
+  .editable-field:hover, .editable-field:focus {
+    border-color: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+}
