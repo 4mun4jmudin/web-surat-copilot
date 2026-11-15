@@ -5,10 +5,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Document Builder - Word Copilot Persuratan Sekolah</title>
-  <link rel="stylesheet" href="css/app.css?v=20261114_fix5">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="theme-color" content="#156c3b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="AI DocBuilder">
+  <meta name="description"
+    content="Aplikasi pembuat surat dinas sekolah, arsip surat keluar, dan editor Word (.docx) dengan AI Copilot.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="img/logo.png">
+  <link rel="apple-touch-icon" href="img/icon-192.png">
+  <link rel="stylesheet" href="css/app.css?v=20261115_smart6">
   <style id="critical-layout-fix">
     @media screen {
-      html, body {
+
+      html,
+      body {
         position: fixed !important;
         inset: 0 !important;
         width: 100vw !important;
@@ -19,6 +33,7 @@
         margin: 0 !important;
         padding: 0 !important;
       }
+
       #app.app-layout {
         position: fixed !important;
         inset: 0 !important;
@@ -33,6 +48,7 @@
         overflow: hidden !important;
         box-sizing: border-box !important;
       }
+
       .app-header {
         display: flex !important;
         flex-wrap: wrap !important;
@@ -41,15 +57,16 @@
         width: 100% !important;
         max-width: 100vw !important;
         min-width: 0 !important;
-        min-height: 44px !important;
+        min-height: 50px !important;
         height: auto !important;
-        padding: 4px 14px !important;
-        gap: 8px !important;
+        padding: 6px 20px !important;
+        gap: 12px !important;
         box-sizing: border-box !important;
         overflow: visible !important;
         flex-shrink: 0 !important;
         z-index: 60 !important;
       }
+
       .brand-group {
         display: flex !important;
         align-items: center !important;
@@ -59,6 +76,7 @@
         visibility: visible !important;
         opacity: 1 !important;
       }
+
       .brand-title {
         font-size: 13.5px !important;
         font-weight: 700 !important;
@@ -68,6 +86,7 @@
         white-space: nowrap !important;
         display: block !important;
       }
+
       .brand-subtitle {
         font-size: 10px !important;
         color: #475569 !important;
@@ -75,7 +94,9 @@
         white-space: nowrap !important;
         display: block !important;
       }
-      #main-content-view, .word-workspace {
+
+      #main-content-view,
+      .word-workspace {
         flex: 1 1 0% !important;
         display: flex !important;
         flex-direction: column !important;
@@ -86,37 +107,53 @@
         overflow: hidden !important;
         box-sizing: border-box !important;
       }
+
       .word-ribbon {
         display: flex !important;
         flex-wrap: wrap !important;
         align-items: stretch !important;
         justify-content: flex-start !important;
         width: 100% !important;
-        max-width: 100vw !important;
+        max-width: 100% !important;
         min-width: 0 !important;
-        padding: 4px 12px !important;
-        gap: 6px !important;
+        padding: 8px 14px !important;
+        gap: 10px !important;
         box-sizing: border-box !important;
         overflow: visible !important;
         flex-shrink: 0 !important;
         z-index: 50 !important;
       }
+
       .ribbon-group {
         display: flex !important;
         flex-direction: column !important;
         justify-content: space-between !important;
         flex-shrink: 0 !important;
-        padding-right: 6px !important;
-        padding-left: 2px !important;
-        border-right: 1px solid #cbd5e1 !important;
       }
-      .ribbon-group:last-child {
-        border-right: none !important;
+
+      .word-main-stage {
+        flex: 1 1 0% !important;
+        display: flex !important;
+        flex-direction: row !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
       }
+
+      .word-main-left {
+        flex: 1 1 0% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+      }
+
       .word-desk {
         flex: 1 1 0% !important;
         width: 100% !important;
-        max-width: 100vw !important;
+        max-width: 100% !important;
         min-width: 0 !important;
         min-height: 0 !important;
         overflow-y: auto !important;
@@ -131,22 +168,23 @@
   <div id="app" class="app-layout">
     <!-- HEADER UTAMA -->
     <header class="app-header">
-      <div class="brand-group" style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-        <div class="brand-logo" style="color: #2563eb; display: flex; align-items: center; flex-shrink: 0;">
-          <svg class="svg-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
-            <path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5" />
-          </svg>
+      <div class="brand-group" style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
+        <div class="brand-logo" style="display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+          <img src="img/logo.png" alt="Logo AI DocBuilder" class="brand-logo-img"
+            style="width: 30px; height: 30px; object-fit: contain; display: block; border-radius: 6px;">
         </div>
         <div style="display: flex; flex-direction: column; justify-content: center; flex-shrink: 0;">
-          <h1 class="brand-title" style="font-size: 13.5px; font-weight: 700; color: #0f172a; margin: 0; line-height: 1.15;">AI DocBuilder</h1>
-          <span class="brand-subtitle" style="font-size: 10px; color: #475569; display: block; line-height: 1.15;">Persuratan SMKS IT Al-Hawari</span>
+          <h1 class="brand-title"
+            style="font-size: 14.5px; font-weight: 800; color: #0f172a; margin: 0; line-height: 1.15;">AI DocBuilder
+          </h1>
+          <span class="brand-subtitle"
+            style="font-size: 10.5px; color: #64748b; display: block; line-height: 1.15;">Persuratan SMKS IT
+            Al-Hawari</span>
         </div>
       </div>
 
       <nav class="app-nav-header">
-        <button class="btn btn-sm btn-primary nav-tab active" data-tab="canvas" title="Lembar Kerja Persuratan Word">
+        <button class="btn btn-sm nav-tab active" data-tab="canvas" title="Lembar Kerja Persuratan Word">
           <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -157,16 +195,34 @@
           </svg>
           <span>Lembar Kerja</span>
         </button>
-        <button class="btn btn-sm btn-secondary nav-tab" data-tab="vault" title="Gudang Arsip Surat & Referensi AI">
+        <button class="btn btn-sm nav-tab" data-tab="smart-canvas" title="Kanvas Word Pro (Dokumen Bebas Multi-Halaman)">
           <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            <line x1="12" y1="11" x2="12" y2="17" />
-            <line x1="9" y1="14" x2="15" y2="14" />
+            <path d="M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+            <path d="M7 9l2 6 2.5-4.5L14 15l2-6" />
+          </svg>
+          <span>Word Pro</span>
+        </button>
+        <button class="btn btn-sm nav-tab" data-tab="outgoing"
+          title="Buku Catatan & Dashboard Surat Keluar (Arsip Tetap Terkunci)">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
+          <span>Surat Keluar</span>
+        </button>
+        <button class="btn btn-sm nav-tab" data-tab="vault"
+          title="Gudang Template & Draf Surat (Dapat Diedit & Digunakan Ulang)">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2" />
+            <polyline points="2 12 12 17 22 12" />
+            <polyline points="2 17 12 22 22 17" />
           </svg>
           <span>Gudang Surat</span>
         </button>
-        <button class="btn btn-sm btn-secondary nav-tab" data-tab="school" title="Profil Sekolah & Koleksi Kop Resmi">
+        <button class="btn btn-sm nav-tab" data-tab="school" title="Profil Sekolah & Koleksi Kop Resmi">
           <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
@@ -174,19 +230,30 @@
           </svg>
           <span>Profil & Kop</span>
         </button>
-        <button class="btn btn-sm btn-secondary nav-tab" data-tab="settings"
-          title="Gudang API & Model AI Multi-Provider">
+        <button class="btn btn-sm nav-tab" data-tab="settings" title="Gudang API & Model AI Multi-Provider">
           <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="7.5" cy="15.5" r="4.5" />
-            <path d="m21 3-9.5 9.5" />
-            <path d="m15.5 7.5 3 3M18 5l2 2" />
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
           </svg>
           <span>Gudang API</span>
         </button>
       </nav>
 
       <div class="header-actions">
+        <button id="header-btn-install" class="btn btn-sm btn-secondary hidden"
+          title="Pasang AI DocBuilder sebagai aplikasi di perangkat Anda"
+          style="border-color: #156c3b; color: #156c3b; background: #ecfdf5;">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="14" rx="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+            <polyline points="9 10 12 13 15 10" />
+            <line x1="12" y1="7" x2="12" y2="13" />
+          </svg>
+          <span>Pasang App</span>
+        </button>
         <button id="header-btn-download" class="btn btn-sm btn-success" title="Unduh berkas .docx">
           <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -222,7 +289,7 @@
   <script src="vendor/docx-preview.min.js"></script>
 
   <!-- APLIKASI UTAMA (ES MODULES MURNI) -->
-  <script type="module" src="js/main.js?v=20261114_fix5"></script>
+  <script type="module" src="js/main.js?v=20261115_smart6"></script>
 </body>
 
 </html>

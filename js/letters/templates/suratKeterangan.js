@@ -15,8 +15,8 @@ export const suratKeteranganTemplate = {
       name: 'nomorSurat',
       label: 'Nomor Surat',
       type: 'text',
-      placeholder: 'Contoh: 421.3 / 085 / SMKITA / XI / 2026',
-      defaultValue: '421.3 / 085 / SMKITA / XI / 2026',
+      placeholder: 'Contoh: 421.3/001/KET.SMKITA/XI/2026',
+      defaultValue: '421.3/001/KET.SMKITA/XI/2026',
       required: true
     },
     {

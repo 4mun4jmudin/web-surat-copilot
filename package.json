@@ -4,6 +4,7 @@
   "description": "Sistem pembuat dan pengedit dokumen Word (.docx) berbasis AI",
   "type": "module",
   "scripts": {
+    "build": "node scripts/build-netlify.mjs",
     "test": "node --test tests/*.test.js"
   },
   "devDependencies": {

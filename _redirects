@@ -1,0 +1,10 @@
+/API/*           /404.html  404!
+/tests/*         /404.html  404!
+/scripts/*       /404.html  404!
+/functions/*     /404.html  404!
+/node_modules/*  /404.html  404!
+/API             /404.html  404!
+/tests           /404.html  404!
+/scripts         /404.html  404!
+/functions       /404.html  404!
+/node_modules    /404.html  404!

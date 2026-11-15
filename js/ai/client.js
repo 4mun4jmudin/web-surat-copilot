@@ -7,18 +7,20 @@
  * 4. Auto-Fallback Antar-Kunci di Gudang API saat seluruh model pada satu kunci habis kuota.
  */
 
-import { store } from '../state.js';
-import { POLISHER_SYSTEM_PROMPT, buildPolisherUserPrompt } from './prompts.js';
+import { store, getBuiltinFallbackConfigs, getBuiltinSystemKey } from '../state.js';
+import { POLISHER_SYSTEM_PROMPT, buildPolisherUserPrompt, EDITOR_SYSTEM_PROMPT, buildEditorUserPrompt } from './prompts.js';
 import { formatSmartNomorSurat } from '../letters/numbering.js';
 
 // Proxy default Cloudflare Functions (produksi)
 const DEFAULT_PROXY_ENDPOINT = '/api/ai';
 
 // Daftar prioritas model Google Gemini yang stabil (GA) pada Free Tier (Sesuai AI Studio Rate Limits)
-// Prioritaskan model Flash-Lite yang berkecepatan tinggi (15 RPM, tanpa latency thinking) dibanding Flash standar (5 RPM)
+// Prioritaskan model Flash-Lite yang berkecepatan tinggi (15 RPM) dibanding Flash standar (5 RPM)
 export const STABLE_GEMINI_CANDIDATES = [
   'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-flash-latest',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
   'gemini-3.8-flash'
@@ -324,20 +326,24 @@ export async function executeAiRequest({
       ...STABLE_GEMINI_CANDIDATES.filter(m => m !== initialModel)
     ];
 
-    // Payload dengan penonaktifan thinking budget agar instan & tidak lemot
-    const payload = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
+    const buildGeminiPayload = (targetModel) => {
+      const generationConfig = {
         temperature: 0.2,
-        responseMimeType: 'application/json',
-        thinkingConfig: {
-          thinkingBudget: 0
-        }
+        responseMimeType: 'application/json'
+      };
+      // thinkingBudget hanya didukung seri Gemini 2.5; seri 3.5+ / -latest menolak argumen ini (400 INVALID_ARGUMENT)
+      if (String(targetModel).startsWith('gemini-2.5')) {
+        generationConfig.thinkingConfig = { thinkingBudget: 0 };
       }
+      const nextPayload = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig
+      };
+      if (systemPrompt) {
+        nextPayload.systemInstruction = { parts: [{ text: systemPrompt }] };
+      }
+      return nextPayload;
     };
-    if (systemPrompt) {
-      payload.systemInstruction = { parts: [{ text: systemPrompt }] };
-    }
 
     let lastGeminiError = null;
 
@@ -355,6 +361,7 @@ export async function executeAiRequest({
       }
 
       try {
+        const payload = buildGeminiPayload(targetModel);
         const endpoint = `${baseUrl}/models/${targetModel}:${stream ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${apiKey}`;
         let res = await fetch(endpoint, {
           method: 'POST',
@@ -556,24 +563,41 @@ export async function executeAiRequest({
  */
 export async function callAiApi({ prompt, systemPrompt, stream = false, onChunk, signal, preferredApiId }) {
   const vault = store.getApiVault();
-  
-  let candidateConfigs = [];
+  const candidateConfigs = [];
+  const seenKeys = new Set();
+
+  const resolveConfig = (item) => {
+    if (!item) return null;
+    const rawKey = (item.apiKey || '').trim();
+    const resolvedKey = rawKey || getBuiltinSystemKey(item.id) || '';
+    return resolvedKey === rawKey ? item : { ...item, apiKey: resolvedKey };
+  };
+
+  const pushIfUsable = (item) => {
+    const resolved = resolveConfig(item);
+    if (!resolved) return;
+    const isOllama = (resolved.provider || '').toLowerCase() === 'ollama';
+    if (!resolved.apiKey && !isOllama) return;
+    const dedupeKey = `${resolved.id || ''}|${resolved.provider || ''}|${resolved.apiKey || ''}`;
+    if (seenKeys.has(dedupeKey)) return;
+    seenKeys.add(dedupeKey);
+    candidateConfigs.push(resolved);
+  };
 
   if (preferredApiId) {
-    const pref = vault.find(v => v.id === preferredApiId);
-    if (pref) candidateConfigs.push(pref);
+    pushIfUsable(vault.find(v => v.id === preferredApiId));
   }
 
-  const active = store.getActiveApi();
-  if (active && !candidateConfigs.some(c => c.id === active.id)) {
-    candidateConfigs.push(active);
-  }
+  pushIfUsable(store.getActiveApi());
 
   // Tambahkan cadangan lain di gudang yang memiliki apiKey
   for (const item of vault) {
-    if (!candidateConfigs.some(c => c.id === item.id) && item.apiKey) {
-      candidateConfigs.push(item);
-    }
+    pushIfUsable(item);
+  }
+
+  // Fallback otomatis ke API bawaan sistem jika pengguna belum mengatur atau menghapus kunci
+  for (const builtinCfg of getBuiltinFallbackConfigs()) {
+    pushIfUsable(builtinCfg);
   }
 
   if (candidateConfigs.length === 0) {
@@ -824,4 +848,42 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
   });
 
   return docModel;
+}
+
+/**
+ * Mengedit, menambahkan data, atau memperbaiki kata/kalimat pada dokumen yang sedang terbuka di lembar kerja
+ * berdasarkan instruksi prompt pengguna (bukan membuat dari awal).
+ * @param {object} currentSnapshot Snapshot isi kanvas saat ini
+ * @param {string} userInstruction Instruksi penambahan/perbaikan dari pengguna
+ * @param {object} [options]
+ * @returns {Promise<object>} Hasil edit JSON terstruktur
+ */
+export async function editDocumentWithAi(currentSnapshot, userInstruction, options = {}) {
+  const school = options.schoolProfile || store.getSchoolProfile();
+  const dateStr = options.dateStr || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  const userPrompt = buildEditorUserPrompt({
+    currentSnapshot,
+    userInstruction,
+    schoolName: school.schoolName,
+    principalName: school.principalName,
+    dateStr
+  });
+
+  const rawJson = await callAiApi({
+    prompt: userPrompt,
+    systemPrompt: EDITOR_SYSTEM_PROMPT,
+    preferredApiId: options.preferredApiId,
+    signal: options.signal
+  });
+
+  const cleaned = cleanJsonOutput(rawJson);
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    throw new Error('AI merespons tetapi format JSON hasil edit tidak valid: ' + err.message);
+  }
+
+  return parsed;
 }

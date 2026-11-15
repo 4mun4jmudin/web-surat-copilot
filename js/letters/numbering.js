@@ -118,12 +118,33 @@ export function detectLetterTypeCode(text = '') {
 }
 
 /**
+ * Menyusun nomor surat berurutan resmi sekolah
+ * Format baku: "{prefix}/{urut}/{kodeJenis}.{schoolCode}/{bulanRomawi}/{tahun}"
+ */
+export function buildOrderedNomorSurat({
+  typeCode = 'KET',
+  sequenceNumber = 1,
+  schoolCode = 'SMKITA',
+  date = new Date()
+} = {}) {
+  const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
+  const code = String(typeCode || 'KET').toUpperCase();
+  const prefix = LETTER_TYPE_CODES[code]?.prefix || '421';
+  const urut = formatSequenceNumber(Math.max(1, Number(sequenceNumber) || 1), 3);
+  const romanMonth = toRomanMonth(d.getMonth() + 1);
+  const year = d.getFullYear().toString();
+  return `${prefix}/${urut}/${code}.${schoolCode}/${romanMonth}/${year}`;
+}
+
+/**
  * Memformat atau menormalisasi nomor surat agar selalu menyertakan kode jenis surat yang tepat
- * Contoh hasil: "050/UND.SMKITA/XI/2026", "050/TU.SMKITA/XI/2026", "050/KEP.SMKITA/XI/2026"
+ * dan mengikuti nomor urut berurutan bila tersedia.
+ * Contoh hasil: "005/001/UND.SMKITA/XI/2026", "421.3/001/KET.SMKITA/XI/2026"
  * @param {object} params
  * @param {string} [params.rawNomor] Nomor surat dari input / AI
  * @param {string} [params.contextText] Teks judul / prompt / perihal untuk deteksi otomatis kode
  * @param {string} [params.forcedTypeCode] Kode jenis surat spesifik bila dipilih langsung (mis. 'UND', 'TU', 'KEP')
+ * @param {number|null} [params.sequenceNumber] Nomor urut resmi berikutnya (jika diisi, angka urut disamakan)
  * @param {string} [params.schoolCode='SMKITA'] Kode sekolah baku
  * @param {Date} [params.date]
  * @returns {string} Nomor surat lengkap (tanpa awalan "Nomor: ")
@@ -132,43 +153,49 @@ export function formatSmartNomorSurat({
   rawNomor = '',
   contextText = '',
   forcedTypeCode = '',
+  sequenceNumber = null,
   schoolCode = 'SMKITA',
   date = new Date()
 } = {}) {
   const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
-  const romanMonth = toRomanMonth(d.getMonth() + 1);
-  const year = d.getFullYear().toString();
   const typeCode = (forcedTypeCode || detectLetterTypeCode(`${contextText} ${rawNomor}`)).toUpperCase();
+  const clean = String(rawNomor || '').trim().replace(/^(nomor|no\.?)\s*:\s*/i, '').trim();
 
-  let clean = String(rawNomor || '').trim().replace(/^(nomor|no\.?)\s*:\s*/i, '').trim();
+  // Jika sequenceNumber diberikan (mode otomatis berurutan), langsung gunakan format standar tersusun
+  if (sequenceNumber !== null && sequenceNumber !== undefined && !isNaN(Number(sequenceNumber))) {
+    return buildOrderedNomorSurat({
+      typeCode,
+      sequenceNumber: Number(sequenceNumber),
+      schoolCode,
+      date: d
+    });
+  }
 
-  // Jika kosong atau masih placeholder, rakit nomor surat baru sesuai kode jenis
+  // Jika kosong atau masih placeholder, rakit nomor surat baru sesuai kode jenis mulai 001
   if (!clean || clean === '-' || /\[.*\]/.test(clean)) {
-    return `050/${typeCode}.${schoolCode}/${romanMonth}/${year}`;
+    return buildOrderedNomorSurat({ typeCode, sequenceNumber: 1, schoolCode, date: d });
   }
 
   // Normalisasi variasi kode sekolah lama (SMKIT, SMKS.IT-AH, SMK-IT, dll) menjadi SMKITA
-  clean = clean.replace(/\b(SMKS\.?IT-?AH|SMK-?IT|SMKIT)\b/gi, schoolCode);
+  const normalizedSchool = clean.replace(/\b(SMKS\.?IT-?AH|SMK-?IT|SMKIT)\b/gi, schoolCode);
 
   // Cek apakah sudah memiliki format {KODE}.{SCHOOL} atau {KODE}/{SCHOOL}
   const knownCodesPattern = Object.keys(LETTER_TYPE_CODES).join('|');
   const hasTypeDotSchool = new RegExp(`\\b(${knownCodesPattern})[\\.\\/-]${schoolCode}\\b`, 'i');
 
-  if (hasTypeDotSchool.test(clean)) {
+  if (hasTypeDotSchool.test(normalizedSchool)) {
     if (forcedTypeCode) {
-      // Ganti kode jenis lama dengan forcedTypeCode
-      return clean.replace(hasTypeDotSchool, `${typeCode}.${schoolCode}`);
+      return normalizedSchool.replace(hasTypeDotSchool, `${typeCode}.${schoolCode}`);
     }
-    // Pastikan kode jenis & sekolah huruf besar rapi (misal und.SMKITA -> UND.SMKITA)
-    return clean.replace(hasTypeDotSchool, (m, c) => `${c.toUpperCase()}.${schoolCode}`);
+    return normalizedSchool.replace(hasTypeDotSchool, (m, c) => `${c.toUpperCase()}.${schoolCode}`);
   }
 
-  // Jika ada SMKITA tapi belum ada kode jenis di depannya (misal: "421.3 / 085 / SMKITA / XI / 2026" atau "050/SMKITA/XI/2026")
-  if (new RegExp(`\\b${schoolCode}\\b`, 'i').test(clean)) {
-    return clean.replace(new RegExp(`\\b${schoolCode}\\b`, 'i'), `${typeCode}.${schoolCode}`);
+  // Jika ada SMKITA tapi belum ada kode jenis di depannya
+  if (new RegExp(`\\b${schoolCode}\\b`, 'i').test(normalizedSchool)) {
+    return normalizedSchool.replace(new RegExp(`\\b${schoolCode}\\b`, 'i'), `${typeCode}.${schoolCode}`);
   }
 
-  return `050/${typeCode}.${schoolCode}/${romanMonth}/${year}`;
+  return buildOrderedNomorSurat({ typeCode, sequenceNumber: 1, schoolCode, date: d });
 }
 
 /**

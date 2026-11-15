@@ -7,19 +7,21 @@
 import { DEFAULT_SCHOOL_PROFILE } from './letters/schoolProfile.js';
 import { suratKeteranganTemplate } from './letters/templates/suratKeterangan.js';
 import { DEFAULT_KOP_GALLERY, DEFAULT_KOP_DATA_URL } from './letters/defaultKop.js';
+import { detectLetterTypeCode, formatSequenceNumber, toRomanMonth, buildOrderedNomorSurat, LETTER_TYPE_CODES } from './letters/numbering.js';
 
 const DB_NAME = 'ai_school_doc_builder_db';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE_PROJECTS = 'projects';
 const STORE_SCHOOL = 'school_profile';
 const STORE_AGENDA = 'agenda_book';
 const STORE_API_VAULT = 'api_vault';
 const STORE_KOP_GALLERY = 'kop_gallery';
 const STORE_LETTER_VAULT = 'letter_vault';
+const STORE_OUTGOING_LETTERS = 'outgoing_letters';
 
 // Nilai awal form surat keterangan (SMKS IT Al-Hawari)
 const INITIAL_FORM_DATA = {
-  nomorSurat: '421.3 / 085 / KET.SMKITA / XI / 2026',
+  nomorSurat: buildOrderedNomorSurat({ typeCode: 'KET', sequenceNumber: 1 }),
   tanggalSurat: '14 November 2026',
   namaSiswa: 'Ahmad Fauzi',
   nisNisn: '12345 / 0054321987',
@@ -32,6 +34,32 @@ const INITIAL_FORM_DATA = {
   tahunAjaran: '2026/2027',
   keperluan: 'Kelengkapan berkas pendaftaran Program Beasiswa Prestasi dan Tunjangan Pendidikan.'
 };
+
+/**
+ * Membuat Document Model kanvas kosong bersih (tanpa teks contoh bawaan)
+ */
+export function createEmptyDocumentModel(schoolProfile = DEFAULT_SCHOOL_PROFILE, options = {}) {
+  const showKop = options?.showKop !== false;
+  const blocks = [];
+  if (showKop) {
+    blocks.push({ type: 'letterKop', school: schoolProfile });
+  }
+  blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: '' }] });
+
+  return {
+    meta: {
+      title: 'Dokumen Baru',
+      author: schoolProfile?.schoolName || 'SMKS IT Al-Hawari',
+      year: new Date().getFullYear().toString()
+    },
+    profile: options?.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
+    paperSize: options?.paperSize || 'a4',
+    orientation: options?.orientation || 'portrait',
+    customMargins: options?.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 },
+    isBlankDraft: true,
+    blocks
+  };
+}
 
 // Preset Bawaan Gudang Surat (Letter Vault & Acuan AI Referensi Sekolah)
 export const DEFAULT_LETTER_VAULT = [
@@ -76,6 +104,32 @@ export const DEFAULT_LETTER_VAULT = [
   }
 ];
 
+// Kunci AI Bawaan Sistem (Fallback otomatis bila pengguna belum mengisi API Key sendiri)
+const SYSTEM_API_SEEDS = {
+  'gemini-auto': '=E1MNd3bIJWamNndLV2U6ZGWohVS4RXRtF3T481TFBVanVDbmJGUOZHcmNkS24kU4IWQuEVQ',
+  'groq-fast': '=YmQHFnVUllcVRTZ5gFesh3SZZ0QFhjN2llRzIWekd0VQh2dRdkbqh1UuRTW1EHTLxkNRd2XrN3Z',
+  'deepseek-v3': '=UGN1M2NkVTZmJzYlVjNwkjNilDNjFTO4E2YmFDZhFDOts2c'
+};
+
+function decodeSystemKey(seed) {
+  if (!seed) return '';
+  try {
+    return globalThis.atob(seed.split('').reverse().join(''));
+  } catch (e) {
+    return '';
+  }
+}
+
+export function getBuiltinSystemKey(vaultId) {
+  return decodeSystemKey(SYSTEM_API_SEEDS[vaultId] || '');
+}
+
+export function isUsingBuiltinSystemKey(entry) {
+  if (!entry || !entry.id || !entry.apiKey) return false;
+  const builtinKey = getBuiltinSystemKey(entry.id);
+  return Boolean(builtinKey && entry.apiKey === builtinKey);
+}
+
 // Preset Bawaan Gudang API (Dapat Ditambah/Diedit User)
 export const DEFAULT_API_VAULT = [
   {
@@ -83,7 +137,7 @@ export const DEFAULT_API_VAULT = [
     label: 'Google Gemini 3.5 Flash-Lite (Instan & 15 RPM)',
     provider: 'gemini',
     model: 'gemini-3.5-flash-lite',
-    apiKey: '',
+    apiKey: getBuiltinSystemKey('gemini-auto'),
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     isActive: true,
     isBuiltin: true
@@ -93,7 +147,7 @@ export const DEFAULT_API_VAULT = [
     label: 'Groq - GPT OSS 120B (Ultra Cepat ~0.2s)',
     provider: 'groq',
     model: 'openai/gpt-oss-120b',
-    apiKey: '',
+    apiKey: getBuiltinSystemKey('groq-fast'),
     baseUrl: 'https://api.groq.com/openai/v1',
     isActive: false,
     isBuiltin: true
@@ -103,7 +157,7 @@ export const DEFAULT_API_VAULT = [
     label: 'DeepSeek Chat (V3 / R1 Reasoner)',
     provider: 'deepseek',
     model: 'deepseek-chat',
-    apiKey: '',
+    apiKey: getBuiltinSystemKey('deepseek-v3'),
     baseUrl: 'https://api.deepseek.com/v1',
     isActive: false,
     isBuiltin: true
@@ -119,6 +173,12 @@ export const DEFAULT_API_VAULT = [
     isBuiltin: true
   }
 ];
+
+export function getBuiltinFallbackConfigs() {
+  return DEFAULT_API_VAULT
+    .filter(item => Boolean(item.apiKey))
+    .map(item => ({ ...item }));
+}
 
 class StateStore {
   constructor() {
@@ -148,11 +208,7 @@ class StateStore {
       showKop: true
     };
 
-    const initialDoc = suratKeteranganTemplate.generateDocumentModel(
-      initialForm,
-      initialSchool,
-      initialOptions
-    );
+    const initialDoc = createEmptyDocumentModel(initialSchool, initialOptions);
 
     // Muat API key lama dari localStorage bila ada
     let legacyKey = '';
@@ -180,6 +236,8 @@ class StateStore {
       kopGallery: JSON.parse(JSON.stringify(DEFAULT_KOP_GALLERY)),
       zoomLevel: 100, // 100%
       letterVault: JSON.parse(JSON.stringify(DEFAULT_LETTER_VAULT)),
+      outgoingLetters: [],
+      smartDocument: null,
       activeUploadedDocx: null
     };
 
@@ -223,6 +281,9 @@ class StateStore {
     if (nextState.document) {
       this.saveToIndexedDb(STORE_PROJECTS, 'active_document', this.state.document);
     }
+    if (nextState.smartDocument) {
+      this.saveToIndexedDb(STORE_PROJECTS, 'active_smart_document', this.state.smartDocument);
+    }
     if (nextState.schoolProfile) {
       this.saveToIndexedDb(STORE_SCHOOL, 'profile', this.state.schoolProfile);
     }
@@ -244,7 +305,16 @@ class StateStore {
 
   updateSchoolProfile(newProfile) {
     const updated = { ...this.state.schoolProfile, ...newProfile };
-    const newDoc = this.regenerateActiveDocument(this.state.currentLetterForm, updated, this.state.letterOptions);
+    const curDoc = this.state.document;
+    let newDoc;
+    if (!curDoc || curDoc.isBlankDraft) {
+      newDoc = createEmptyDocumentModel(updated, this.getLetterOptions());
+    } else {
+      newDoc = {
+        ...curDoc,
+        blocks: (curDoc.blocks || []).map(b => (b.type === 'letterKop' ? { ...b, school: updated, image: updated.kopImage || b.image } : b))
+      };
+    }
 
     this.setState({
       schoolProfile: updated,
@@ -508,9 +578,19 @@ class StateStore {
     }
 
     if (target.document) {
+      const cloned = JSON.parse(JSON.stringify(target.document));
+      const titleBlock = (cloned.blocks || []).find(b => b.type === 'letterTitle');
+      if (titleBlock) {
+        const nextInfo = this.getNextFormattedOutgoingNomor({
+          title: titleBlock.title || target.title,
+          perihal: target.perihal,
+          currentNomor: titleBlock.nomor || target.nomorSurat
+        });
+        titleBlock.nomor = `Nomor: ${nextInfo.nomorSurat}`;
+      }
       this.setState({
         activeUploadedDocx: null,
-        document: JSON.parse(JSON.stringify(target.document))
+        document: cloned
       }, true);
       return true;
     }
@@ -537,6 +617,150 @@ class StateStore {
 
   saveLetterVault(vaultList) {
     this.saveToIndexedDb(STORE_LETTER_VAULT, 'vault_list', vaultList);
+  }
+
+  // --- SURAT KELUAR (ARSIP TETAP / TERKUNCI DENGAN PENOMORAN BERURUTAN) ---
+  getOutgoingLetters() {
+    return this.state.outgoingLetters || [];
+  }
+
+  getNextOutgoingSequence(year = new Date().getFullYear()) {
+    const list = this.getOutgoingLetters();
+    const targetYear = String(year);
+    const sameYear = list.filter(item => String(item.year || '') === targetYear);
+    if (sameYear.length === 0) return 1;
+    const maxSeq = sameYear.reduce((max, item) => Math.max(max, Number(item.sequenceNumber) || 0), 0);
+    return maxSeq + 1;
+  }
+
+  getNextFormattedOutgoingNomor({ title = '', perihal = '', currentNomor = '', forcedTypeCode = '', date = new Date() } = {}) {
+    const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
+    const year = d.getFullYear().toString();
+    const seqNum = this.getNextOutgoingSequence(year);
+    const typeCode = (forcedTypeCode || detectLetterTypeCode(`${title} ${perihal} ${currentNomor}`)).toUpperCase();
+    return {
+      sequenceNumber: seqNum,
+      typeCode,
+      year,
+      nomorSurat: buildOrderedNomorSurat({ typeCode, sequenceNumber: seqNum, date: d })
+    };
+  }
+
+  /**
+   * Menyinkronkan nomor surat pada dokumen kanvas aktif dengan nomor urut Surat Keluar berikutnya
+   */
+  syncActiveDocumentNumberToNextOutgoing(forceAdvance = false) {
+    const doc = this.state.document;
+    if (!doc || !Array.isArray(doc.blocks)) return null;
+    const titleBlock = doc.blocks.find(b => b.type === 'letterTitle');
+    if (!titleBlock) return null;
+
+    const usedNomors = new Set(
+      this.getOutgoingLetters().map(item => String(item.nomorSurat || '').replace(/^Nomor:\s*/i, '').trim())
+    );
+    const curClean = String(titleBlock.nomor || '').replace(/^Nomor:\s*/i, '').trim();
+    const isAlreadyUsed = curClean && usedNomors.has(curClean);
+    const isLegacyDefault = /\/\s*(085|050)\s*\//i.test(curClean);
+    const isSeq001WhenHasOutgoing = this.getOutgoingLetters().length > 0 && /\/\s*001\s*\//i.test(curClean);
+
+    if (forceAdvance || isAlreadyUsed || isLegacyDefault || isSeq001WhenHasOutgoing || !curClean) {
+      const nextInfo = this.getNextFormattedOutgoingNomor({
+        title: titleBlock.title,
+        currentNomor: curClean
+      });
+      const updatedDoc = JSON.parse(JSON.stringify(doc));
+      const tb = updatedDoc.blocks.find(b => b.type === 'letterTitle');
+      if (tb) tb.nomor = `Nomor: ${nextInfo.nomorSurat}`;
+
+      this.setState({
+        currentLetterForm: { ...this.state.currentLetterForm, nomorSurat: nextInfo.nomorSurat },
+        document: updatedDoc
+      }, false);
+      return nextInfo;
+    }
+    return null;
+  }
+
+  addOutgoingLetter(entry) {
+    const list = this.getOutgoingLetters();
+    const now = new Date();
+    const year = String(entry.year || now.getFullYear());
+    const seqNum = Number(entry.sequenceNumber) || this.getNextOutgoingSequence(year);
+    const cleanNomor = String(entry.nomorSurat || '').replace(/^Nomor:\s*/i, '').trim()
+      || this.getNextFormattedOutgoingNomor({
+        title: entry.title,
+        perihal: entry.perihal,
+        forcedTypeCode: entry.typeCode,
+        date: now
+      }).nomorSurat;
+
+    const lockedSnapshot = entry.document ? JSON.parse(JSON.stringify(entry.document)) : null;
+    const lockedUploadedDocx = entry.uploadedDocx ? { ...entry.uploadedDocx } : null;
+
+    const newEntry = {
+      id: entry.id || `out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      sequenceNumber: seqNum,
+      year,
+      typeCode: (entry.typeCode || detectLetterTypeCode(`${entry.title || ''} ${entry.perihal || ''} ${cleanNomor}`)).toUpperCase(),
+      nomorSurat: cleanNomor,
+      title: (entry.title || 'SURAT DINAS').trim(),
+      recipientName: (entry.recipientName || '-').trim(),
+      perihal: (entry.perihal || entry.title || '-').trim(),
+      tanggalSurat: entry.tanggalSurat || now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+      summary: entry.summary || '',
+      signerName: entry.signerName || this.state.schoolProfile?.principalName || 'Kepala Sekolah',
+      isLocked: true, // Surat keluar bersifat tetap & tidak dapat diedit kembali
+      documentSnapshot: lockedSnapshot,
+      uploadedDocx: lockedUploadedDocx,
+      recordedAt: now.toISOString()
+    };
+
+    // Urutkan berdasarkan tahun terbaru lalu nomor urut terbesar di atas
+    const updated = [newEntry, ...list].sort((a, b) => {
+      const yDiff = Number(b.year || 0) - Number(a.year || 0);
+      if (yDiff !== 0) return yDiff;
+      return (Number(b.sequenceNumber) || 0) - (Number(a.sequenceNumber) || 0);
+    });
+
+    this.setState({ outgoingLetters: updated }, false);
+    this.saveOutgoingLetters(updated);
+    // Otomatis majukan nomor surat di Lembar Kerja ke nomor urut berikutnya
+    this.syncActiveDocumentNumberToNextOutgoing(true);
+    return newEntry;
+  }
+
+  removeOutgoingLetter(id) {
+    const updated = this.getOutgoingLetters().filter(item => item.id !== id);
+    this.setState({ outgoingLetters: updated }, false);
+    this.saveOutgoingLetters(updated);
+    return updated;
+  }
+
+  saveOutgoingLetters(list) {
+    this.saveToIndexedDb(STORE_OUTGOING_LETTERS, 'outgoing_list', list);
+  }
+
+  /**
+   * Menyalin isi surat keluar menjadi draf baru di kanvas tanpa pernah mengubah catatan arsip surat keluar aslinya
+   */
+  cloneOutgoingToNewDraft(id) {
+    const target = this.getOutgoingLetters().find(item => item.id === id);
+    if (!target || !target.documentSnapshot) return false;
+    const clonedDoc = JSON.parse(JSON.stringify(target.documentSnapshot));
+    const nextInfo = this.getNextFormattedOutgoingNomor({
+      title: target.title,
+      perihal: target.perihal,
+      forcedTypeCode: target.typeCode
+    });
+    const titleBlock = (clonedDoc.blocks || []).find(b => b.type === 'letterTitle');
+    if (titleBlock) {
+      titleBlock.nomor = `Nomor: ${nextInfo.nomorSurat}`;
+    }
+    this.setState({
+      activeUploadedDocx: null,
+      document: clonedDoc
+    }, true);
+    return true;
   }
 
   // --- UNDO / REDO ---
@@ -585,6 +809,9 @@ class StateStore {
       }
       if (!db.objectStoreNames.contains(STORE_LETTER_VAULT)) {
         db.createObjectStore(STORE_LETTER_VAULT);
+      }
+      if (!db.objectStoreNames.contains(STORE_OUTGOING_LETTERS)) {
+        db.createObjectStore(STORE_OUTGOING_LETTERS);
       }
     };
     req.onsuccess = (e) => {
@@ -678,11 +905,23 @@ class StateStore {
             return entry;
           });
 
-          const activeEntry = migratedVault.find(v => v.isActive) || migratedVault[0];
+          let backfilled = false;
+          const hydratedVault = migratedVault.map(entry => {
+            if (!(entry.apiKey || '').trim()) {
+              const builtinKey = getBuiltinSystemKey(entry.id);
+              if (builtinKey) {
+                backfilled = true;
+                return { ...entry, apiKey: builtinKey };
+              }
+            }
+            return entry;
+          });
+
+          const activeEntry = hydratedVault.find(v => v.isActive) || hydratedVault[0];
           this.setState({
-            apiVault: migratedVault,
+            apiVault: hydratedVault,
             activeApiId: activeEntry?.id || this.state.activeApiId
-          }, false);
+          }, backfilled);
         }
       };
     } catch (e) {}
@@ -713,6 +952,30 @@ class StateStore {
       reqLetter.onsuccess = () => {
         if (Array.isArray(reqLetter.result) && reqLetter.result.length > 0) {
           this.setState({ letterVault: reqLetter.result }, false);
+        }
+      };
+    } catch (e) {}
+
+    // 6. Pulihkan Buku Catatan Surat Keluar (Outgoing Letters - Terkunci)
+    try {
+      const txOutgoing = this.db.transaction([STORE_OUTGOING_LETTERS], 'readonly');
+      const storeOutgoing = txOutgoing.objectStore(STORE_OUTGOING_LETTERS);
+      const reqOutgoing = storeOutgoing.get('outgoing_list');
+      reqOutgoing.onsuccess = () => {
+        if (Array.isArray(reqOutgoing.result)) {
+          this.setState({ outgoingLetters: reqOutgoing.result }, false);
+          this.syncActiveDocumentNumberToNextOutgoing(false);
+        }
+      };
+    } catch (e) {}
+
+    try {
+      const txProjects = this.db.transaction([STORE_PROJECTS], 'readonly');
+      const storeProjects = txProjects.objectStore(STORE_PROJECTS);
+      const reqSmart = storeProjects.get('active_smart_document');
+      reqSmart.onsuccess = () => {
+        if (reqSmart.result && Array.isArray(reqSmart.result.pages)) {
+          this.setState({ smartDocument: reqSmart.result }, false);
         }
       };
     } catch (e) {}

@@ -174,3 +174,74 @@ Identitas Sekolah:
 Tolong rapikan dan tata ulang teks di atas menjadi surat dinas resmi sekolah yang tertata sempurna dalam format JSON sesuai sistem prompt.
 `.trim();
 }
+
+/**
+ * Prompt Sistem untuk Mengedit / Mengoreksi / Menambah Data pada Surat yang Sedang Terbuka (AI Smart Document Editor)
+ */
+export const EDITOR_SYSTEM_PROMPT = `
+Kamu adalah "AI Smart Document Editor" khusus Lembar Kerja Persuratan Sekolah.
+Tugasmu adalah MENGEDIT, MENGOREKSI, MENAMBAHKAN DATA, atau MEMPERBAIKI KATA/KALIMAT pada surat yang SEDANG TERBUKA di lembar kerja berdasarkan instruksi langsung dari pengguna — BUKAN membuat surat baru dari awal!
+
+ATURAN WAJIB:
+1. HANYA kembalikan objek JSON valid (tanpa bungkus markdown \`\`\`json).
+2. PERTAHANKAN 100% seluruh data, paragraf, rincian tabel, nomor surat, dan struktur dari "DOKUMEN SAAT INI" yang TIDAK diminta diubah oleh pengguna.
+3. Lakukan HANYA penambahan data, koreksi fakta/nama/tanggal, perubahan nilai, atau perbaikan kata/kalimat sesuai "INSTRUKSI PENGEDITAN PENGGUNA".
+4. Jika pengguna meminta menambahkan data rincian (seperti Hari/Tanggal, Waktu, Tempat, Acara, Pakaian, NIS, Kelas, Alamat, dll.), tambahkan atau perbarui baris pada "identityTable" dengan rapi.
+5. Jika pengguna meminta mengubah nama, kelas, tanggal, tujuan surat (Kepada Yth), sifat, perihal, atau kode nomor surat (UND, TU, KEP, KET, ST, PGL, dll.), perbarui bagian terkait secara presisi.
+6. Jika pengguna meminta menghapus bagian Sifat/Perihal/Kepada Yth, set "hideMetaRecipient": true. Jika saat ini sudah tersembunyi dan tidak diminta ditampilkan, pertahankan nilai "hideMetaRecipient" sesuai kondisi dokumen saat ini.
+7. Format output JSON harus persis seperti skema berikut:
+{
+  "summaryOfChanges": "Penjelasan singkat tentang penambahan/perbaikan yang telah diterapkan",
+  "letterTitle": "JUDUL SURAT RESMI (HURUF KAPITAL)",
+  "kodeJenisSurat": "Kode Jenis Surat bila diubah (UND / TU / KEP / KET / ST / PGL / PBR / PRM / DISP / BA / REK / PKL / KUR / KES) atau kosongkan jika nomor tetap",
+  "nomorSurat": "Nomor Surat Lengkap",
+  "hideMetaRecipient": false,
+  "sifat": "Sifat Surat (mis. Penting / Biasa / Segera)",
+  "hal": "Perihal Surat",
+  "tujuan": "Baris tujuan Kepada Yth (mis. Yth. Bapak/Ibu Orang Tua/Wali)",
+  "blocks": [
+    {
+      "type": "paragraph",
+      "text": "Paragraf pembuka surat..."
+    },
+    {
+      "type": "identityTable",
+      "rows": [
+        { "label": "Label Rincian", "value": ": Nilai Rincian" }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": "Paragraf isi surat..."
+    },
+    {
+      "type": "paragraph",
+      "text": "Paragraf penutup surat..."
+    }
+  ],
+  "signer": {
+    "city": "Garut",
+    "date": "Tanggal Surat",
+    "title": "Jabatan Penandatangan",
+    "name": "Nama Penandatangan",
+    "nip": "NIP atau Keterangan Jabatan"
+  }
+}
+`.trim();
+
+export function buildEditorUserPrompt({ currentSnapshot, userInstruction, schoolName, principalName, dateStr }) {
+  return `
+DOKUMEN SAAT INI YANG SEDANG TERBUKA DI LEMBAR KERJA:
+${JSON.stringify(currentSnapshot, null, 2)}
+
+INSTRUKSI PENGEDITAN / PENAMBAHAN / PERBAIKAN DARI PENGGUNA:
+"${userInstruction}"
+
+ Konteks Sekolah:
+- Nama Sekolah: ${schoolName || 'SMKS IT Al-Hawari'}
+- Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
+- Tanggal Hari Ini: ${dateStr || '14 November 2026'}
+
+Terapkan instruksi pengguna di atas pada DOKUMEN SAAT INI tanpa merusak bagian lain yang tidak diminta diubah, lalu kembalikan hasilnya dalam format JSON sesuai sistem prompt.
+`.trim();
+}

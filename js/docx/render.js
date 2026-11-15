@@ -186,7 +186,7 @@ export function renderDocumentBody(doc, profile, hasKopImage = false) {
               <w:pStyle w:val="Normal"/>
               ${indentVal ? `<w:ind w:firstLine="${indentVal}"/>` : ''}
               <w:spacing w:line="${lineSpacing}" w:lineRule="auto" w:after="${spacingAfter}"/>
-              <w:jc w:val="${profile.typography?.alignment || 'both'}"/>
+              <w:jc w:val="${block.alignment || profile.typography?.alignment || 'both'}"/>
             </w:pPr>
             ${renderRuns(runs)}
           </w:p>

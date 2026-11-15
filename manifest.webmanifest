@@ -1,0 +1,66 @@
+{
+  "id": "./",
+  "name": "AI DocBuilder — Persuratan SMKS IT Al-Hawari",
+  "short_name": "AI DocBuilder",
+  "description": "Aplikasi pembuat surat dinas sekolah, arsip surat keluar, gudang template, dan editor Microsoft Word (.docx) dengan AI Copilot.",
+  "lang": "id",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "theme_color": "#156c3b",
+  "background_color": "#f3f8f5",
+  "categories": ["productivity", "education", "utilities"],
+  "icons": [
+    {
+      "src": "img/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Lembar Kerja Word",
+      "short_name": "Lembar Kerja",
+      "description": "Buka editor surat Microsoft Word & AI Copilot",
+      "url": "./?tab=canvas",
+      "icons": [{ "src": "img/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Buku Surat Keluar",
+      "short_name": "Surat Keluar",
+      "description": "Lihat arsip surat keluar resmi bernomor urut",
+      "url": "./?tab=outgoing",
+      "icons": [{ "src": "img/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Gudang Surat",
+      "short_name": "Gudang Surat",
+      "description": "Kelola template dan draf surat sekolah",
+      "url": "./?tab=vault",
+      "icons": [{ "src": "img/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Profil & Kop Surat",
+      "short_name": "Profil & Kop",
+      "description": "Atur identitas sekolah dan kop surat resmi",
+      "url": "./?tab=school",
+      "icons": [{ "src": "img/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}

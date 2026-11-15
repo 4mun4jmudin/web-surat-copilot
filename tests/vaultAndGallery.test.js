@@ -13,7 +13,12 @@ import {
   LATEST_GROQ_DEFAULT_MODEL,
   STABLE_GEMINI_CANDIDATES
 } from '../js/ai/client.js';
-import { store } from '../js/state.js';
+import {
+  store,
+  getBuiltinSystemKey,
+  isUsingBuiltinSystemKey,
+  getBuiltinFallbackConfigs
+} from '../js/state.js';
 import { DEFAULT_KOP_GALLERY } from '../js/letters/defaultKop.js';
 
 test('Gudang API: Normalisasi model Gemini untuk mencegah 404 dan model omni limit 0', () => {
@@ -162,4 +167,49 @@ test('Klien AI: Penanganan pembatalan (signal abort) dan optimasi kecepatan Flas
   // Pastikan kandidat Gemini mengutamakan varian Flash Lite (15 RPM instan)
   assert.ok(STABLE_GEMINI_CANDIDATES[0].includes('lite'), 'Kandidat model pertama harus varian lite');
   assert.ok(STABLE_GEMINI_CANDIDATES[1].includes('lite'), 'Kandidat model kedua harus varian lite');
+});
+
+test('Gudang API: Kunci API AI bawaan sistem terpasang otomatis dan menjadi fallback saat pengguna belum mengisi API', async () => {
+  const vault = store.getApiVault();
+  const gemEntry = vault.find(v => v.id === 'gemini-auto');
+  const groqEntry = vault.find(v => v.id === 'groq-fast');
+  const deepseekEntry = vault.find(v => v.id === 'deepseek-v3');
+
+  assert.ok(gemEntry?.apiKey.startsWith('AQ.'), 'Kunci bawaan Gemini harus terpasang otomatis');
+  assert.ok(groqEntry?.apiKey.startsWith('gsk_'), 'Kunci bawaan Groq harus terpasang otomatis');
+  assert.ok(deepseekEntry?.apiKey.startsWith('sk-'), 'Kunci bawaan DeepSeek harus terpasang otomatis');
+
+  assert.equal(isUsingBuiltinSystemKey(gemEntry), true);
+  assert.equal(isUsingBuiltinSystemKey({ id: 'gemini-auto', apiKey: 'AIzaCustomUserKey123' }), false);
+  assert.equal(getBuiltinSystemKey('qwen-openrouter'), '');
+
+  const fallbackConfigs = getBuiltinFallbackConfigs();
+  assert.equal(fallbackConfigs.length, 3);
+  assert.deepEqual(fallbackConfigs.map(c => c.id), ['gemini-auto', 'groq-fast', 'deepseek-v3']);
+
+  // Uji skenario user memilih provider tanpa kunci (Qwen kosong) -> harus otomatis fallback ke API bawaan sistem
+  const { callAiApi } = await import('../js/ai/client.js');
+  const prevActiveId = store.getState().activeApiId;
+  const origFetch = globalThis.fetch;
+  const calledUrls = [];
+
+  try {
+    store.setActiveApi('qwen-openrouter');
+    globalThis.fetch = async (url) => {
+      calledUrls.push(String(url));
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+
+    const res = await callAiApi({ prompt: 'Tes', systemPrompt: 'Sys' });
+    assert.equal(res, '{"ok":true}');
+    assert.ok(
+      calledUrls.some(u => u.includes('generativelanguage.googleapis.com') && u.includes(encodeURIComponent(gemEntry.apiKey).slice(0, 10)) || u.includes(gemEntry.apiKey)),
+      'Harus otomatis menggunakan kunci bawaan sistem saat provider aktif belum memiliki API Key'
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevActiveId) store.setActiveApi(prevActiveId);
+  }
 });

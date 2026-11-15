@@ -4,12 +4,15 @@
 
 import { store } from './state.js';
 import { renderWordCanvas } from './ui/wordCanvas.js';
+import { renderSmartWordCanvas, getActiveSmartDocModel } from './ui/smartWordCanvas.js';
+import { renderOutgoingLettersView } from './ui/outgoingLettersView.js';
 import { renderVaultView } from './ui/vaultView.js';
 import { renderSchoolProfileView } from './ui/schoolProfileView.js';
 import { renderSettingsView } from './ui/settingsView.js';
 import { renderDocx } from './docx/render.js';
 import { downloadFile } from './utils/download.js';
 import { showToast } from './ui/notification.js';
+import { initPwa } from './pwa.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   initApp();
@@ -27,11 +30,10 @@ function initApp() {
       currentTab = targetTab;
 
       navTabs.forEach(t => {
-        t.classList.remove('active', 'btn-primary');
-        t.classList.add('btn-secondary');
+        t.classList.remove('active', 'btn-primary', 'btn-secondary');
       });
-      tab.classList.add('active', 'btn-primary');
-      tab.classList.remove('btn-secondary');
+      tab.classList.add('active');
+      tab.classList.remove('btn-secondary', 'btn-primary');
 
       renderTab(targetTab, mainContainer);
     });
@@ -42,6 +44,12 @@ function initApp() {
     switch (tabName) {
       case 'canvas':
         renderWordCanvas(container);
+        break;
+      case 'smart-canvas':
+        renderSmartWordCanvas(container);
+        break;
+      case 'outgoing':
+        renderOutgoingLettersView(container);
         break;
       case 'vault':
         renderVaultView(container);
@@ -57,12 +65,12 @@ function initApp() {
     }
   }
 
-  // 2. Header Quick Download (Mendukung Dokumen Bawaan & Berkas Impor dengan Preservasi Format)
+  // 2. Header Quick Download (Mendukung Kanvas Word Pro, Dokumen Bawaan & Berkas Impor)
   document.getElementById('header-btn-download').addEventListener('click', async () => {
     const activeDocx = store.getState().activeUploadedDocx;
 
-    // Jika sedang membuka berkas luar (.docx), terapkan perubahan via Non-destructive Patcher
-    if (activeDocx && activeDocx.rawBytes) {
+    // Jika sedang membuka berkas luar (.docx) pada Lembar Kerja standar, terapkan patcher non-destruktif
+    if (currentTab !== 'smart-canvas' && activeDocx && activeDocx.rawBytes) {
       showToast('Menerapkan editan ke berkas asli (preservasi format 100% utuh)...', 'info');
       try {
         const { applyCanvasEditsToDocx } = await import('./docx/patch.js');
@@ -77,8 +85,10 @@ function initApp() {
       }
     }
 
-    // Dokumen standar sistem
-    const docModel = store.getState().document;
+    // Dokumen standar sistem atau Kanvas Word Pro
+    const docModel = currentTab === 'smart-canvas'
+      ? getActiveSmartDocModel()
+      : store.getState().document;
     showToast('Menyusun berkas Word .docx resmi...', 'info');
     try {
       const blob = await renderDocx(docModel, 'blob');
@@ -92,11 +102,26 @@ function initApp() {
     }
   });
 
-  // 3. Header Quick Print
+  // 3. Header Quick Print + Tampilkan Konfirmasi Simpan ke Surat Keluar
   document.getElementById('header-btn-print').addEventListener('click', () => {
+    const postPrintBar = document.getElementById('post-print-outgoing-bar');
+    if (postPrintBar) postPrintBar.classList.remove('hidden');
     window.print();
   });
 
-  // Render awal Lembar Kerja Word
-  renderTab('canvas', mainContainer);
+  // Inisialisasi PWA (Service Worker & Install App Prompt)
+  initPwa();
+
+  // Dukung shortcut PWA (?tab=outgoing|vault|school|settings|canvas)
+  const requestedTab = new URLSearchParams(window.location.search).get('tab');
+  const matchingTabBtn = requestedTab
+    ? document.querySelector(`.nav-tab[data-tab="${CSS.escape(requestedTab)}"]`)
+    : null;
+
+  if (matchingTabBtn) {
+    matchingTabBtn.click();
+  } else {
+    // Render awal Lembar Kerja Word
+    renderTab('canvas', mainContainer);
+  }
 }
