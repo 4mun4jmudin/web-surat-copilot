@@ -579,6 +579,7 @@ class StateStore {
 
     if (target.document) {
       const cloned = JSON.parse(JSON.stringify(target.document));
+      delete cloned.verification;
       const titleBlock = (cloned.blocks || []).find(b => b.type === 'letterTitle');
       if (titleBlock) {
         const nextInfo = this.getNextFormattedOutgoingNomor({
@@ -709,6 +710,23 @@ class StateStore {
       tanggalSurat: entry.tanggalSurat || now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
       summary: entry.summary || '',
       signerName: entry.signerName || this.state.schoolProfile?.principalName || 'Kepala Sekolah',
+      signerRole: entry.signerRole || 'kepala_sekolah',
+      signerTitle: entry.signerTitle || this.state.schoolProfile?.principalTitle || 'Kepala Sekolah',
+      signerNip: entry.signerNip ?? this.state.schoolProfile?.principalNip ?? '-',
+      signerRank: entry.signerRank || this.state.schoolProfile?.principalRank || '',
+      verificationStatus: entry.verificationStatus || (entry.isVerifiedSah ? 'sah' : 'unverified'),
+      isVerifiedSah: Boolean(entry.isVerifiedSah ?? (entry.verificationStatus === 'sah')),
+      verificationId: entry.verificationId || '',
+      verificationUrl: entry.verificationUrl || '',
+      qrDataUrl: entry.qrDataUrl || '',
+      manageToken: entry.manageToken || '',
+      verificationStatement: entry.verificationStatement || '',
+      verificationDetails: Array.isArray(entry.verificationDetails) ? entry.verificationDetails : [],
+      cloudSynced: Boolean(entry.cloudSynced),
+      authorizedAt: entry.authorizedAt || (entry.verificationStatus === 'sah' || entry.isVerifiedSah ? now.toISOString() : null),
+      revokedAt: entry.revokedAt || null,
+      revokedReason: entry.revokedReason || '',
+      sourceMode: entry.sourceMode || 'standard',
       isLocked: true, // Surat keluar bersifat tetap & tidak dapat diedit kembali
       documentSnapshot: lockedSnapshot,
       uploadedDocx: lockedUploadedDocx,
@@ -724,9 +742,90 @@ class StateStore {
 
     this.setState({ outgoingLetters: updated }, false);
     this.saveOutgoingLetters(updated);
-    // Otomatis majukan nomor surat di Lembar Kerja ke nomor urut berikutnya
-    this.syncActiveDocumentNumberToNextOutgoing(true);
+    // Otomatis majukan nomor surat di Lembar Kerja ke nomor urut berikutnya (kecuali diminta tahan saat langsung cetak)
+    if (!entry.skipAutoAdvanceNumber) {
+      this.syncActiveDocumentNumberToNextOutgoing(true);
+    }
     return newEntry;
+  }
+
+  /**
+   * Memperbarui status verifikasi QR / sinkronisasi cloud pada catatan Surat Keluar
+   * tanpa pernah membuka kunci isi surat keluar (isLocked tetap true).
+   */
+  updateOutgoingLetterVerification(id, updates = {}) {
+    const list = this.getOutgoingLetters();
+    let targetEntry = null;
+    const updated = list.map(item => {
+      if (item.id !== id) return item;
+      const merged = {
+        ...item,
+        verificationStatus: updates.verificationStatus ?? item.verificationStatus,
+        isVerifiedSah: updates.isVerifiedSah ?? ((updates.verificationStatus ?? item.verificationStatus) === 'sah'),
+        verificationId: updates.verificationId ?? item.verificationId,
+        verificationUrl: updates.verificationUrl ?? item.verificationUrl,
+        qrDataUrl: updates.qrDataUrl ?? item.qrDataUrl,
+        manageToken: updates.manageToken ?? item.manageToken,
+        signerRole: updates.signerRole ?? item.signerRole,
+        signerTitle: updates.signerTitle ?? item.signerTitle,
+        signerName: updates.signerName ?? item.signerName,
+        signerNip: updates.signerNip ?? item.signerNip,
+        signerRank: updates.signerRank ?? item.signerRank,
+        verificationStatement: updates.verificationStatement ?? item.verificationStatement,
+        verificationDetails: updates.verificationDetails ?? item.verificationDetails,
+        cloudSynced: updates.cloudSynced ?? item.cloudSynced,
+        authorizedAt: updates.authorizedAt ?? item.authorizedAt,
+        revokedAt: updates.revokedAt !== undefined ? updates.revokedAt : item.revokedAt,
+        revokedReason: updates.revokedReason !== undefined ? updates.revokedReason : item.revokedReason
+      };
+      targetEntry = merged;
+      return merged;
+    });
+    if (!targetEntry) return null;
+    this.setState({ outgoingLetters: updated }, false);
+    this.saveOutgoingLetters(updated);
+
+    // Sinkronkan badge pengesahan pada kanvas aktif bila merujuk verificationId / nomor yang sama
+    if (this.state.document?.verification?.outgoingId === id) {
+      this.setActiveDocumentVerification({
+        ...this.state.document.verification,
+        ...updates,
+        isVerifiedSah: targetEntry.isVerifiedSah,
+        verificationStatus: targetEntry.verificationStatus
+      }, 'standard');
+    }
+    if (this.state.smartDocument?.verification?.outgoingId === id) {
+      this.setActiveDocumentVerification({
+        ...this.state.smartDocument.verification,
+        ...updates,
+        isVerifiedSah: targetEntry.isVerifiedSah,
+        verificationStatus: targetEntry.verificationStatus
+      }, 'smart');
+    }
+    return targetEntry;
+  }
+
+  getOutgoingLetterByVerificationId(verificationId) {
+    const id = String(verificationId || '').trim();
+    if (!id) return null;
+    return this.getOutgoingLetters().find(item => item.verificationId === id) || null;
+  }
+
+  /**
+   * Menyematkan / menghapus metadata status SAH & QR Code pada dokumen kanvas aktif.
+   */
+  setActiveDocumentVerification(verificationMeta, mode = 'standard') {
+    if (mode === 'smart') {
+      const smartDoc = this.state.smartDocument;
+      if (!smartDoc) return;
+      const nextSmart = { ...smartDoc, verification: verificationMeta || null };
+      this.setState({ smartDocument: nextSmart }, false);
+      return;
+    }
+    const doc = this.state.document;
+    if (!doc) return;
+    const nextDoc = { ...doc, verification: verificationMeta || null };
+    this.setState({ document: nextDoc }, false);
   }
 
   removeOutgoingLetter(id) {
@@ -747,6 +846,15 @@ class StateStore {
     const target = this.getOutgoingLetters().find(item => item.id === id);
     if (!target || !target.documentSnapshot) return false;
     const clonedDoc = JSON.parse(JSON.stringify(target.documentSnapshot));
+    delete clonedDoc.verification;
+    for (const blk of (clonedDoc.blocks || [])) {
+      if (blk?.type === 'letterSignature') {
+        delete blk.signatureMode;
+        delete blk.qrImage;
+        delete blk.qrCaption;
+        delete blk.verificationUrl;
+      }
+    }
     const nextInfo = this.getNextFormattedOutgoingNomor({
       title: target.title,
       perihal: target.perihal,

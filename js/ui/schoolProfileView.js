@@ -194,14 +194,23 @@ export function renderSchoolProfileView(container) {
               <div class="ui-card school-subtab-card ${isVisibleForTab('pejabat')}" style="padding: 18px 20px;">
                 <h3 style="font-size: 16px; font-weight: 700; color: #0f172a; display: flex; align-items: center; gap: 8px; margin: 0 0 14px 0;">
                   <span style="color: #156c3b; display: inline-flex;">${SVG_USER_15}</span>
-                  <span>Pejabat Penandatangan (Kepala Sekolah)</span>
+                  <span>Pejabat Penandatangan &amp; Pengesahan (Kepala Sekolah &amp; TU)</span>
                 </h3>
 
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px;">
+                <div style="font-size: 12px; font-weight: 700; color: #15803d; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em;">1. Kepala Sekolah</div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px; margin-bottom: 16px;">
                   ${iconInput({ label: 'Nama Lengkap &amp; Gelar', name: 'principalName', value: school.principalName || 'Dian Nurhadian, S.Pd.', icon: SVG_USER_15 })}
                   ${iconInput({ label: "NIP / NUPTK (Isi '-' jika swasta)", name: 'principalNip', value: school.principalNip || '-', icon: SVG_BARCODE_15 })}
                   ${iconInput({ label: 'Pangkat / Keterangan', name: 'principalRank', value: school.principalRank || 'Kepala SMKS IT Al-Hawari', icon: SVG_AWARD_15 })}
                   ${iconInput({ label: 'Jabatan Resmi', name: 'principalTitle', value: school.principalTitle || 'Kepala Sekolah', icon: SVG_CAP_15 })}
+                </div>
+
+                <div style="border-top: 1px dashed #e2e8f0; padding-top: 14px; font-size: 12px; font-weight: 700; color: #0369a1; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em;">2. Tata Usaha (TU) — Opsi Pengesahan Barcode QR</div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px;">
+                  ${iconInput({ label: 'Nama Kepala / Staf TU', name: 'tuName', value: school.tuName || 'Staf Tata Usaha (TU)', icon: SVG_USER_15 })}
+                  ${iconInput({ label: "NIP / NUPTK TU (Isi '-' jika swasta)", name: 'tuNip', value: school.tuNip || '-', icon: SVG_BARCODE_15 })}
+                  ${iconInput({ label: 'Keterangan Unit TU', name: 'tuRank', value: school.tuRank || 'Tata Usaha SMKS IT Al-Hawari', icon: SVG_AWARD_15 })}
+                  ${iconInput({ label: 'Jabatan Resmi TU', name: 'tuTitle', value: school.tuTitle || 'Kepala Tata Usaha', icon: SVG_CAP_15 })}
                 </div>
               </div>
 

@@ -3,7 +3,7 @@
  * Menyediakan caching offline untuk antarmuka, aset Word (.docx) generator, dan pustaka lokal.
  */
 
-const CACHE_NAME = 'ai-docbuilder-pwa-v6-20261115';
+const CACHE_NAME = 'ai-docbuilder-pwa-v9-20261115';
 
 const PRECACHE_ASSETS = [
   './',
@@ -18,6 +18,8 @@ const PRECACHE_ASSETS = [
   './vendor/jszip.min.js',
   './vendor/docx-preview.min.js',
   './vendor/docx-preview.min.mjs',
+  './vendor/qrcode.mjs',
+  './vendor/qrcode_UTF8.mjs',
   './js/main.js',
   './js/pwa.js',
   './js/state.js',
@@ -39,6 +41,7 @@ const PRECACHE_ASSETS = [
   './js/letters/defaultKop.js',
   './js/letters/numbering.js',
   './js/letters/schoolProfile.js',
+  './js/letters/verification.js',
   './js/model/sample.js',
   './js/model/schema.js',
   './js/ui/aiView.js',
@@ -50,9 +53,11 @@ const PRECACHE_ASSETS = [
   './js/ui/outgoingLettersView.js',
   './js/ui/patchView.js',
   './js/ui/preview.js',
+  './js/ui/printChoiceModal.js',
   './js/ui/schoolProfileView.js',
   './js/ui/settingsView.js',
   './js/ui/vaultView.js',
+  './js/ui/verifyView.js',
   './js/ui/wordCanvas.js',
   './js/ui/smartWordCanvas.js',
   './js/utils/download.js',
@@ -104,7 +109,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/api/') || url.pathname.includes('/functions/')) return;
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/verify-letter') || url.pathname.includes('/functions/')) return;
 
   // Navigasi dokumen HTML: Network-First dengan fallback cache index.html untuk mode offline
   if (req.mode === 'navigate') {

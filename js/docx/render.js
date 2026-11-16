@@ -100,7 +100,7 @@ function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, f
   `.trim();
 }
 
-export function renderDocumentBody(doc, profile, hasKopImage = false) {
+export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage = false) {
   const bodyXmlParts = [];
   let figureCounter = 0;
   let tableCounter = 0;
@@ -143,7 +143,7 @@ export function renderDocumentBody(doc, profile, hasKopImage = false) {
 
       // 4. BLOK TANDA TANGAN RESMI
       case 'letterSignature': {
-        bodyXmlParts.push(buildLetterSignatureXml(block));
+        bodyXmlParts.push(buildLetterSignatureXml(block, { hasQrImage }));
         break;
       }
 
@@ -410,8 +410,8 @@ export function renderDocumentBody(doc, profile, hasKopImage = false) {
   `.trim();
 }
 
-export function buildDocumentXml(doc, profile, hasKopImage = false) {
-  const bodyXml = renderDocumentBody(doc, profile, hasKopImage);
+export function buildDocumentXml(doc, profile, hasKopImage = false, hasQrImage = false) {
+  const bodyXml = renderDocumentBody(doc, profile, hasKopImage, hasQrImage);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -423,12 +423,13 @@ export function buildDocumentXml(doc, profile, hasKopImage = false) {
 </w:document>`.trim();
 }
 
-export function buildContentTypesXml(hasKopImage = false) {
+export function buildContentTypesXml(hasKopImage = false, hasQrImage = false) {
+  const hasAnyImage = hasKopImage || hasQrImage;
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  ${hasKopImage ? '<Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="svg" ContentType="image/svg+xml"/>' : ''}
+  ${hasAnyImage ? '<Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="svg" ContentType="image/svg+xml"/>' : ''}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
@@ -445,7 +446,7 @@ export function buildRootRelsXml() {
 </Relationships>`.trim();
 }
 
-export function buildDocRelsXml(hasKopImage = false) {
+export function buildDocRelsXml(hasKopImage = false, hasQrImage = false) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
@@ -454,6 +455,7 @@ export function buildDocRelsXml(hasKopImage = false) {
   <Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
   <Relationship Id="rIdFooter2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer2.xml"/>
   ${hasKopImage ? '<Relationship Id="rIdKop" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/kop.png"/><Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/logo.png"/>' : ''}
+  ${hasQrImage ? '<Relationship Id="rIdQr" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/qr.png"/>' : ''}
 </Relationships>`.trim();
 }
 
@@ -528,23 +530,36 @@ export async function renderDocx(docModel, outputType = 'blob') {
     kopParsed = parseBase64Image(kopDataUrl);
   }
 
+  // Cari gambar Barcode QR pengesahan jika signatureMode === 'qr'
+  let qrParsed = null;
+  const sigBlock = (docModel.blocks || []).find(b => b.type === 'letterSignature' && b.signatureMode === 'qr' && b.qrImage);
+  const qrDataUrl = sigBlock?.qrImage || '';
+  if (qrDataUrl) {
+    qrParsed = parseBase64Image(qrDataUrl);
+  }
+
   const hasKopImage = !!kopParsed;
+  const hasQrImage = !!qrParsed;
 
   const files = {
-    '[Content_Types].xml': buildContentTypesXml(hasKopImage),
+    '[Content_Types].xml': buildContentTypesXml(hasKopImage, hasQrImage),
     '_rels/.rels': buildRootRelsXml(),
-    'word/_rels/document.xml.rels': buildDocRelsXml(hasKopImage),
+    'word/_rels/document.xml.rels': buildDocRelsXml(hasKopImage, hasQrImage),
     'word/settings.xml': buildSettingsXml(),
     'word/styles.xml': buildStylesXml(profile),
     'word/numbering.xml': buildNumberingXml(),
     'word/footer1.xml': buildFooter1Xml(),
     'word/footer2.xml': buildFooter2Xml(),
-    'word/document.xml': buildDocumentXml(docModel, profile, hasKopImage)
+    'word/document.xml': buildDocumentXml(docModel, profile, hasKopImage, hasQrImage)
   };
 
   if (hasKopImage) {
     files['word/media/kop.png'] = kopParsed.bytes;
     files['word/media/logo.png'] = kopParsed.bytes;
+  }
+
+  if (hasQrImage) {
+    files['word/media/qr.png'] = qrParsed.bytes;
   }
 
   return createZipPackage(files, outputType);

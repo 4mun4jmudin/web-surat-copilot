@@ -10,6 +10,18 @@ import { renderDocx } from '../docx/render.js';
 import { downloadFile } from '../utils/download.js';
 import { showToast } from './notification.js';
 import { LETTER_TYPE_CODES } from '../letters/numbering.js';
+import {
+  SIGNER_ROLE_OPTIONS,
+  applySignatureModeToDocModel,
+  buildSignerSelectionInfo,
+  formatSignerNipLine,
+  buildVerificationPayload,
+  generateQrPngDataUrl,
+  registerVerificationInCloud,
+  updateCloudVerificationStatus
+} from '../letters/verification.js';
+import { openPrintSignatureChoiceModal, buildPrintQrBoxHtml, runSafeWindowPrint } from './printChoiceModal.js';
+import { renderQrVerificationView } from './verifyView.js';
 import { damerauLevenshtein } from './vaultView.js';
 
 let outgoingSearchQuery = '';
@@ -291,11 +303,37 @@ export function renderOutgoingLettersView(container) {
           <span style="font-size: 11.5px; color: #b91c1c; font-weight: 600;">
             🔒 Arsip Surat Keluar ini terkunci dan tidak dapat diedit.
           </span>
-          <div style="display: flex; gap: 8px;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
             <button type="button" id="btn-modal-out-clone" class="btn btn-sm btn-secondary">📋 Salin jadi Draf Baru</button>
+            <button type="button" id="btn-modal-out-print" class="btn btn-sm btn-secondary">🖨️ Cetak / PDF</button>
             <button type="button" id="btn-modal-out-download" class="btn btn-sm btn-success">⬇️ Unduh .docx</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- MODAL PENGESAHAN QR & DETAIL SCAN SURAT KELUAR -->
+    <div id="modal-outgoing-qr" class="modal-overlay hidden">
+      <div class="modal-card" style="max-width: 600px; width: 94%; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
+          <div>
+            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">▣ Barcode QR &amp; Status Pengesahan Surat</h3>
+            <div id="qr-modal-subtitle" style="font-size: 12px; color: #64748b; margin-top: 2px;"></div>
+          </div>
+          <button type="button" id="btn-close-qr-modal" class="btn btn-sm btn-secondary">✕ Tutup</button>
+        </div>
+        <div id="qr-modal-body" style="flex: 1; overflow-y: auto; padding: 14px 2px;"></div>
+      </div>
+    </div>
+
+    <!-- MODAL PRATINJAU HALAMAN SCAN PUBLIK -->
+    <div id="modal-outgoing-verify-preview" class="modal-overlay hidden">
+      <div class="modal-card" style="max-width: 720px; width: 95%; max-height: 92vh; display: flex; flex-direction: column; padding: 14px;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
+          <h3 style="margin: 0; font-size: 15px; color: #0f172a;">🔍 Simulasi Tampilan Saat Barcode QR Dipindai HP</h3>
+          <button type="button" id="btn-close-verify-preview" class="btn btn-sm btn-secondary">✕ Tutup</button>
+        </div>
+        <div id="verify-preview-mount" style="flex: 1; overflow-y: auto; padding-top: 12px;"></div>
       </div>
     </div>
   `;
@@ -352,11 +390,29 @@ function updateOutgoingListInPlace(container) {
               <th style="padding: 12px 14px;">Judul Surat &amp; Perihal</th>
               <th style="padding: 12px 14px; width: 220px;">Atas Nama / Penerima</th>
               <th style="padding: 12px 14px; width: 135px;">Tanggal Surat</th>
-              <th style="padding: 12px 14px; width: 225px; text-align: right;">Aksi (Terkunci 🔒)</th>
+              <th style="padding: 12px 14px; width: 280px; text-align: right;">Aksi (Terkunci 🔒)</th>
             </tr>
           </thead>
           <tbody>
-            ${items.map(item => `
+            ${items.map(item => {
+              const isSah = item.verificationStatus === 'sah' || item.isVerifiedSah;
+              const isRevoked = item.verificationStatus === 'revoked';
+              const roleBadge = item.signerRole === 'tata_usaha'
+                ? 'a.n. TU'
+                : item.signerRole === 'kepsek_dan_tu'
+                ? 'a.n. Kepsek & TU'
+                : 'a.n. Kepala Sekolah';
+              const statusChipHtml = isRevoked
+                ? '<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 7px;">⛔ Dicabut</span>'
+                : isSah
+                ? `<span class="status-chip" style="background:#dcfce7;color:#15803d;font-size:10px;padding:1px 7px;">✓ SAH (${escapeHtml(roleBadge)})</span>`
+                : '<span class="status-chip" style="background:#f1f5f9;color:#475569;font-size:10px;padding:1px 7px;">Manual (Belum SAH)</span>';
+              const cloudChipHtml = isSah && !isRevoked
+                ? (item.cloudSynced
+                    ? '<span class="status-chip" style="background:#eff6ff;color:#1d4ed8;font-size:10px;padding:1px 6px;" title="Tersinkron ke server verifikasi publik Netlify">☁️ Online</span>'
+                    : '<span class="status-chip" style="background:#fef3c7;color:#b45309;font-size:10px;padding:1px 6px;" title="Belum tersinkron ke cloud; klik QR untuk Sync">⚠️ Lokal</span>')
+                : '';
+              return `
               <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.12s;" class="outgoing-row">
                 <td style="padding: 12px 14px; font-weight: 800; color: #156c3b;">
                   #${String(item.sequenceNumber || 0).padStart(3, '0')}
@@ -365,9 +421,13 @@ function updateOutgoingListInPlace(container) {
                   <div style="font-family: Consolas, monospace; font-size: 12px; font-weight: 700; color: #0f172a;">
                     ${escapeHtml(item.nomorSurat)}
                   </div>
-                  <span class="status-chip status-chip-blue" style="margin-top: 4px; font-size: 10px; padding: 1px 7px;">
-                    ${escapeHtml(item.typeCode || 'DINAS')}
-                  </span>
+                  <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:4px;">
+                    <span class="status-chip status-chip-blue" style="font-size: 10px; padding: 1px 7px;">
+                      ${escapeHtml(item.typeCode || 'DINAS')}
+                    </span>
+                    ${statusChipHtml}
+                    ${cloudChipHtml}
+                  </div>
                 </td>
                 <td style="padding: 12px 14px;">
                   <div style="font-weight: 700; color: #0f172a;">${escapeHtml(item.title)}</div>
@@ -383,12 +443,15 @@ function updateOutgoingListInPlace(container) {
                 </td>
                 <td style="padding: 12px 14px; text-align: right; white-space: nowrap;">
                   <button type="button" class="btn btn-sm btn-secondary btn-out-view" data-id="${escapeHtml(item.id)}" title="Lihat pratinjau surat (Read-Only)">👁️ Lihat</button>
-                  <button type="button" class="btn btn-sm btn-success btn-out-download" data-id="${escapeHtml(item.id)}" title="Unduh berkas .docx resmi">⬇️</button>
+                  <button type="button" class="btn btn-sm btn-secondary btn-out-qr" data-id="${escapeHtml(item.id)}" title="Kelola Pengesahan SAH &amp; Barcode QR">${isSah && !isRevoked ? '▣ QR' : '🛡️ Sahkan'}</button>
+                  <button type="button" class="btn btn-sm btn-secondary btn-out-print" data-id="${escapeHtml(item.id)}" title="Cetak / PDF (Pilih Barcode QR atau Kosongan TTD Manual)">🖨️</button>
+                  <button type="button" class="btn btn-sm btn-success btn-out-download" data-id="${escapeHtml(item.id)}" title="Unduh berkas .docx resmi (Pilih QR atau TTD Manual)">⬇️</button>
                   <button type="button" class="btn btn-sm btn-secondary btn-out-clone" data-id="${escapeHtml(item.id)}" title="Salin isi surat sebagai draf baru di Lembar Kerja (tanpa mengubah arsip ini)">📋 Salin</button>
                   ${showDeleteActions ? `<button type="button" class="btn btn-sm btn-danger btn-out-delete" data-id="${escapeHtml(item.id)}" title="Hapus data Surat Keluar ini">🗑️ Hapus</button>` : ''}
                 </td>
               </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
         </table>
       </div>
@@ -485,7 +548,19 @@ function bindOutgoingRowActions(container) {
   const modalSubtitle = container.querySelector('#modal-out-subtitle');
   const modalBody = container.querySelector('#modal-out-body');
   const btnModalDownload = container.querySelector('#btn-modal-out-download');
+  const btnModalPrint = container.querySelector('#btn-modal-out-print');
   const btnModalClone = container.querySelector('#btn-modal-out-clone');
+
+  const qrModal = container.querySelector('#modal-outgoing-qr');
+  const btnCloseQrModal = container.querySelector('#btn-close-qr-modal');
+  if (btnCloseQrModal && qrModal) {
+    btnCloseQrModal.onclick = () => qrModal.classList.add('hidden');
+  }
+  const verifyPreviewModal = container.querySelector('#modal-outgoing-verify-preview');
+  const btnCloseVerifyPreview = container.querySelector('#btn-close-verify-preview');
+  if (btnCloseVerifyPreview && verifyPreviewModal) {
+    btnCloseVerifyPreview.onclick = () => verifyPreviewModal.classList.add('hidden');
+  }
 
   const delModal = container.querySelector('#modal-confirm-delete-out');
   const delDetailBox = container.querySelector('#del-out-detail-box');
@@ -536,8 +611,11 @@ function bindOutgoingRowActions(container) {
       modal.dataset.activeId = item.id;
       modal.classList.remove('hidden');
 
+      if (btnModalPrint) {
+        btnModalPrint.onclick = () => promptOutgoingActionWithChoice(item, 'print', container);
+      }
       if (btnModalDownload) {
-        btnModalDownload.onclick = () => downloadOutgoingItem(item);
+        btnModalDownload.onclick = () => promptOutgoingActionWithChoice(item, 'docx', container);
       }
       if (btnModalClone) {
         btnModalClone.onclick = () => {
@@ -548,10 +626,24 @@ function bindOutgoingRowActions(container) {
     });
   });
 
+  container.querySelectorAll('.btn-out-qr').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
+      if (item) openOutgoingQrModal(item, container);
+    });
+  });
+
+  container.querySelectorAll('.btn-out-print').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
+      if (item) promptOutgoingActionWithChoice(item, 'print', container);
+    });
+  });
+
   container.querySelectorAll('.btn-out-download').forEach(btn => {
     btn.addEventListener('click', () => {
       const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
-      if (item) downloadOutgoingItem(item);
+      if (item) promptOutgoingActionWithChoice(item, 'docx', container);
     });
   });
 
@@ -563,11 +655,335 @@ function bindOutgoingRowActions(container) {
   });
 }
 
-async function downloadOutgoingItem(item) {
+async function authorizeExistingOutgoingItem(item, signerRole = 'kepala_sekolah') {
+  const school = store.getState().schoolProfile || {};
+  const payload = buildVerificationPayload({
+    entry: {
+      ...item,
+      documentSnapshot: item.documentSnapshot,
+      verificationId: item.verificationId || undefined,
+      manageToken: item.manageToken || undefined
+    },
+    school,
+    signerRole
+  });
+  const qrDataUrl = item.qrDataUrl && item.verificationId === payload.verificationId
+    ? item.qrDataUrl
+    : generateQrPngDataUrl(payload.verificationUrl);
+
+  const cloudResult = item.cloudSynced && item.verificationStatus === 'revoked'
+    ? await updateCloudVerificationStatus({
+        verificationId: payload.verificationId,
+        manageToken: payload.manageToken,
+        status: 'sah'
+      })
+    : await registerVerificationInCloud(payload);
+
+  const updated = store.updateOutgoingLetterVerification(item.id, {
+    verificationStatus: 'sah',
+    isVerifiedSah: true,
+    verificationId: payload.verificationId,
+    verificationUrl: payload.verificationUrl,
+    qrDataUrl,
+    manageToken: payload.manageToken,
+    signerRole: payload.signerRole,
+    signerTitle: payload.signerTitle,
+    signerName: payload.signerName,
+    signerNip: payload.signerNip,
+    signerRank: payload.signerRank,
+    verificationStatement: payload.verificationStatement,
+    verificationDetails: payload.details,
+    cloudSynced: Boolean(cloudResult.ok),
+    authorizedAt: new Date().toISOString(),
+    revokedAt: null,
+    revokedReason: ''
+  });
+
+  if (cloudResult.ok) {
+    showToast(`✓ Surat #${String(item.sequenceNumber).padStart(3, '0')} disahkan & tersinkron ke cloud!`, 'success');
+  } else {
+    showToast(`Surat #${String(item.sequenceNumber).padStart(3, '0')} disahkan secara lokal (${cloudResult.error || 'offline'}). Klik Sinkron Cloud nanti.`, 'warning');
+  }
+  return updated || item;
+}
+
+function printOutgoingItem(item, { mode = 'manual' } = {}) {
+  document.getElementById('outgoing-print-sandbox')?.remove();
+  const sandbox = document.createElement('div');
+  sandbox.id = 'outgoing-print-sandbox';
+  sandbox.className = 'print-only-sheet';
+  sandbox.innerHTML = renderReadOnlyDocumentHtml(item, { signatureMode: mode, isForPrint: true });
+  document.body.appendChild(sandbox);
+  document.body.classList.add('printing-outgoing-item');
+
+  const cleanup = () => {
+    document.body.classList.remove('printing-outgoing-item');
+    sandbox.remove();
+  };
+
+  runSafeWindowPrint({
+    paperSize: item.documentSnapshot?.paperSize,
+    orientation: item.documentSnapshot?.orientation,
+    onAfterPrint: cleanup
+  });
+}
+
+function promptOutgoingActionWithChoice(item, actionType, container) {
+  const isRevoked = item.verificationStatus === 'revoked';
+  const isVerifiedSah = Boolean((item.verificationStatus === 'sah' || item.isVerifiedSah) && !isRevoked && item.qrDataUrl);
+  const signerInfo = buildSignerSelectionInfo(store.getState().schoolProfile, item.signerRole || 'kepala_sekolah');
+
+  openPrintSignatureChoiceModal({
+    actionType,
+    isVerifiedSah,
+    isRevoked,
+    nomorSurat: item.nomorSurat,
+    title: item.title,
+    qrDataUrl: item.qrDataUrl || '',
+    defaultSignerRole: item.signerRole || 'kepala_sekolah',
+    signerLabel: signerInfo.roleLabel,
+    signerName: item.signerName || signerInfo.signerName,
+    onChooseQr: async () => {
+      if (actionType === 'print') {
+        printOutgoingItem(item, { mode: 'qr' });
+      } else {
+        await downloadOutgoingItem(item, { mode: 'qr' });
+      }
+    },
+    onChooseManual: async () => {
+      if (actionType === 'print') {
+        printOutgoingItem(item, { mode: 'manual' });
+      } else {
+        await downloadOutgoingItem(item, { mode: 'manual' });
+      }
+    },
+    onAuthorizeAndQr: async (selectedRole) => {
+      const updatedItem = await authorizeExistingOutgoingItem(item, selectedRole);
+      updateOutgoingListInPlace(container);
+      if (actionType === 'print') {
+        printOutgoingItem(updatedItem, { mode: 'qr' });
+      } else {
+        await downloadOutgoingItem(updatedItem, { mode: 'qr' });
+      }
+    }
+  });
+}
+
+function openOutgoingQrModal(initialItem, container) {
+  const modal = container.querySelector('#modal-outgoing-qr');
+  const subtitle = container.querySelector('#qr-modal-subtitle');
+  const body = container.querySelector('#qr-modal-body');
+  if (!modal || !body) return;
+
+  const renderModalContent = () => {
+    const item = store.getOutgoingLetters().find(x => x.id === initialItem.id) || initialItem;
+    const school = store.getState().schoolProfile || {};
+    const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
+    const isRevoked = item.verificationStatus === 'revoked';
+    const activeRole = item.signerRole || 'kepala_sekolah';
+    const roleInfo = buildSignerSelectionInfo(school, activeRole);
+
+    if (subtitle) {
+      subtitle.textContent = `#${String(item.sequenceNumber || 0).padStart(3, '0')} • ${item.nomorSurat} • ${item.title}`;
+    }
+
+    const roleSelectHtml = `
+      <div style="margin-top: 10px;">
+        <label style="display:block;font-size:11.5px;font-weight:700;color:#334155;margin-bottom:6px;">Pilih Pejabat Pengesahan:</label>
+        <div class="signer-role-grid">
+          ${SIGNER_ROLE_OPTIONS.map(opt => {
+            const info = buildSignerSelectionInfo(school, opt.id);
+            return `
+              <label class="signer-role-option">
+                <input type="radio" name="modal-out-signer-role" value="${escapeHtml(opt.id)}" ${opt.id === activeRole ? 'checked' : ''} />
+                <div class="signer-role-card">
+                  <div class="signer-role-title">${escapeHtml(opt.label)}</div>
+                  <div class="signer-role-name">${escapeHtml(info.signerName)}</div>
+                </div>
+              </label>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+
+    if (isSah && item.qrDataUrl) {
+      body.innerHTML = `
+        <div class="choice-status-banner choice-banner-sah" style="margin-bottom:12px;">
+          <strong>✓ Surat Dinyatakan SAH — Barcode QR Aktif</strong>
+          <span>${escapeHtml(item.verificationStatement || roleInfo.verificationStatement)}</span>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 165px 1fr; gap: 16px; align-items: start; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:14px;">
+          <div style="text-align:center; background:#fff; border:1px solid #cbd5e1; border-radius:8px; padding:10px;">
+            <img src="${escapeHtml(item.qrDataUrl)}" alt="QR Pengesahan" style="width:136px;height:136px;display:block;margin:0 auto;" />
+            <div style="font-size:10px;color:#15803d;font-weight:700;margin-top:6px;">${escapeHtml(item.verificationId)}</div>
+          </div>
+          <div style="display:grid; gap:8px;">
+            <div>
+              <div style="font-size:11px;color:#64748b;font-weight:700;">Atas Nama Pengesahan</div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a;">${escapeHtml(roleInfo.roleLabel)} — ${escapeHtml(item.signerName || roleInfo.signerName)}</div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#64748b;font-weight:700;">Status Sinkronisasi Server Publik</div>
+              <div style="font-size:12.5px;font-weight:600;color:${item.cloudSynced ? '#15803d' : '#b45309'};">
+                ${item.cloudSynced ? '☁️ Tersinkron di Netlify Cloud (Siap dipindai dari HP mana pun)' : '⚠️ Baru Tersimpan Lokal (Klik Sinkron Cloud agar bisa dipindai HP)'}
+              </div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:#64748b;font-weight:700;">Tautan Verifikasi QR</div>
+              <div style="display:flex;gap:6px;margin-top:3px;">
+                <input type="text" readonly value="${escapeHtml(item.verificationUrl)}" class="form-control" style="font-family:monospace;font-size:11px;height:30px;padding:4px 8px;" />
+                <button type="button" id="btn-qr-copy-url" class="btn btn-sm btn-secondary">Salin</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
+              <button type="button" id="btn-qr-preview-page" class="btn btn-sm btn-primary">🔍 Pratinjau Halaman Scan</button>
+              ${!item.cloudSynced ? '<button type="button" id="btn-qr-sync-cloud" class="btn btn-sm btn-secondary" style="border-color:#0284c7;color:#0369a1;">☁️ Sinkron Cloud</button>' : ''}
+              <button type="button" id="btn-qr-revoke" class="btn btn-sm btn-danger">⛔ Cabut Pengesahan</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      body.querySelector('#btn-qr-copy-url').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(item.verificationUrl || '');
+          showToast('Tautan verifikasi disalin ke clipboard.', 'success');
+        } catch {
+          showToast('Salin tautan langsung dari kotak teks URL.', 'info');
+        }
+      };
+
+      body.querySelector('#btn-qr-preview-page').onclick = () => {
+        const previewModal = container.querySelector('#modal-outgoing-verify-preview');
+        const mount = container.querySelector('#verify-preview-mount');
+        if (!previewModal || !mount) return;
+        previewModal.classList.remove('hidden');
+        renderQrVerificationView(mount, item.verificationId, {
+          localFallbackOnly: !item.cloudSynced,
+          isInlinePreview: true
+        });
+      };
+
+      const btnSync = body.querySelector('#btn-qr-sync-cloud');
+      if (btnSync) {
+        btnSync.onclick = async () => {
+          btnSync.disabled = true;
+          btnSync.textContent = 'Menyinkronkan...';
+          const payload = buildVerificationPayload({
+            entry: {
+              ...item,
+              verificationId: item.verificationId,
+              manageToken: item.manageToken,
+              verificationUrl: item.verificationUrl
+            },
+            school,
+            signerRole: activeRole
+          });
+          const res = await registerVerificationInCloud(payload);
+          if (res.ok) {
+            store.updateOutgoingLetterVerification(item.id, { cloudSynced: true });
+            updateOutgoingListInPlace(container);
+            renderModalContent();
+            showToast('☁️ Data pengesahan surat berhasil disinkronkan ke cloud!', 'success');
+          } else {
+            btnSync.disabled = false;
+            btnSync.textContent = '☁️ Sinkron Cloud';
+            showToast(res.error || 'Gagal sinkronisasi ke cloud.', 'error');
+          }
+        };
+      }
+
+      body.querySelector('#btn-qr-revoke').onclick = async () => {
+        const reason = prompt('Masukkan alasan pencabutan pengesahan surat ini (opsional):', 'Revisi / Pembatalan surat resmi');
+        if (reason === null) return;
+        const btnRev = body.querySelector('#btn-qr-revoke');
+        btnRev.disabled = true;
+        btnRev.textContent = 'Mencabut...';
+
+        let cloudOk = false;
+        if (item.cloudSynced && item.manageToken) {
+          const res = await updateCloudVerificationStatus({
+            verificationId: item.verificationId,
+            manageToken: item.manageToken,
+            status: 'revoked',
+            reason
+          });
+          cloudOk = res.ok;
+          if (!res.ok) {
+            showToast(`Status dicabut di arsip lokal (${res.error}).`, 'warning');
+          }
+        }
+        store.updateOutgoingLetterVerification(item.id, {
+          verificationStatus: 'revoked',
+          isVerifiedSah: false,
+          revokedAt: new Date().toISOString(),
+          revokedReason: reason || 'Pengesahan dibatalkan oleh admin'
+        });
+        updateOutgoingListInPlace(container);
+        renderModalContent();
+        showToast(cloudOk ? '⛔ Pengesahan surat dicabut di arsip & cloud.' : '⛔ Pengesahan surat dicabut di arsip lokal.', 'info');
+      };
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="choice-status-banner ${isRevoked ? 'choice-banner-danger' : 'choice-banner-warn'}" style="margin-bottom: 12px;">
+        <strong>${isRevoked ? '⛔ Pengesahan Surat Ini Telah Dicabut' : '⚠️ Surat Belum Dinyatakan SAH'}</strong>
+        <span>${isRevoked
+          ? `Dicabut${item.revokedReason ? ` (${escapeHtml(item.revokedReason)})` : ''}. Anda dapat mengesahkannya kembali dengan memilih pejabat di bawah.`
+          : 'Terbitkan pengesahan SAH dan Barcode QR sekarang agar surat ini bisa dicetak pakai QR dan diverifikasi saat dipindai HP.'}</span>
+      </div>
+      ${roleSelectHtml}
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+        <button type="button" id="btn-qr-authorize-now" class="btn btn-primary">
+          🛡️ ${isRevoked ? 'Sahkan Ulang &amp; Aktifkan QR' : 'Nyatakan SAH &amp; Terbitkan Barcode QR'}
+        </button>
+      </div>
+    `;
+
+    body.querySelector('#btn-qr-authorize-now').onclick = async (e) => {
+      const btnAuth = e.currentTarget;
+      const selectedRole = body.querySelector('input[name="modal-out-signer-role"]:checked')?.value || 'kepala_sekolah';
+      btnAuth.disabled = true;
+      btnAuth.textContent = 'Mengesahkan & Menghubungi Cloud...';
+      await authorizeExistingOutgoingItem(item, selectedRole);
+      updateOutgoingListInPlace(container);
+      renderModalContent();
+    };
+  };
+
+  renderModalContent();
+  modal.classList.remove('hidden');
+}
+
+async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
+  const school = store.getState().schoolProfile || {};
+  const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
+  const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah', {
+    signerName: item.signerName,
+    signerTitle: item.signerTitle,
+    signerNip: item.signerNip,
+    signerRank: item.signerRank
+  });
+
   if (item.documentSnapshot) {
-    showToast(`Menyusun berkas .docx untuk "${item.title}"...`, 'info');
+    const finalModel = mode === 'qr' && isSah && item.qrDataUrl
+      ? applySignatureModeToDocModel(item.documentSnapshot, {
+          mode: 'qr',
+          qrDataUrl: item.qrDataUrl,
+          verificationUrl: item.verificationUrl || '',
+          signerRole: item.signerRole || 'kepala_sekolah',
+          signerInfo,
+          school,
+          syncSignerFields: false
+        })
+      : applySignatureModeToDocModel(item.documentSnapshot, { mode: 'manual' });
+
+    showToast(`Menyusun berkas .docx (${mode === 'qr' ? 'pakai Barcode QR' : 'kosongan TTD manual'}) untuk "${item.title}"...`, 'info');
     try {
-      const blob = await renderDocx(item.documentSnapshot, 'blob');
+      const blob = await renderDocx(finalModel, 'blob');
       const safeTitle = `${item.sequenceNumber || 'out'}_${item.title || 'surat'}`
         .replace(/[^a-zA-Z0-9_\-]/g, '_')
         .slice(0, 50);
@@ -606,23 +1022,47 @@ function cloneOutgoingItem(item) {
   }
 }
 
-function renderReadOnlyDocumentHtml(item) {
+function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isForPrint = false } = {}) {
   const doc = item.documentSnapshot;
+  const school = store.getState().schoolProfile || {};
+  const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah');
+  const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
+  const showQrInSig = Boolean(item.qrDataUrl && isSah && (signatureMode === 'qr' || (signatureMode === 'auto' && !isForPrint)));
+  const sigSlotHtml = showQrInSig
+    ? buildPrintQrBoxHtml({
+        qrDataUrl: item.qrDataUrl,
+        signerRole: item.signerRole || 'kepala_sekolah',
+        principalName: school.principalName || '',
+        signerName: item.signerName || signerInfo.signerName,
+        school
+      })
+    : '<div style="height: 54px;"></div>';
+
   if (!doc || !Array.isArray(doc.blocks)) {
     return `
-      <div style="background: white; padding: 28px; border-radius: 4px; font-family: 'Times New Roman', serif; line-height: 1.5;">
+      <div style="background: white; padding: ${isForPrint ? '0' : '28px'}; border-radius: 4px; font-family: 'Times New Roman', serif; line-height: 1.5; color: #0f172a;">
         <h3 style="text-align: center; margin: 0 0 4px 0;">${escapeHtml(item.title)}</h3>
         <div style="text-align: center; margin-bottom: 18px;">Nomor: ${escapeHtml(item.nomorSurat)}</div>
         <p><strong>Atas Nama / Penerima:</strong> ${escapeHtml(item.recipientName)}</p>
         <p>${escapeHtml(item.summary || '-')}</p>
+        <div style="display: flex; justify-content: flex-end; margin-top: 28px;">
+          <div style="width: 240px;">
+            <div>${escapeHtml(school.city || 'Garut')}, ${escapeHtml(item.tanggalSurat || '')}</div>
+            <div>${escapeHtml(item.signerTitle || signerInfo.signerTitle)},</div>
+            ${sigSlotHtml}
+            <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(item.signerName || signerInfo.signerName)}</div>
+            <div>${escapeHtml(formatSignerNipLine(item.signerNip || signerInfo.signerNip))}</div>
+          </div>
+        </div>
       </div>
     `;
   }
 
   const parts = [];
   for (const b of doc.blocks) {
-    if (b.type === 'letterKop' && b.image) {
-      parts.push(`<div style="text-align: center; margin-bottom: 14px;"><img src="${b.image}" style="max-width: 100%; height: auto;" alt="Kop"></div>`);
+    if (b.type === 'letterKop' && (b.image || doc.letterData?.kopImage || school.kopImage)) {
+      const imgSrc = b.image || doc.letterData?.kopImage || school.kopImage;
+      parts.push(`<div style="text-align: center; margin-bottom: 14px;"><img src="${imgSrc}" style="max-width: 100%; height: auto;" alt="Kop"></div>`);
     } else if (b.type === 'letterTitle') {
       parts.push(`
         <div style="text-align: center; margin-bottom: 14px;">
@@ -657,13 +1097,13 @@ function renderReadOnlyDocumentHtml(item) {
       `);
     } else if (b.type === 'letterSignature') {
       parts.push(`
-        <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
-          <div style="width: 240px;">
+        <div style="display: flex; justify-content: flex-end; margin-top: 24px; page-break-inside: avoid; break-inside: avoid;">
+          <div style="width: 245px;">
             <div>${escapeHtml(b.city || 'Garut')}, ${escapeHtml(b.date || '')}</div>
             <div>${escapeHtml(b.title || 'Kepala Sekolah')},</div>
-            <div style="height: 50px;"></div>
+            ${sigSlotHtml}
             <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(b.name || '')}</div>
-            <div>${b.nip && b.nip !== '-' ? `NIP. ${escapeHtml(b.nip)}` : 'Kepala SMKS IT Al-Hawari'}</div>
+            <div>${escapeHtml(formatSignerNipLine(b.nip))}</div>
           </div>
         </div>
       `);
@@ -671,7 +1111,7 @@ function renderReadOnlyDocumentHtml(item) {
   }
 
   return `
-    <div style="background: white; padding: 28px 34px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); font-family: 'Times New Roman', serif; font-size: 11.5pt; color: #0f172a; user-select: text;">
+    <div style="background: white; padding: ${isForPrint ? '12mm 16mm' : '28px 34px'}; border-radius: 4px; ${isForPrint ? '' : 'box-shadow: 0 2px 8px rgba(0,0,0,0.08);'} font-family: 'Times New Roman', serif; font-size: 11.5pt; color: #0f172a; user-select: text;">
       ${parts.join('')}
     </div>
   `;

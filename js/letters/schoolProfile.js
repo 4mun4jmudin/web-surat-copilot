@@ -23,6 +23,10 @@ export const DEFAULT_SCHOOL_PROFILE = {
   principalNip: '-',
   principalRank: 'Kepala SMKS IT Al-Hawari',
   principalTitle: 'Kepala Sekolah',
+  tuName: 'Staf Tata Usaha (TU)',
+  tuNip: '-',
+  tuRank: 'Tata Usaha SMKS IT Al-Hawari',
+  tuTitle: 'Kepala Tata Usaha',
   numberingPattern: '421.3/{urut}/SMKITA/{bulanRomawi}/{tahun}',
   majors: [
     'Multimedia (MM)',

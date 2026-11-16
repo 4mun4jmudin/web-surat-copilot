@@ -3,15 +3,26 @@
  */
 
 import { store } from './state.js';
-import { renderWordCanvas } from './ui/wordCanvas.js';
-import { renderSmartWordCanvas, getActiveSmartDocModel } from './ui/smartWordCanvas.js';
+import {
+  renderWordCanvas,
+  triggerWordCanvasPrintWithChoice,
+  triggerWordCanvasDownloadWithChoice
+} from './ui/wordCanvas.js';
+import {
+  renderSmartWordCanvas,
+  getActiveSmartDocModel,
+  triggerSmartCanvasPrintWithChoice,
+  triggerSmartCanvasDownloadWithChoice
+} from './ui/smartWordCanvas.js';
 import { renderOutgoingLettersView } from './ui/outgoingLettersView.js';
 import { renderVaultView } from './ui/vaultView.js';
 import { renderSchoolProfileView } from './ui/schoolProfileView.js';
 import { renderSettingsView } from './ui/settingsView.js';
+import { renderQrVerificationView } from './ui/verifyView.js';
 import { renderDocx } from './docx/render.js';
 import { downloadFile } from './utils/download.js';
 import { showToast } from './ui/notification.js';
+import { runSafeWindowPrint } from './ui/printChoiceModal.js';
 import { initPwa } from './pwa.js';
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -20,6 +31,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initApp() {
   const mainContainer = document.getElementById('main-content-view');
+  const params = new URLSearchParams(window.location.search);
+  const verifyParam = params.get('v');
+
+  // Rute Publik QR Verifikasi Surat (?v=<verificationId>) — langsung tampilkan portal verifikasi tanpa editor TU
+  if (verifyParam !== null) {
+    renderQrVerificationView(mainContainer, verifyParam);
+    return;
+  }
+
   let currentTab = 'canvas';
 
   // 1. Tab Switching
@@ -65,30 +85,18 @@ function initApp() {
     }
   }
 
-  // 2. Header Quick Download (Mendukung Kanvas Word Pro, Dokumen Bawaan & Berkas Impor)
+  // 2. Header Quick Download (Mendukung Pilihan QR vs TTD Manual pada Kanvas & Word Pro)
   document.getElementById('header-btn-download').addEventListener('click', async () => {
-    const activeDocx = store.getState().activeUploadedDocx;
-
-    // Jika sedang membuka berkas luar (.docx) pada Lembar Kerja standar, terapkan patcher non-destruktif
-    if (currentTab !== 'smart-canvas' && activeDocx && activeDocx.rawBytes) {
-      showToast('Menerapkan editan ke berkas asli (preservasi format 100% utuh)...', 'info');
-      try {
-        const { applyCanvasEditsToDocx } = await import('./docx/patch.js');
-        const patchedBlob = await applyCanvasEditsToDocx(activeDocx.rawBytes, activeDocx.paragraphs || [], { outputType: 'blob' });
-        const safeName = (activeDocx.fileName || 'dokumen_teredit.docx').replace(/\.docx$/i, '') + '_edited.docx';
-        downloadFile(patchedBlob, safeName);
-        showToast('Berkas .docx hasil edit (format asli 100% terjaga) berhasil diunduh.', 'success');
-        return;
-      } catch (err) {
-        showToast(`Gagal mem-patch berkas: ${err.message}`, 'error');
-        return;
-      }
+    if (currentTab === 'smart-canvas') {
+      triggerSmartCanvasDownloadWithChoice();
+      return;
+    }
+    if (currentTab === 'canvas' || mainContainer.querySelector('#editable-sig-date')) {
+      triggerWordCanvasDownloadWithChoice(mainContainer);
+      return;
     }
 
-    // Dokumen standar sistem atau Kanvas Word Pro
-    const docModel = currentTab === 'smart-canvas'
-      ? getActiveSmartDocModel()
-      : store.getState().document;
+    const docModel = store.getState().document || getActiveSmartDocModel();
     showToast('Menyusun berkas Word .docx resmi...', 'info');
     try {
       const blob = await renderDocx(docModel, 'blob');
@@ -102,11 +110,17 @@ function initApp() {
     }
   });
 
-  // 3. Header Quick Print + Tampilkan Konfirmasi Simpan ke Surat Keluar
+  // 3. Header Quick Print (Pilihan Barcode QR Pengesahan vs Kosongan TTD Manual Pulpen)
   document.getElementById('header-btn-print').addEventListener('click', () => {
-    const postPrintBar = document.getElementById('post-print-outgoing-bar');
-    if (postPrintBar) postPrintBar.classList.remove('hidden');
-    window.print();
+    if (currentTab === 'smart-canvas') {
+      triggerSmartCanvasPrintWithChoice();
+      return;
+    }
+    if (currentTab === 'canvas' || mainContainer.querySelector('#editable-sig-date')) {
+      triggerWordCanvasPrintWithChoice(mainContainer);
+      return;
+    }
+    runSafeWindowPrint();
   });
 
   // Inisialisasi PWA (Service Worker & Install App Prompt)

@@ -36,6 +36,15 @@ import { DEFAULT_KOP_DATA_URL } from '../letters/defaultKop.js';
 import { generateLetterNumber, formatSmartNomorSurat, detectLetterTypeCode } from '../letters/numbering.js';
 import { callAiWithValidation, polishMessyDocumentWithAi, editDocumentWithAi } from '../ai/client.js';
 import { COPILOT_SYSTEM_PROMPT, buildCopilotUserPrompt } from '../ai/prompts.js';
+import { renderDocx } from '../docx/render.js';
+import { downloadFile } from '../utils/download.js';
+import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
+import {
+  openPrintSignatureChoiceModal,
+  buildSignerRoleSelectorHtml,
+  authorizeAndRecordOutgoing,
+  printWithTemporaryQrOverlay
+} from './printChoiceModal.js';
 
 // =========================================================================
 // BAGIAN 1: PARSER HTML RINGAN & KONVERTER HTML <-> DOCUMENT MODEL (PURE JS)
@@ -728,7 +737,7 @@ export function renderSignatureTableHtml(sig = {}, school = {}) {
   const title = sig.title || school.principalTitle || 'Kepala Sekolah';
   const name = sig.name || school.principalName || 'Dian Nurhadian, S.Pd.';
   const nipRaw = sig.nip && sig.nip !== '-' ? sig.nip : (school.principalNip || '-');
-  const nipLine = nipRaw && nipRaw !== '-' ? `<br>NIP. ${escapeHtmlText(nipRaw)}` : '';
+  const nipLine = `<br>${escapeHtmlText(formatSignerNipLine(nipRaw))}`;
 
   return `
 <table class="smart-sig-table" data-smart-role="signature">
@@ -936,6 +945,8 @@ export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, lette
 // =========================================================================
 
 let activeLivePagesExtractor = null;
+let activeSmartAuthorizeHandler = null;
+let activeSmartPagesRoot = null;
 
 /**
  * Mengambil DocumentModel terkini dari Kanvas Word Pro (dipanggil header Unduh .docx atau Simpan).
@@ -948,11 +959,148 @@ export function getActiveSmartDocModel() {
     ? activeLivePagesExtractor()
     : (state.smartDocument?.pages || docModelToSmartPages(state.document, school).pages);
 
-  return buildDocModelFromSmartPagesData({
+  const model = buildDocModelFromSmartPagesData({
     pages,
     schoolProfile: school,
     letterOptions: opts,
     meta: state.smartDocument?.meta || {}
+  });
+  if (state.smartDocument?.verification) {
+    model.verification = state.smartDocument.verification;
+  }
+  return model;
+}
+
+/**
+ * Helper global Cetak / PDF untuk Kanvas Word Pro dengan Pilihan Barcode QR vs Kosongan TTD Manual.
+ */
+export function triggerSmartCanvasPrintWithChoice() {
+  const smartDoc = store.getState().smartDocument;
+  const verification = smartDoc?.verification || null;
+  const isRevoked = verification?.verificationStatus === 'revoked';
+  const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
+  const model = getActiveSmartDocModel();
+  const titleText = model.letterData?.formData?.judulSurat || model.meta?.title || 'SURAT DINAS';
+  const nomorText = model.letterData?.formData?.nomorSurat || verification?.nomorSurat || '-';
+
+  const runSmartPrint = (mode, qrDataUrl = '', overrideRole = null, overrideVerif = null) => {
+    const stackEl = activeSmartPagesRoot || document.getElementById('smart-pages-stack');
+    const sigCells = stackEl ? Array.from(stackEl.querySelectorAll('.smart-sig-table .smart-sig-cell')) : [];
+    const targetSigCell = sigCells.length > 0 ? sigCells[sigCells.length - 1] : null;
+    const editables = !targetSigCell && stackEl ? stackEl.querySelectorAll('.smart-editable-page') : [];
+    const lastEditable = editables.length > 0 ? editables[editables.length - 1] : null;
+    const school = store.getState().schoolProfile || {};
+    const v = overrideVerif || verification;
+    const effectiveRole = overrideRole || v?.signerRole || 'kepala_sekolah';
+
+    printWithTemporaryQrOverlay({
+      mode,
+      smartSigCellEl: targetSigCell,
+      smartFallbackEditableEl: !targetSigCell ? lastEditable : null,
+      qrDataUrl,
+      signerRole: effectiveRole,
+      principalName: school.principalName || '',
+      signerName: v?.signerName || '',
+      school
+    });
+  };
+
+  openPrintSignatureChoiceModal({
+    actionType: 'print',
+    isVerifiedSah,
+    isRevoked,
+    nomorSurat: nomorText,
+    title: titleText,
+    qrDataUrl: verification?.qrDataUrl || '',
+    defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
+    signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
+    signerName: verification?.signerName || '',
+    onChooseQr: () => runSmartPrint('qr', verification.qrDataUrl, verification?.signerRole || 'kepala_sekolah'),
+    onChooseManual: () => runSmartPrint('manual'),
+    onAuthorizeAndQr: async (selectedRole) => {
+      if (typeof activeSmartAuthorizeHandler !== 'function') return;
+      const result = await activeSmartAuthorizeHandler(selectedRole, false);
+      runSmartPrint('qr', result.qrDataUrl, selectedRole, result.payload);
+    }
+  });
+}
+
+/**
+ * Helper global Unduh .docx untuk Kanvas Word Pro dengan Pilihan Barcode QR vs Kosongan TTD Manual.
+ */
+export function triggerSmartCanvasDownloadWithChoice() {
+  const smartDoc = store.getState().smartDocument;
+  const verification = smartDoc?.verification || null;
+  const isRevoked = verification?.verificationStatus === 'revoked';
+  const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
+  const model = getActiveSmartDocModel();
+  const titleText = model.letterData?.formData?.judulSurat || model.meta?.title || 'SURAT DINAS';
+  const nomorText = model.letterData?.formData?.nomorSurat || verification?.nomorSurat || '-';
+
+  const runSmartDownload = async (mode, overrideVerif = null) => {
+    const v = overrideVerif || verification;
+    const school = store.getState().schoolProfile || {};
+    const liveModel = getActiveSmartDocModel();
+    const signerInfo = v ? buildSignerSelectionInfo(school, v.signerRole) : null;
+
+    if (mode === 'qr' && v?.qrDataUrl && !liveModel.blocks.some(b => b.type === 'letterSignature')) {
+      liveModel.blocks.push({
+        type: 'letterSignature',
+        city: school.city || 'Garut',
+        date: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+        title: signerInfo?.signerTitle || school.principalTitle || 'Kepala Sekolah',
+        name: signerInfo?.signerName || school.principalName || 'Dian Nurhadian, S.Pd.',
+        nip: signerInfo?.signerNip ?? (school.principalNip || '-'),
+        rank: signerInfo?.signerRank || ''
+      });
+    }
+
+    const finalModel = applySignatureModeToDocModel(liveModel, {
+      mode,
+      qrDataUrl: mode === 'qr' ? (v?.qrDataUrl || '') : '',
+      verificationUrl: mode === 'qr' ? (v?.verificationUrl || '') : '',
+      signerRole: v?.signerRole || 'kepala_sekolah',
+      signerInfo,
+      school,
+      syncSignerFields: false
+    });
+
+    showToast(`Menyusun berkas Word Pro .docx (${mode === 'qr' ? 'dengan Barcode QR' : 'kosongan TTD manual'})...`, 'info');
+    try {
+      const blob = await renderDocx(finalModel, 'blob');
+      const safeTitle = (finalModel.meta?.title || 'surat_word_pro')
+        .replace(/[^a-zA-Z0-9_\-]/g, '_')
+        .slice(0, 45);
+      downloadFile(blob, `${safeTitle}.docx`);
+      showToast('Berkas .docx Word Pro berhasil diunduh.', 'success');
+    } catch (err) {
+      showToast(`Gagal mengunduh: ${err.message}`, 'error');
+    }
+  };
+
+  openPrintSignatureChoiceModal({
+    actionType: 'docx',
+    isVerifiedSah,
+    isRevoked,
+    nomorSurat: nomorText,
+    title: titleText,
+    qrDataUrl: verification?.qrDataUrl || '',
+    defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
+    signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
+    signerName: verification?.signerName || '',
+    onChooseQr: () => runSmartDownload('qr'),
+    onChooseManual: () => runSmartDownload('manual'),
+    onAuthorizeAndQr: async (selectedRole) => {
+      if (typeof activeSmartAuthorizeHandler !== 'function') return;
+      const result = await activeSmartAuthorizeHandler(selectedRole, false);
+      const roleInfo = buildSignerSelectionInfo(store.getState().schoolProfile, selectedRole);
+      await runSmartDownload('qr', {
+        qrDataUrl: result.qrDataUrl,
+        verificationUrl: result.payload?.verificationUrl,
+        signerRole: selectedRole,
+        roleLabel: roleInfo.roleLabel
+      });
+    }
   });
 }
 
@@ -1381,7 +1529,12 @@ export function renderSmartWordCanvas(container) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       const livePages = collectLivePagesData();
-      smartDoc = { ...smartDoc, pages: livePages };
+      const latestVerif = store.getState().smartDocument?.verification;
+      smartDoc = {
+        ...smartDoc,
+        pages: livePages,
+        ...(latestVerif ? { verification: latestVerif } : {})
+      };
       store.setState({ smartDocument: smartDoc }, false);
       updateStatusCounters();
     }, 250);
@@ -2678,7 +2831,7 @@ export function renderSmartWordCanvas(container) {
     };
   }
 
-  function openSmartRecordOutgoingModal({ clearAfterSave = false } = {}) {
+  function buildSmartEntryBase(recordedNomorOverride = '') {
     const snap = extractSmartSnapshotFromPages(collectLivePagesData(), store.getSchoolProfile());
     const nextInfo = store.getNextFormattedOutgoingNomor({
       title: snap.letterTitle,
@@ -2686,12 +2839,50 @@ export function renderSmartWordCanvas(container) {
       currentNomor: snap.nomorSurat
     });
     const firstPara = (snap.blocks || []).find(b => b.type === 'paragraph' && b.text)?.text || '';
+    const liveModel = getActiveSmartDocModel();
+    return {
+      snap,
+      nextInfo,
+      entryBase: {
+        nomorSurat: recordedNomorOverride || nextInfo.nomorSurat,
+        sequenceNumber: nextInfo.sequenceNumber,
+        typeCode: nextInfo.typeCode,
+        year: nextInfo.year,
+        title: snap.letterTitle,
+        perihal: snap.hal || snap.letterTitle,
+        recipientName: snap.tujuan || 'Umum / Tanpa Nama Penerima',
+        tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+        signerName: snap.signer?.name || store.getSchoolProfile()?.principalName || 'Kepala Sekolah',
+        summary: firstPara.slice(0, 160),
+        sourceMode: 'smart',
+        document: liveModel
+      }
+    };
+  }
+
+  activeSmartPagesRoot = pagesStack;
+  activeSmartAuthorizeHandler = async (signerRole = 'kepala_sekolah', clearAfterSave = false) => {
+    const { entryBase } = buildSmartEntryBase('');
+    const result = await authorizeAndRecordOutgoing({
+      entryBase,
+      school: store.getSchoolProfile(),
+      signerRole,
+      authorizeSah: true,
+      syncActiveDocMode: 'smart',
+      clearAfterSave
+    });
+    return result;
+  };
+
+  function openSmartRecordOutgoingModal({ clearAfterSave = false } = {}) {
+    const { snap, nextInfo } = buildSmartEntryBase('');
+    const school = store.getSchoolProfile();
 
     modalRoot.innerHTML = `
       <div class="modal-overlay">
-        <div class="modal-box" style="max-width: 500px;">
+        <div class="modal-box" style="max-width: 540px;">
           <div class="modal-header">
-            <h3>${ICON_CLIPBOARD_CHECK} ${clearAfterSave ? 'Catat ke Surat Keluar Sebelum Mengosongkan' : 'Catat ke Buku Surat Keluar'}</h3>
+            <h3>${ICON_CLIPBOARD_CHECK} ${clearAfterSave ? 'Sahkan &amp; Catat ke Surat Keluar Sebelum Mengosongkan' : 'Catat &amp; Sahkan Surat Keluar'}</h3>
             <button class="btn-icon" id="smart-modal-close">✕</button>
           </div>
           <div class="modal-body" style="display:grid; gap:10px;">
@@ -2702,48 +2893,71 @@ export function renderSmartWordCanvas(container) {
             <div><label class="form-label">Judul / Jenis Surat</label><input id="sm-out-title" class="form-input" value="${escapeHtmlText(snap.letterTitle)}"></div>
             <div><label class="form-label">Perihal</label><input id="sm-out-hal" class="form-input" value="${escapeHtmlText(snap.hal || snap.letterTitle)}"></div>
             <div><label class="form-label">Tujuan / Kepada Yth.</label><input id="sm-out-to" class="form-input" value="${escapeHtmlText(snap.tujuan)}"></div>
+            ${buildSignerRoleSelectorHtml({
+              radioName: 'sm-out-signer-role',
+              checkboxId: 'sm-chk-authorize-sah',
+              defaultRole: store.getState().smartDocument?.verification?.signerRole || 'kepala_sekolah',
+              school
+            })}
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary" id="smart-modal-cancel">Batal</button>
-            <button class="btn btn-primary" id="smart-modal-save-out">${clearAfterSave ? 'Catat Keluar &amp; Kosongkan' : 'Simpan Surat Keluar'}</button>
+            <button class="btn btn-primary" id="smart-modal-save-out">${clearAfterSave ? '🛡️ Sahkan, Catat &amp; Kosongkan' : '🛡️ Sahkan &amp; Simpan Surat Keluar'}</button>
           </div>
         </div>
       </div>`;
     modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
     modalRoot.querySelector('#smart-modal-cancel').onclick = closeSmartModal;
-    modalRoot.querySelector('#smart-modal-save-out').onclick = () => {
-      const liveModel = getActiveSmartDocModel();
+    const btnSaveOut = modalRoot.querySelector('#smart-modal-save-out');
+    btnSaveOut.onclick = async () => {
+      const selectedRole = modalRoot.querySelector('input[name="sm-out-signer-role"]:checked')?.value || 'kepala_sekolah';
+      const authorizeSah = modalRoot.querySelector('#sm-chk-authorize-sah')?.checked !== false;
       const recordedNomor = modalRoot.querySelector('#sm-out-nomor').value.trim();
       const titleVal = modalRoot.querySelector('#sm-out-title').value.trim() || snap.letterTitle;
-      const recorded = store.addOutgoingLetter({
-        nomorSurat: recordedNomor,
-        sequenceNumber: nextInfo.sequenceNumber,
-        typeCode: nextInfo.typeCode,
-        year: nextInfo.year,
-        title: titleVal,
-        perihal: modalRoot.querySelector('#sm-out-hal').value.trim() || titleVal,
-        recipientName: modalRoot.querySelector('#sm-out-to').value.trim() || 'Umum / Tanpa Nama Penerima',
-        tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-        signerName: snap.signer?.name || store.getSchoolProfile()?.principalName || 'Kepala Sekolah',
-        summary: firstPara.slice(0, 160),
-        document: liveModel
-      });
+      const halVal = modalRoot.querySelector('#sm-out-hal').value.trim() || titleVal;
+      const toVal = modalRoot.querySelector('#sm-out-to').value.trim() || 'Umum / Tanpa Nama Penerima';
 
-      closeSmartModal();
-      if (clearAfterSave) {
-        resetSmartCanvasToEmpty(false);
-        showToast(`Tercatat (${recorded.nomorSurat}) ke Surat Keluar & kertas dikosongkan!`, 'success');
-      } else {
-        const afterInfo = store.getNextFormattedOutgoingNomor({
-          title: snap.letterTitle,
-          perihal: snap.hal
+      const liveModel = getActiveSmartDocModel();
+      const firstPara = (snap.blocks || []).find(b => b.type === 'paragraph' && b.text)?.text || '';
+
+      btnSaveOut.disabled = true;
+      btnSaveOut.textContent = authorizeSah ? 'Menyimpan & Mengesahkan QR...' : 'Menyimpan ke Surat Keluar...';
+
+      try {
+        const { recorded, cloudResult } = await authorizeAndRecordOutgoing({
+          entryBase: {
+            nomorSurat: recordedNomor,
+            sequenceNumber: nextInfo.sequenceNumber,
+            typeCode: nextInfo.typeCode,
+            year: nextInfo.year,
+            title: titleVal,
+            perihal: halVal,
+            recipientName: toVal,
+            tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+            signerName: snap.signer?.name || school?.principalName || 'Kepala Sekolah',
+            summary: firstPara.slice(0, 160),
+            sourceMode: 'smart',
+            document: liveModel
+          },
+          school,
+          signerRole: selectedRole,
+          authorizeSah,
+          syncActiveDocMode: 'smart',
+          clearAfterSave
         });
-        const nomorEl = pagesStack.querySelector('[data-smart-role="nomor"]');
-        if (nomorEl) {
-          nomorEl.textContent = `Nomor: ${afterInfo.nomorSurat}`;
-          schedulePersistSmartDoc();
+
+        closeSmartModal();
+        if (clearAfterSave) {
+          resetSmartCanvasToEmpty(false);
+          showToast(`Tercatat (${recorded.nomorSurat})${authorizeSah ? ' & DISAHKAN' : ''} ke Surat Keluar, kertas dikosongkan!`, 'success');
+        } else {
+          showToast(
+            `Tercatat! Nomor ${recorded.nomorSurat}${authorizeSah ? (cloudResult.ok ? ' DISAHKAN (Barcode QR Aktif)' : ' DISAHKAN (Lokal)') : ' tersimpan'} ke Surat Keluar.`,
+            'success'
+          );
         }
-        showToast(`Tercatat! Nomor ${recorded.nomorSurat} disimpan ke Surat Keluar.`, 'success');
+      } finally {
+        btnSaveOut.disabled = false;
       }
     };
   }

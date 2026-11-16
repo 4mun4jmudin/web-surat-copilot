@@ -397,15 +397,94 @@ export function buildIdentityTableXml(rows = []) {
 }
 
 /**
- * Menghasilkan OOXML untuk Blok Tanda Tangan Resmi (rata kanan bawah)
+/**
+ * Menghasilkan OOXML drawing untuk Barcode QR Pengesahan Surat Keluar
  */
-export function buildLetterSignatureXml(sig) {
+export function buildQrDrawingXml(relId = 'rIdQr', widthCm = 2.4, heightCm = 2.4) {
+  const cx = Math.round(widthCm * 360000);
+  const cy = Math.round(heightCm * 360000);
+  return `
+    <w:p>
+      <w:pPr><w:spacing w:before="80" w:after="40" w:line="240" w:lineRule="auto"/></w:pPr>
+      <w:r>
+        <w:drawing>
+          <wp:inline distT="0" distB="0" distL="0" distR="0">
+            <wp:extent cx="${cx}" cy="${cy}"/>
+            <wp:docPr id="99" name="QR Pengesahan Surat"/>
+            <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                  <pic:nvPicPr>
+                    <pic:cNvPr id="99" name="qr.png"/>
+                    <pic:cNvPicPr/>
+                  </pic:nvPicPr>
+                  <pic:blipFill>
+                    <a:blip r:embed="${relId}"/>
+                    <a:stretch><a:fillRect/></a:stretch>
+                  </pic:blipFill>
+                  <pic:spPr>
+                    <a:xfrm>
+                      <a:off x="0" y="0"/>
+                      <a:ext cx="${cx}" cy="${cy}"/>
+                    </a:xfrm>
+                    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                  </pic:spPr>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  `.trim();
+}
+
+/**
+ * Menghasilkan OOXML untuk Blok Tanda Tangan Resmi (rata kanan bawah),
+ * mendukung mode Barcode QR pengesahan atau ruang kosong TTD manual pulpen.
+ */
+export function buildLetterSignatureXml(sig, options = {}) {
   const city = sig.city || 'Garut';
   const date = sig.date || '';
   const title = sig.title || 'Kepala Sekolah';
   const name = sig.name || 'Dian Nurhadian, S.Pd.';
-  const nip = (sig.nip && sig.nip !== '-') ? `NIP. ${sig.nip}` : '';
-  const rank = sig.rank || '';
+  const rawNip = String(sig.nip ?? '').trim();
+  const nip = (!rawNip || rawNip === '-')
+    ? 'NIP. -'
+    : (/^NIP\b/i.test(rawNip) ? rawNip : `NIP. ${rawNip}`);
+  const useQr = sig.signatureMode === 'qr' && (options?.hasQrImage || Boolean(sig.qrImage));
+  const qrCaption = sig.qrCaption || 'Disahkan secara elektronik';
+  const qrSubCaption = String(sig.qrSubCaption || '').trim();
+
+  const signatureBodyXml = useQr
+    ? `
+          ${buildQrDrawingXml('rIdQr', 2.4, 2.4)}
+          <w:p>
+            <w:pPr><w:spacing w:before="0" w:after="${qrSubCaption ? '10' : '40'}" w:line="200" w:lineRule="auto"/></w:pPr>
+            <w:r><w:rPr><w:sz w:val="16"/><w:i/><w:color w:val="166534"/></w:rPr><w:t>${escapeXml(qrCaption)}</w:t></w:r>
+          </w:p>
+          ${qrSubCaption ? `
+          <w:p>
+            <w:pPr><w:spacing w:before="0" w:after="40" w:line="200" w:lineRule="auto"/></w:pPr>
+            <w:r><w:rPr><w:sz w:val="17"/><w:b/><w:color w:val="166534"/></w:rPr><w:t>${escapeXml(qrSubCaption)}</w:t></w:r>
+          </w:p>` : ''}
+          <w:p>
+            <w:pPr><w:spacing w:before="40" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+            <w:r>
+              <w:rPr><w:sz w:val="24"/><w:b/><w:u w:val="single"/></w:rPr>
+              <w:t>${escapeXml(name)}</w:t>
+            </w:r>
+          </w:p>
+    `
+    : `
+          <w:p>
+            <w:pPr><w:spacing w:before="720" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+            <w:r>
+              <w:rPr><w:sz w:val="24"/><w:b/><w:u w:val="single"/></w:rPr>
+              <w:t>${escapeXml(name)}</w:t>
+            </w:r>
+          </w:p>
+    `;
 
   return `
     <w:tbl>
@@ -430,22 +509,11 @@ export function buildLetterSignatureXml(sig) {
             <w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
             <w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${escapeXml(title)},</w:t></w:r>
           </w:p>
-          <w:p>
-            <w:pPr><w:spacing w:before="720" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
-            <w:r>
-              <w:rPr><w:sz w:val="24"/><w:b/><w:u w:val="single"/></w:rPr>
-              <w:t>${escapeXml(name)}</w:t>
-            </w:r>
-          </w:p>
+          ${signatureBodyXml}
           ${nip ? `
           <w:p>
             <w:pPr><w:spacing w:after="0" w:line="220" w:lineRule="auto"/></w:pPr>
             <w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${escapeXml(nip)}</w:t></w:r>
-          </w:p>` : ''}
-          ${rank ? `
-          <w:p>
-            <w:pPr><w:spacing w:after="0" w:line="220" w:lineRule="auto"/></w:pPr>
-            <w:r><w:rPr><w:sz w:val="22"/><w:i/></w:rPr><w:t>${escapeXml(rank)}</w:t></w:r>
           </w:p>` : ''}
         </w:tc>
       </w:tr>

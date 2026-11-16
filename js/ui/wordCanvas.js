@@ -13,6 +13,13 @@ import { renderDocx } from '../docx/render.js';
 import { parseDocxForEditing, applyCanvasEditsToDocx, convertDocxToDocumentModel } from '../docx/patch.js';
 import { polishMessyDocumentWithAi, editDocumentWithAi } from '../ai/client.js';
 import { LETTER_TYPE_CODES, formatSmartNomorSurat } from '../letters/numbering.js';
+import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
+import {
+  openPrintSignatureChoiceModal,
+  buildSignerRoleSelectorHtml,
+  authorizeAndRecordOutgoing,
+  printWithTemporaryQrOverlay
+} from './printChoiceModal.js';
 import { downloadFile } from '../utils/download.js';
 import { showToast } from './notification.js';
 import { DEFAULT_KOP_DATA_URL } from '../letters/defaultKop.js';
@@ -566,7 +573,7 @@ export function renderWordCanvas(container) {
                         ${escapeHtml(docxSig.signer || 'Dian Nurhadian, S.Pd.')}
                       </div>
                       <div contenteditable="true" id="editable-sig-nip" class="editable-field text-left font-nip imported-field" data-anchor-index="${docxSig.nipIndex ?? ''}" spellcheck="false">
-                        ${escapeHtml(docxSig.nip && docxSig.nip !== '-' ? docxSig.nip : 'Kepala SMKS IT Al-Hawari')}
+                        ${escapeHtml(formatSignerNipLine(docxSig.nip))}
                       </div>
                     </div>
                   </div>
@@ -609,7 +616,7 @@ export function renderWordCanvas(container) {
                       <div contenteditable="true" id="editable-sig-title" class="editable-field text-left" spellcheck="false">${hasSigBlock ? `${escapeHtml(sigBlock.title || 'Kepala Sekolah')},` : ''}</div>
                       <div class="sig-space-holder"></div>
                       <div contenteditable="true" id="editable-sig-name" class="editable-field text-left font-bold-underline" spellcheck="false">${hasSigBlock ? escapeHtml(sigBlock.name || schoolSig.principalName || 'Dian Nurhadian, S.Pd.') : ''}</div>
-                      <div contenteditable="true" id="editable-sig-nip" class="editable-field text-left font-nip" spellcheck="false">${hasSigBlock ? (sigBlock.nip && sigBlock.nip !== '-' ? `NIP. ${escapeHtml(sigBlock.nip)}` : escapeHtml(schoolSig.name ? `Kepala ${schoolSig.name}` : 'Kepala SMKS IT Al-Hawari')) : ''}</div>
+                      <div contenteditable="true" id="editable-sig-nip" class="editable-field text-left font-nip" spellcheck="false">${hasSigBlock ? escapeHtml(formatSignerNipLine(sigBlock.nip || schoolSig.principalNip)) : ''}</div>
                     </div>
                   </div>
                 `}
@@ -929,14 +936,20 @@ export function renderWordCanvas(container) {
               <label style="font-size: 12px; font-weight: 700;">Atas Nama / Tujuan Penerima:</label>
               <input type="text" id="input-out-recipient" class="form-control" placeholder="Nama siswa, guru, atau instansi penerima surat...">
             </div>
-            <div class="form-group" style="margin-bottom: 6px;">
+            <div class="form-group" style="margin-bottom: 10px;">
               <label style="font-size: 12px; font-weight: 700;">Perihal / Keterangan Singkat:</label>
               <input type="text" id="input-out-perihal" class="form-control" placeholder="Perihal surat...">
             </div>
+            ${buildSignerRoleSelectorHtml({
+              radioName: 'out-signer-role',
+              checkboxId: 'chk-out-authorize-sah',
+              defaultRole: doc?.verification?.signerRole || 'kepala_sekolah',
+              school: state.schoolProfile
+            })}
           </div>
           <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
             <button type="button" id="btn-cancel-record-outgoing" class="btn btn-secondary">Batal</button>
-            <button type="button" id="btn-confirm-record-outgoing" class="btn btn-primary" style="font-weight: 700;">🔒 Kunci &amp; Catat Surat Keluar</button>
+            <button type="button" id="btn-confirm-record-outgoing" class="btn btn-primary" style="font-weight: 700;">🛡️ Kunci, Sahkan &amp; Catat</button>
           </div>
         </div>
       </div>
@@ -1571,50 +1584,16 @@ function bindRibbonControls(container) {
     });
   }
 
-  // Unduh .docx (Mendukung Dokumen Bawaan & Berkas Impor dengan Preservasi Format)
+  // Unduh .docx (Mendukung Dokumen Bawaan & Berkas Impor dengan Pilihan QR Pengesahan vs TTD Manual)
   const btnDownloadWord = container.querySelector('#btn-download-word');
   if (btnDownloadWord) {
-    btnDownloadWord.addEventListener('click', async () => {
-      const activeDocx = store.getState().activeUploadedDocx;
-
-      // Jika sedang mengedit berkas .docx luar yang diimpor, gunakan Non-Destructive Patcher
-      if (activeDocx && activeDocx.rawBytes) {
-        showToast('Menerapkan editan ke berkas Word asli (preservasi format 100% utuh)...', 'info');
-        try {
-          const patchedBlob = await applyCanvasEditsToDocx(activeDocx.rawBytes, activeDocx.paragraphs || [], { outputType: 'blob' });
-          const safeName = (activeDocx.fileName || 'dokumen_teredit.docx').replace(/\.docx$/i, '') + '_edited.docx';
-          downloadFile(patchedBlob, safeName);
-          showToast('Berkas .docx hasil edit (format asli 100% terjaga) berhasil diunduh.', 'success');
-          return;
-        } catch (err) {
-          showToast(`Gagal mem-patch berkas: ${err.message}`, 'error');
-          return;
-        }
-      }
-
-      const docModel = buildModelFromCanvas(container);
-      showToast('Menyusun berkas Word .docx resmi...', 'info');
-      try {
-        const blob = await renderDocx(docModel, 'blob');
-        const safeTitle = (docModel.meta?.title || 'surat_dinas')
-          .replace(/[^a-zA-Z0-9_\-]/g, '_')
-          .slice(0, 45);
-        downloadFile(blob, `${safeTitle}.docx`);
-        showToast('Berkas .docx berhasil diunduh.', 'success');
-      } catch (err) {
-        showToast(`Gagal mengunduh: ${err.message}`, 'error');
-      }
-    });
+    btnDownloadWord.addEventListener('click', () => triggerWordCanvasDownloadWithChoice(container));
   }
 
-  // Print PDF + Tawarkan Simpan ke Surat Keluar setelah/saat siap dicetak
+  // Print PDF (Dengan Pilihan QR Pengesahan vs Kosongan TTD Manual Pulpen)
   const btnPrintWord = container.querySelector('#btn-print-word');
   if (btnPrintWord) {
-    btnPrintWord.addEventListener('click', () => {
-      const postPrintBar = container.querySelector('#post-print-outgoing-bar');
-      if (postPrintBar) postPrintBar.classList.remove('hidden');
-      window.print();
-    });
+    btnPrintWord.addEventListener('click', () => triggerWordCanvasPrintWithChoice(container));
   }
 
   // Toggle AI Copilot Drawer (sinkron status terbuka/tutup)
@@ -2809,7 +2788,7 @@ function bindDynamicBlockControls(container) {
         if (sigTitle && !sigTitle.innerText.trim()) sigTitle.innerText = 'Kepala Sekolah,';
         if (sigName && !sigName.innerText.trim()) sigName.innerText = school.principalName || 'Dian Nurhadian, S.Pd.';
         if (sigNip && !sigNip.innerText.trim()) {
-          sigNip.innerText = school.principalNip && school.principalNip !== '-' ? `NIP. ${school.principalNip}` : `Kepala ${school.name || 'SMKS IT Al-Hawari'}`;
+          sigNip.innerText = formatSignerNipLine(school.principalNip);
         }
         container.querySelector('[data-canvas-insert="sig"]')?.classList.add('hidden');
         scheduleSync(container);
@@ -3066,6 +3045,7 @@ function buildModelFromCanvas(container) {
     profile: paperSize,
     customMargins: twipMargins,
     isBlankDraft: !hasAnyContent,
+    ...(state.document?.verification ? { verification: state.document.verification } : {}),
     letterData: {
       kopImage: kopImageUrl,
       metaRecipientDeleted: metaRecipientData.isDeleted
@@ -3201,9 +3181,7 @@ function applyAiResultToCanvas(container, aiResult) {
   if (sigTitleEl && !sigTitleEl.innerText.trim()) sigTitleEl.innerText = 'Kepala Sekolah,';
   if (sigNameEl && !sigNameEl.innerText.trim()) sigNameEl.innerText = schoolSig.principalName || 'Dian Nurhadian, S.Pd.';
   if (sigNipEl && !sigNipEl.innerText.trim()) {
-    sigNipEl.innerText = schoolSig.principalNip && schoolSig.principalNip !== '-'
-      ? `NIP. ${schoolSig.principalNip}`
-      : `Kepala ${schoolSig.name || 'SMKS IT Al-Hawari'}`;
+    sigNipEl.innerText = formatSignerNipLine(schoolSig.principalNip);
   }
 
   container.querySelector('[data-canvas-insert="title"]')?.classList.add('hidden');
@@ -3560,36 +3538,61 @@ function bindRecordOutgoingModal(container) {
     });
   }
 
-  if (btnConfirm) {
-    btnConfirm.addEventListener('click', () => {
-      const title = (inputTitle?.value || '').trim() || 'SURAT DINAS';
-      const recipientName = (inputRecipient?.value || '').trim() || 'Umum / Tanpa Nama Penerima';
-      const perihal = (inputPerihal?.value || '').trim() || title;
+  const buildEntryBase = (forcedCode = '', overrideSignerRole = '') => {
+    const title = (inputTitle?.value || '').trim() || extractBestTitle() || 'SURAT DINAS';
+    const perihal = (inputPerihal?.value || '').trim() || extractBestPerihal(title) || title;
+    const recipientName = (inputRecipient?.value || '').trim() || extractBestRecipient() || 'Umum / Tanpa Nama Penerima';
+    const rawNomor = extractBestNomorRaw();
+    const seqInfo = currentSeqInfo || store.getNextFormattedOutgoingNomor({
+      title,
+      perihal,
+      currentNomor: rawNomor,
+      forcedTypeCode: forcedCode
+    });
 
-      const officialNomor = (inputNomor?.value || '').trim() || currentSeqInfo?.nomorSurat || '';
-      const nomorEl = container.querySelector('#editable-doc-nomor');
-      if (nomorEl && officialNomor) {
-        nomorEl.innerText = `Nomor: ${officialNomor}`;
+    const officialNomor = (inputNomor?.value || '').trim() || seqInfo?.nomorSurat || '';
+    const nomorEl = container.querySelector('#editable-doc-nomor');
+    if (nomorEl && officialNomor) {
+      nomorEl.innerText = `Nomor: ${officialNomor}`;
+    }
+
+    const activeDocx = store.getState().activeUploadedDocx;
+    const school = store.getState().schoolProfile || {};
+    const docSnapshot = getActiveSnapshotOrDomModel();
+    const titleBlockInSnap = docSnapshot.blocks?.find(b => b.type === 'letterTitle');
+    if (titleBlockInSnap && officialNomor) {
+      titleBlockInSnap.nomor = `Nomor: ${officialNomor}`;
+    }
+
+    const sigDateEl = container.querySelector('#editable-sig-date');
+    const sigTitleEl = container.querySelector('#editable-sig-title');
+    const sigNameEl = container.querySelector('#editable-sig-name');
+    const sigNipEl = container.querySelector('#editable-sig-nip');
+    const sigBlock = docSnapshot.blocks?.find(b => b.type === 'letterSignature');
+
+    if (overrideSignerRole) {
+      const signerInfo = buildSignerSelectionInfo(school, overrideSignerRole);
+      if (sigBlock) {
+        sigBlock.title = signerInfo.signerTitle;
+        sigBlock.name = signerInfo.signerName;
+        sigBlock.nip = signerInfo.signerNip;
+        sigBlock.rank = signerInfo.signerRank;
       }
+      if (sigTitleEl) sigTitleEl.innerText = `${signerInfo.signerTitle},`;
+      if (sigNameEl) sigNameEl.innerText = signerInfo.signerName;
+      if (sigNipEl) sigNipEl.innerText = formatSignerNipLine(signerInfo.signerNip);
+    }
 
-      const activeDocx = store.getState().activeUploadedDocx;
-      const docSnapshot = getActiveSnapshotOrDomModel();
-      const titleBlockInSnap = docSnapshot.blocks?.find(b => b.type === 'letterTitle');
-      if (titleBlockInSnap && officialNomor) {
-        titleBlockInSnap.nomor = `Nomor: ${officialNomor}`;
-      }
+    const firstPara = container.querySelector('#sheet-dynamic-blocks .paragraph-box')?.innerText.trim()
+      || docSnapshot.blocks?.find(b => b.type === 'paragraph')?.text
+      || '';
 
-      const sigDateEl = container.querySelector('#editable-sig-date');
-      const sigNameEl = container.querySelector('#editable-sig-name');
-      const sigBlock = docSnapshot.blocks?.find(b => b.type === 'letterSignature');
-      const firstPara = container.querySelector('#sheet-dynamic-blocks .paragraph-box')?.innerText.trim()
-        || docSnapshot.blocks?.find(b => b.type === 'paragraph')?.text
-        || '';
-
-      const recorded = store.addOutgoingLetter({
-        sequenceNumber: currentSeqInfo?.sequenceNumber,
-        year: currentSeqInfo?.year,
-        typeCode: selectType?.value || currentSeqInfo?.typeCode,
+    return {
+      seqInfo,
+      entryBase: {
+        sequenceNumber: seqInfo?.sequenceNumber,
+        year: seqInfo?.year,
+        typeCode: forcedCode || selectType?.value || seqInfo?.typeCode,
         nomorSurat: officialNomor,
         title,
         recipientName,
@@ -3599,24 +3602,204 @@ function bindRecordOutgoingModal(container) {
           || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
         signerName: sigNameEl?.innerText.trim() || sigBlock?.name || 'Kepala Sekolah',
         summary: firstPara.slice(0, 160),
+        sourceMode: 'standard',
         document: docSnapshot,
         uploadedDocx: activeDocx || null
-      });
+      }
+    };
+  };
 
+  container.__authorizeStandardLetter = async (signerRole = 'kepala_sekolah', clearAfterSave = false) => {
+    currentSeqInfo = null;
+    const { entryBase } = buildEntryBase('', signerRole);
+    return authorizeAndRecordOutgoing({
+      entryBase,
+      school: store.getState().schoolProfile,
+      signerRole,
+      authorizeSah: true,
+      syncActiveDocMode: 'standard',
+      clearAfterSave
+    });
+  };
+
+  if (btnConfirm) {
+    btnConfirm.addEventListener('click', async () => {
+      const selectedRole = modal.querySelector('input[name="out-signer-role"]:checked')?.value || 'kepala_sekolah';
+      const authorizeSah = modal.querySelector('#chk-out-authorize-sah')?.checked !== false;
       const shouldClearAfterSave = Boolean(container.__clearCanvasAfterOutgoing);
-      closeModal(false);
-      container.__clearCanvasAfterOutgoing = false;
-      if (postPrintBar) postPrintBar.classList.add('hidden');
 
-      if (shouldClearAfterSave) {
-        resetWordCanvasToBlank(container);
-        showToast(`✓ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat}) atas nama "${recorded.recipientName}" tersimpan ke Surat Keluar & kanvas dikosongkan!`, 'success');
-      } else {
-        showToast(`✓ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat}) atas nama "${recorded.recipientName}" tersimpan & terkunci di Surat Keluar!`, 'success');
-        renderWordCanvas(container);
+      btnConfirm.disabled = true;
+      btnConfirm.textContent = authorizeSah ? 'Menyimpan & Mengesahkan QR...' : 'Menyimpan ke Surat Keluar...';
+
+      try {
+        const { entryBase } = buildEntryBase('', authorizeSah ? selectedRole : '');
+        const { recorded, cloudResult } = await authorizeAndRecordOutgoing({
+          entryBase,
+          school: store.getState().schoolProfile,
+          signerRole: selectedRole,
+          authorizeSah,
+          syncActiveDocMode: 'standard',
+          clearAfterSave: shouldClearAfterSave
+        });
+
+        closeModal(false);
+        container.__clearCanvasAfterOutgoing = false;
+        if (postPrintBar) postPrintBar.classList.add('hidden');
+
+        if (shouldClearAfterSave) {
+          resetWordCanvasToBlank(container);
+          showToast(
+            `✓ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat}) atas nama "${recorded.recipientName}" tersimpan${authorizeSah ? ' & DISAHKAN' : ''} lalu kanvas dikosongkan!`,
+            'success'
+          );
+        } else {
+          showToast(
+            `✓ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat})${authorizeSah ? (cloudResult.ok ? ' DISAHKAN (QR Cloud Aktif)' : ' DISAHKAN (Lokal)') : ' tersimpan'} di Surat Keluar!`,
+            'success'
+          );
+          renderWordCanvas(container);
+        }
+      } finally {
+        btnConfirm.disabled = false;
+        btnConfirm.textContent = '🛡️ Kunci, Sahkan & Catat';
       }
     });
   }
+}
+
+/**
+ * Helper aktif untuk Cetak / PDF pada Lembar Kerja dengan Modal Pilihan Barcode QR vs TTD Manual Pulpen.
+ */
+export function triggerWordCanvasPrintWithChoice(container) {
+  if (!container) return;
+  const doc = store.getState().document;
+  const verification = doc?.verification || null;
+  const isRevoked = verification?.verificationStatus === 'revoked';
+  const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
+  const titleText = container.querySelector('#editable-doc-title')?.innerText.trim() || doc?.meta?.title || 'SURAT DINAS';
+  const nomorText = (container.querySelector('#editable-doc-nomor')?.innerText.trim() || verification?.nomorSurat || '-').replace(/^Nomor:\s*/i, '');
+
+  const runPrint = (mode, qrDataUrl = '', overrideRole = null, overrideVerif = null) => {
+    const holder = container.querySelector('.sheet-signature-wrapper .sig-space-holder');
+    const postPrintBar = container.querySelector('#post-print-outgoing-bar');
+    const school = store.getState().schoolProfile || {};
+    const v = overrideVerif || verification;
+    const effectiveRole = overrideRole || v?.signerRole || 'kepala_sekolah';
+    printWithTemporaryQrOverlay({
+      mode,
+      standardHolderEl: holder,
+      qrDataUrl,
+      signerRole: effectiveRole,
+      principalName: school.principalName || '',
+      signerName: v?.signerName || '',
+      school,
+      onAfterPrint: () => {
+        if (!isVerifiedSah && mode === 'manual' && postPrintBar) {
+          postPrintBar.classList.remove('hidden');
+        }
+      }
+    });
+  };
+
+  openPrintSignatureChoiceModal({
+    actionType: 'print',
+    isVerifiedSah,
+    isRevoked,
+    nomorSurat: nomorText,
+    title: titleText,
+    qrDataUrl: verification?.qrDataUrl || '',
+    defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
+    signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
+    signerName: verification?.signerName || '',
+    onChooseQr: () => runPrint('qr', verification.qrDataUrl, verification?.signerRole || 'kepala_sekolah'),
+    onChooseManual: () => runPrint('manual'),
+    onAuthorizeAndQr: async (selectedRole) => {
+      if (typeof container.__authorizeStandardLetter !== 'function') return;
+      const result = await container.__authorizeStandardLetter(selectedRole, false);
+      runPrint('qr', result.qrDataUrl, selectedRole, result.payload);
+    }
+  });
+}
+
+/**
+ * Helper aktif untuk Unduh .docx pada Lembar Kerja dengan Modal Pilihan Barcode QR vs TTD Manual Pulpen.
+ */
+export function triggerWordCanvasDownloadWithChoice(container) {
+  if (!container) return;
+  const activeDocx = store.getState().activeUploadedDocx;
+  if (activeDocx && activeDocx.rawBytes) {
+    (async () => {
+      showToast('Menerapkan editan ke berkas Word asli (preservasi format 100% utuh)...', 'info');
+      try {
+        const patchedBlob = await applyCanvasEditsToDocx(activeDocx.rawBytes, activeDocx.paragraphs || [], { outputType: 'blob' });
+        const safeName = (activeDocx.fileName || 'dokumen_teredit.docx').replace(/\.docx$/i, '') + '_edited.docx';
+        downloadFile(patchedBlob, safeName);
+        showToast('Berkas .docx hasil edit (format asli 100% terjaga) berhasil diunduh.', 'success');
+      } catch (err) {
+        showToast(`Gagal mem-patch berkas: ${err.message}`, 'error');
+      }
+    })();
+    return;
+  }
+
+  const doc = store.getState().document;
+  const verification = doc?.verification || null;
+  const isRevoked = verification?.verificationStatus === 'revoked';
+  const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
+  const titleText = container.querySelector('#editable-doc-title')?.innerText.trim() || doc?.meta?.title || 'SURAT DINAS';
+  const nomorText = (container.querySelector('#editable-doc-nomor')?.innerText.trim() || verification?.nomorSurat || '-').replace(/^Nomor:\s*/i, '');
+
+  const runDownload = async (mode, overrideVerif = null) => {
+    const v = overrideVerif || verification;
+    const rawModel = buildModelFromCanvas(container);
+    const school = store.getState().schoolProfile || {};
+    const signerInfo = v ? buildSignerSelectionInfo(school, v.signerRole) : null;
+    const finalModel = applySignatureModeToDocModel(rawModel, {
+      mode,
+      qrDataUrl: mode === 'qr' ? (v?.qrDataUrl || '') : '',
+      verificationUrl: mode === 'qr' ? (v?.verificationUrl || '') : '',
+      signerRole: v?.signerRole || 'kepala_sekolah',
+      signerInfo,
+      school,
+      syncSignerFields: false
+    });
+    showToast(`Menyusun berkas Word .docx (${mode === 'qr' ? 'dengan Barcode QR' : 'kosongan TTD manual'})...`, 'info');
+    try {
+      const blob = await renderDocx(finalModel, 'blob');
+      const safeTitle = (finalModel.meta?.title || 'surat_dinas')
+        .replace(/[^a-zA-Z0-9_\-]/g, '_')
+        .slice(0, 45);
+      downloadFile(blob, `${safeTitle}.docx`);
+      showToast('Berkas .docx berhasil diunduh.', 'success');
+    } catch (err) {
+      showToast(`Gagal mengunduh: ${err.message}`, 'error');
+    }
+  };
+
+  openPrintSignatureChoiceModal({
+    actionType: 'docx',
+    isVerifiedSah,
+    isRevoked,
+    nomorSurat: nomorText,
+    title: titleText,
+    qrDataUrl: verification?.qrDataUrl || '',
+    defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
+    signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
+    signerName: verification?.signerName || '',
+    onChooseQr: () => runDownload('qr'),
+    onChooseManual: () => runDownload('manual'),
+    onAuthorizeAndQr: async (selectedRole) => {
+      if (typeof container.__authorizeStandardLetter !== 'function') return;
+      const result = await container.__authorizeStandardLetter(selectedRole, false);
+      const roleInfo = buildSignerSelectionInfo(store.getState().schoolProfile, selectedRole);
+      await runDownload('qr', {
+        qrDataUrl: result.qrDataUrl,
+        verificationUrl: result.payload?.verificationUrl,
+        signerRole: selectedRole,
+        roleLabel: roleInfo.roleLabel
+      });
+    }
+  });
 }
 
 /**
