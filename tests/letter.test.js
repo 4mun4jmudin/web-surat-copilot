@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SCHOOL_PROFILE } from '../js/letters/schoolProfile.js';
+import { DEFAULT_SCHOOL_PROFILE, normalizeSchoolProfileNaming } from '../js/letters/schoolProfile.js';
 import { suratKeteranganTemplate } from '../js/letters/templates/suratKeterangan.js';
 import { validateDocument } from '../js/model/schema.js';
 import { renderDocx, getProfile } from '../js/docx/render.js';
@@ -70,15 +70,24 @@ test('Renderer DOCX: Merender Surat Dinas lengkap dengan Kop, Garis Ganda, dan L
   // Periksa konten XML
   const documentXml = await zip.file('word/document.xml').async('text');
   assert.match(documentXml, /PEMERINTAH DAERAH PROVINSI JAWA BARAT/, 'Harus ada teks kop pemerintah');
-  assert.match(documentXml, /SMKS IT AL-HAWARI/, 'Harus ada nama sekolah');
+  assert.match(documentXml, /SMK IT AL-HAWARI/, 'Harus ada nama sekolah');
+  assert.ok(!documentXml.includes('SMKS IT'), 'Tidak boleh ada huruf S tambahan (SMKS)');
   assert.match(documentXml, /w:val="double"/, 'Harus ada garis ganda kop surat');
   assert.match(documentXml, /SURAT KETERANGAN SISWA AKTIF/, 'Harus ada judul surat');
   assert.match(documentXml, /Budi Santoso/, 'Harus ada nama siswa');
   assert.match(documentXml, /Dian Nurhadian, S\.Pd\./, 'Harus ada nama kepala sekolah');
 });
 
-test('Profil Sekolah Bawaan: SMKS IT Al-Hawari memiliki identitas lengkap dan akurat', () => {
-  assert.equal(DEFAULT_SCHOOL_PROFILE.schoolName, 'SMKS IT AL-HAWARI');
+test('Profil Sekolah Bawaan: SMK IT Al-Hawari memiliki identitas lengkap dan akurat', () => {
+  assert.equal(DEFAULT_SCHOOL_PROFILE.schoolName, 'SMK IT AL-HAWARI');
+  const migrated = normalizeSchoolProfileNaming({
+    schoolName: 'SMKS IT AL-HAWARI',
+    principalRank: 'Kepala SMKS IT Al-Hawari',
+    tuRank: 'Tata Usaha SMKS IT Al-Hawari'
+  });
+  assert.equal(migrated.schoolName, 'SMK IT AL-HAWARI');
+  assert.equal(migrated.principalRank, 'Kepala SMK IT Al-Hawari');
+  assert.equal(migrated.tuRank, 'Tata Usaha SMK IT Al-Hawari');
   assert.equal(DEFAULT_SCHOOL_PROFILE.npsn, '69758993');
   assert.equal(DEFAULT_SCHOOL_PROFILE.principalName, 'Dian Nurhadian, S.Pd.');
   assert.equal(DEFAULT_SCHOOL_PROFILE.foundation, 'Yayasan Nunuk Kartini Al-Irsyad');

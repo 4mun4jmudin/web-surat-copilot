@@ -4,10 +4,16 @@
  * Gudang Galeri Kop Surat, Skala Zoom Kanvas, dan Riwayat Undo/Redo.
  */
 
-import { DEFAULT_SCHOOL_PROFILE } from './letters/schoolProfile.js';
+import { DEFAULT_SCHOOL_PROFILE, normalizeSchoolProfileNaming, normalizeSmkText } from './letters/schoolProfile.js';
 import { suratKeteranganTemplate } from './letters/templates/suratKeterangan.js';
 import { DEFAULT_KOP_GALLERY, DEFAULT_KOP_DATA_URL } from './letters/defaultKop.js';
 import { detectLetterTypeCode, formatSequenceNumber, toRomanMonth, buildOrderedNomorSurat, LETTER_TYPE_CODES } from './letters/numbering.js';
+import { DEFAULT_ACCESS_PERMISSIONS } from './auth/permissions.js';
+import {
+  clearStoredAuthToken,
+  getStoredAuthToken,
+  saveWorkspaceStatePatch
+} from './sync/workspaceClient.js';
 
 const DB_NAME = 'ai_school_doc_builder_db';
 const DB_VERSION = 5;
@@ -19,7 +25,7 @@ const STORE_KOP_GALLERY = 'kop_gallery';
 const STORE_LETTER_VAULT = 'letter_vault';
 const STORE_OUTGOING_LETTERS = 'outgoing_letters';
 
-// Nilai awal form surat keterangan (SMKS IT Al-Hawari)
+// Nilai awal form surat keterangan (SMK IT Al-Hawari)
 const INITIAL_FORM_DATA = {
   nomorSurat: buildOrderedNomorSurat({ typeCode: 'KET', sequenceNumber: 1 }),
   tanggalSurat: '14 November 2026',
@@ -49,7 +55,7 @@ export function createEmptyDocumentModel(schoolProfile = DEFAULT_SCHOOL_PROFILE,
   return {
     meta: {
       title: 'Dokumen Baru',
-      author: schoolProfile?.schoolName || 'SMKS IT Al-Hawari',
+      author: schoolProfile?.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: options?.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
@@ -238,8 +244,27 @@ class StateStore {
       letterVault: JSON.parse(JSON.stringify(DEFAULT_LETTER_VAULT)),
       outgoingLetters: [],
       smartDocument: null,
-      activeUploadedDocx: null
+      activeUploadedDocx: null,
+      authUser: null,
+      authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
+      driveStatus: {
+        configured: false,
+        accountEmail: 'tuancraf1@gmail.com',
+        rootFolderId: '19nFdoJ4VOEgFmUe_heAFxoFEt-9U9Crw',
+        rootFolderUrl: 'https://drive.google.com/drive/folders/19nFdoJ4VOEgFmUe_heAFxoFEt-9U9Crw',
+        sheetUrl: '',
+        lastSyncAt: '',
+        lastError: ''
+      },
+      managedUsers: [],
+      cloudSyncState: 'local',
+      cloudLastSyncAt: '',
+      syncRev: 1
     };
+
+    this.cloudSyncQueue = {};
+    this.cloudSyncTimer = null;
+    this.suppressCloudSync = false;
 
     this.db = null;
     this.initIndexedDb();
@@ -320,6 +345,289 @@ class StateStore {
       schoolProfile: updated,
       document: newDoc
     }, true);
+    this.queueCloudSyncPatch({ schoolProfile: updated });
+  }
+
+  saveSchoolProfile(profile) {
+    this.saveToIndexedDb(STORE_SCHOOL, 'profile', profile);
+  }
+
+  saveKopGallery(gallery) {
+    this.saveToIndexedDb(STORE_KOP_GALLERY, 'gallery_list', gallery);
+  }
+
+  setAuthSessionData({ user = null, permissions = null, driveStatus = null, users = null } = {}) {
+    const patch = {};
+    if (user !== undefined) patch.authUser = user;
+    if (permissions) patch.authPermissions = { ...DEFAULT_ACCESS_PERMISSIONS, ...permissions };
+    if (driveStatus) patch.driveStatus = { ...this.state.driveStatus, ...driveStatus };
+    if (Array.isArray(users)) patch.managedUsers = users;
+    this.setState(patch, false);
+  }
+
+  clearAuthState() {
+    clearStoredAuthToken();
+    this.cloudSyncQueue = {};
+    if (this.cloudSyncTimer) {
+      clearTimeout(this.cloudSyncTimer);
+      this.cloudSyncTimer = null;
+    }
+    this.setState({
+      authUser: null,
+      authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
+      managedUsers: [],
+      cloudSyncState: 'local'
+    }, false);
+  }
+
+  mergeApiVaultWithRemote(localVault = [], remoteVaultObj = null) {
+    const remoteItems = Array.isArray(remoteVaultObj?.items) ? remoteVaultObj.items : [];
+    const byId = new Map();
+    for (const item of localVault) {
+      if (item?.id) byId.set(item.id, { ...item });
+    }
+    for (const item of remoteItems) {
+      if (!item?.id) continue;
+      const prev = byId.get(item.id);
+      if (!prev) {
+        byId.set(item.id, { ...item });
+      } else {
+        const prevTs = Number(prev.updatedAt || prev.createdAt || 0);
+        const remoteTs = Number(item.updatedAt || item.createdAt || 0);
+        if (remoteTs >= prevTs || !prev.apiKey) {
+          byId.set(item.id, { ...prev, ...item });
+        }
+      }
+    }
+    const hydrated = Array.from(byId.values()).map(entry => {
+      if (!(entry.apiKey || '').trim()) {
+        const builtinKey = getBuiltinSystemKey(entry.id);
+        if (builtinKey) return { ...entry, apiKey: builtinKey };
+      }
+      return entry;
+    });
+    const activeId = remoteVaultObj?.activeApiId || hydrated.find(v => v.isActive)?.id || hydrated[0]?.id || 'gemini-auto';
+    return {
+      activeId,
+      items: hydrated.map(v => ({ ...v, isActive: v.id === activeId }))
+    };
+  }
+
+  applyRemoteBootstrap(payload = {}) {
+    if (!payload || !payload.ok) return;
+    this.suppressCloudSync = true;
+    try {
+      const ws = payload.workspace || {};
+      const nextPatch = {
+        authUser: payload.user || this.state.authUser,
+        authPermissions: payload.permissions ? { ...DEFAULT_ACCESS_PERMISSIONS, ...payload.permissions } : this.state.authPermissions,
+        driveStatus: payload.driveStatus ? { ...this.state.driveStatus, ...payload.driveStatus } : this.state.driveStatus,
+        cloudSyncState: 'synced',
+        cloudLastSyncAt: payload.syncedAt || new Date().toISOString(),
+        syncRev: Number(payload.syncRev || payload.rev) || this.state.syncRev || 1
+      };
+      if (Array.isArray(payload.users)) {
+        nextPatch.managedUsers = payload.users;
+      }
+      if (ws.schoolProfile) {
+        const normalizedSchool = normalizeSchoolProfileNaming(ws.schoolProfile);
+        nextPatch.schoolProfile = normalizedSchool;
+        if (!this.state.document || this.state.document.isBlankDraft) {
+          nextPatch.document = createEmptyDocumentModel(normalizedSchool, this.getLetterOptions());
+        } else {
+          nextPatch.document = {
+            ...this.state.document,
+            blocks: (this.state.document.blocks || []).map(b => (
+              b.type === 'letterKop' ? { ...b, school: normalizedSchool, image: normalizedSchool.kopImage || b.image } : b
+            ))
+          };
+        }
+      }
+      if (Array.isArray(ws.kopGallery) && ws.kopGallery.length > 0) {
+        nextPatch.kopGallery = ws.kopGallery.map(k => ({
+          ...k,
+          name: normalizeSmkText(k.name),
+          description: normalizeSmkText(k.description),
+          dataUrl: typeof k.dataUrl === 'string' && k.dataUrl.startsWith('data:image/svg+xml')
+            ? k.dataUrl.replace(/SMKS(?=(%20|\s))/g, 'SMK')
+            : k.dataUrl
+        }));
+      }
+      if (Array.isArray(ws.letterVault) && ws.letterVault.length > 0) {
+        nextPatch.letterVault = ws.letterVault;
+      }
+      if (Array.isArray(ws.agendaBook)) {
+        nextPatch.agendaBook = ws.agendaBook;
+      }
+      if (Array.isArray(ws.outgoingLetters)) {
+        nextPatch.outgoingLetters = ws.outgoingLetters;
+      }
+      if (ws.apiVault?.items) {
+        const mergedApi = this.mergeApiVaultWithRemote(this.state.apiVault, ws.apiVault);
+        nextPatch.apiVault = mergedApi.items;
+        nextPatch.activeApiId = mergedApi.activeId;
+      }
+
+      this.setState(nextPatch, false);
+      if (nextPatch.outgoingLetters) {
+        this.saveOutgoingLetters(nextPatch.outgoingLetters);
+        this.syncActiveDocumentNumberToNextOutgoing(false);
+      }
+      if (nextPatch.letterVault) {
+        this.saveLetterVault(nextPatch.letterVault);
+      }
+    } finally {
+      this.suppressCloudSync = false;
+    }
+  }
+
+  /**
+   * Menerapkan perubahan live SPA dari polling latar belakang tanpa mereset kanvas/draf yang sedang diketik.
+   */
+  applyLiveWorkspaceDelta(payload = {}) {
+    if (!payload || !payload.ok || !payload.changed) return false;
+    this.suppressCloudSync = true;
+    try {
+      const ws = payload.workspace || {};
+      const nextPatch = {
+        syncRev: Number(payload.rev || payload.syncRev) || this.state.syncRev || 1,
+        cloudSyncState: 'synced',
+        cloudLastSyncAt: payload.syncedAt || new Date().toISOString()
+      };
+
+      if (payload.permissions) {
+        nextPatch.authPermissions = { ...DEFAULT_ACCESS_PERMISSIONS, ...payload.permissions };
+      }
+      if (payload.driveStatus) {
+        nextPatch.driveStatus = { ...this.state.driveStatus, ...payload.driveStatus };
+      }
+      if (Array.isArray(ws.outgoingLetters)) {
+        nextPatch.outgoingLetters = ws.outgoingLetters;
+      }
+      if (Array.isArray(ws.letterVault)) {
+        nextPatch.letterVault = ws.letterVault;
+      }
+      if (Array.isArray(ws.kopGallery)) {
+        nextPatch.kopGallery = ws.kopGallery.map(k => ({
+          ...k,
+          name: normalizeSmkText(k.name),
+          description: normalizeSmkText(k.description)
+        }));
+      }
+      if (ws.schoolProfile) {
+        const normalizedSchool = normalizeSchoolProfileNaming(ws.schoolProfile);
+        nextPatch.schoolProfile = normalizedSchool;
+        if (this.state.document?.isBlankDraft) {
+          nextPatch.document = createEmptyDocumentModel(normalizedSchool, this.getLetterOptions());
+        }
+      }
+      if (ws.apiVault?.items) {
+        const mergedApi = this.mergeApiVaultWithRemote(this.state.apiVault, ws.apiVault);
+        nextPatch.apiVault = mergedApi.items;
+        nextPatch.activeApiId = mergedApi.activeId;
+      }
+
+      this.setState(nextPatch, false);
+
+      if (nextPatch.outgoingLetters) {
+        this.saveOutgoingLetters(nextPatch.outgoingLetters);
+        // Sinkronkan hanya metadata .verification dokumen aktif jika surat tersebut baru di-ACC / ditolak (tanpa mereset ketikan/kurser)
+        const stdOutId = this.state.document?.verification?.outgoingId;
+        if (stdOutId && !nextPatch.document) {
+          const matchedStd = nextPatch.outgoingLetters.find(x => x.id === stdOutId);
+          if (matchedStd && (
+            matchedStd.verificationStatus !== this.state.document.verification.verificationStatus ||
+            matchedStd.qrDataUrl !== this.state.document.verification.qrDataUrl
+          )) {
+            this.state.document.verification = {
+              ...this.state.document.verification,
+              isVerifiedSah: Boolean(matchedStd.isVerifiedSah),
+              verificationStatus: matchedStd.verificationStatus,
+              accStatus: matchedStd.accStatus || '',
+              verificationId: matchedStd.verificationId || '',
+              verificationUrl: matchedStd.verificationUrl || '',
+              qrDataUrl: matchedStd.qrDataUrl || '',
+              rejectedReason: matchedStd.rejectedReason || ''
+            };
+          }
+        }
+        const smartOutId = this.state.smartDocument?.verification?.outgoingId;
+        if (smartOutId) {
+          const matchedSmart = nextPatch.outgoingLetters.find(x => x.id === smartOutId);
+          if (matchedSmart && (
+            matchedSmart.verificationStatus !== this.state.smartDocument.verification.verificationStatus ||
+            matchedSmart.qrDataUrl !== this.state.smartDocument.verification.qrDataUrl
+          )) {
+            this.state.smartDocument.verification = {
+              ...this.state.smartDocument.verification,
+              isVerifiedSah: Boolean(matchedSmart.isVerifiedSah),
+              verificationStatus: matchedSmart.verificationStatus,
+              accStatus: matchedSmart.accStatus || '',
+              verificationId: matchedSmart.verificationId || '',
+              verificationUrl: matchedSmart.verificationUrl || '',
+              qrDataUrl: matchedSmart.qrDataUrl || '',
+              rejectedReason: matchedSmart.rejectedReason || ''
+            };
+          }
+        }
+        if (this.state.document?.isBlankDraft) {
+          this.syncActiveDocumentNumberToNextOutgoing(false);
+        }
+      }
+      if (nextPatch.letterVault) {
+        this.saveLetterVault(nextPatch.letterVault);
+      }
+      return true;
+    } finally {
+      this.suppressCloudSync = false;
+    }
+  }
+
+  upsertOutgoingLetterFromCloud(item) {
+    if (!item?.id) return item;
+    const list = this.getOutgoingLetters();
+    const exists = list.some(x => x.id === item.id);
+    const updated = (exists ? list.map(x => (x.id === item.id ? item : x)) : [item, ...list]).sort((a, b) => {
+      const yDiff = Number(b.year || 0) - Number(a.year || 0);
+      if (yDiff !== 0) return yDiff;
+      return (Number(b.sequenceNumber) || 0) - (Number(a.sequenceNumber) || 0);
+    });
+    this.setState({ outgoingLetters: updated }, false);
+    this.saveOutgoingLetters(updated);
+    return item;
+  }
+
+  queueCloudSyncPatch(patch = {}, immediate = false) {
+    if (this.suppressCloudSync || typeof window === 'undefined') return;
+    if (!this.state.authUser || !getStoredAuthToken()) return;
+
+    this.cloudSyncQueue = { ...this.cloudSyncQueue, ...patch };
+    if (this.cloudSyncTimer) clearTimeout(this.cloudSyncTimer);
+    if (immediate) {
+      this.flushCloudSyncQueue();
+      return;
+    }
+    this.cloudSyncTimer = setTimeout(() => {
+      this.flushCloudSyncQueue();
+    }, 350);
+  }
+
+  async flushCloudSyncQueue() {
+    this.cloudSyncTimer = null;
+    const payload = { ...this.cloudSyncQueue };
+    this.cloudSyncQueue = {};
+    if (Object.keys(payload).length === 0 || !getStoredAuthToken()) return;
+
+    this.setState({ cloudSyncState: 'syncing' }, false);
+    const res = await saveWorkspaceStatePatch(payload);
+    if (res.ok) {
+      this.setState({
+        cloudSyncState: 'synced',
+        cloudLastSyncAt: res.syncedAt || new Date().toISOString()
+      }, false);
+    } else {
+      this.setState({ cloudSyncState: 'error' }, false);
+    }
   }
 
   // --- PEMBARUAN FORM SURAT ---
@@ -395,26 +703,31 @@ class StateStore {
   }
 
   setActiveApi(id) {
+    const now = Date.now();
     const vault = this.getApiVault().map(item => ({
       ...item,
-      isActive: item.id === id
+      isActive: item.id === id,
+      updatedAt: item.id === id ? now : item.updatedAt
     }));
     this.setState({
       apiVault: vault,
       activeApiId: id
     });
+    this.queueCloudSyncPatch({ apiVault: vault, activeApiId: id, replaceApiVault: true });
   }
 
   addApiVaultEntry(entry) {
+    const now = Date.now();
     const newEntry = {
-      id: entry.id || `api-${Date.now()}`,
+      id: entry.id || `api-${now}-${Math.random().toString(36).slice(2, 6)}`,
       label: entry.label || 'Koneksi AI Baru',
       provider: entry.provider || 'gemini',
       model: entry.model || 'gemini-2.0-flash',
       apiKey: entry.apiKey || '',
       baseUrl: entry.baseUrl || '',
       isActive: !!entry.isActive,
-      createdAt: Date.now()
+      createdAt: now,
+      updatedAt: now
     };
 
     let vault = [...this.getApiVault()];
@@ -423,16 +736,19 @@ class StateStore {
     }
     vault.push(newEntry);
 
+    const nextActiveId = newEntry.isActive ? newEntry.id : this.state.activeApiId;
     this.setState({
       apiVault: vault,
-      activeApiId: newEntry.isActive ? newEntry.id : this.state.activeApiId
+      activeApiId: nextActiveId
     });
+    this.queueCloudSyncPatch({ apiVault: vault, activeApiId: nextActiveId, replaceApiVault: true });
   }
 
   updateApiVaultEntry(id, patch) {
+    const now = Date.now();
     const vault = this.getApiVault().map(item => {
       if (item.id === id) {
-        return { ...item, ...patch };
+        return { ...item, ...patch, updatedAt: now };
       }
       if (patch.isActive && item.id !== id) {
         return { ...item, isActive: false };
@@ -442,6 +758,7 @@ class StateStore {
 
     const activeId = patch.isActive ? id : this.state.activeApiId;
     this.setState({ apiVault: vault, activeApiId: activeId });
+    this.queueCloudSyncPatch({ apiVault: vault, activeApiId: activeId, replaceApiVault: true });
   }
 
   removeApiVaultEntry(id) {
@@ -452,6 +769,7 @@ class StateStore {
       if (vault[0]) vault[0].isActive = true;
     }
     this.setState({ apiVault: vault, activeApiId: activeId });
+    this.queueCloudSyncPatch({ apiVault: vault, activeApiId: activeId, replaceApiVault: true });
   }
 
   // --- GUDANG KOP SURAT (KOP GALLERY) METHODS ---
@@ -471,12 +789,17 @@ class StateStore {
 
     const gallery = [newKop, ...this.getKopGallery()];
     this.setState({ kopGallery: gallery });
+    this.queueCloudSyncPatch({
+      kopGallery: gallery,
+      syncDriveItem: { type: 'kop', item: newKop }
+    });
     return newKop;
   }
 
   removeKopGalleryEntry(id) {
     const gallery = this.getKopGallery().filter(k => k.id !== id);
     this.setState({ kopGallery: gallery });
+    this.queueCloudSyncPatch({ kopGallery: gallery });
   }
 
   applyKopFromGallery(id) {
@@ -514,6 +837,11 @@ class StateStore {
     const updated = [newEntry, ...vault];
     this.setState({ letterVault: updated }, false);
     this.saveLetterVault(updated);
+    this.queueCloudSyncPatch({
+      letterVault: updated,
+      replaceLetterVault: true,
+      syncDriveItem: { type: 'vault', item: newEntry }
+    });
     return newEntry;
   }
 
@@ -527,12 +855,14 @@ class StateStore {
     });
     this.setState({ letterVault: updated }, false);
     this.saveLetterVault(updated);
+    this.queueCloudSyncPatch({ letterVault: updated, replaceLetterVault: true });
   }
 
   removeLetterVaultEntry(id) {
     const vault = this.getLetterVault().filter(item => item.id !== id);
     this.setState({ letterVault: vault }, false);
     this.saveLetterVault(vault);
+    this.queueCloudSyncPatch({ letterVault: vault, replaceLetterVault: true, deletedIds: [id] });
   }
 
   toggleLetterAiReference(id) {
@@ -547,6 +877,7 @@ class StateStore {
     });
     this.setState({ letterVault: updated }, false);
     this.saveLetterVault(updated);
+    this.queueCloudSyncPatch({ letterVault: updated, replaceLetterVault: true });
     return newStatus;
   }
 
@@ -952,14 +1283,14 @@ class StateStore {
       const reqSchool = storeSchool.get('profile');
       reqSchool.onsuccess = () => {
         if (reqSchool.result) {
-          let loadedSchool = reqSchool.result;
+          let loadedSchool = normalizeSchoolProfileNaming(reqSchool.result);
           // Migrasi otomatis jika profil sekolah di browser masih sekolah bawaan lama (Surabaya) atau kode surat lama
-          if (!loadedSchool.schoolName || loadedSchool.schoolName.includes('SURABAYA') || loadedSchool.principalName?.includes('Eko Wahyudi') || !loadedSchool.numberingPattern?.includes('SMKITA')) {
-            loadedSchool = {
+          if (!loadedSchool.schoolName || loadedSchool.schoolName.includes('SURABAYA') || loadedSchool.principalName?.includes('Eko Wahyudi') || !loadedSchool.numberingPattern?.includes('SMKITA') || JSON.stringify(loadedSchool) !== JSON.stringify(reqSchool.result)) {
+            loadedSchool = normalizeSchoolProfileNaming({
               ...JSON.parse(JSON.stringify(DEFAULT_SCHOOL_PROFILE)),
               ...loadedSchool,
               numberingPattern: '421.3/{urut}/SMKITA/{bulanRomawi}/{tahun}'
-            };
+            });
             this.saveSchoolProfile(loadedSchool);
           }
           this.setState({
@@ -1042,8 +1373,8 @@ class StateStore {
       reqKop.onsuccess = () => {
         if (Array.isArray(reqKop.result) && reqKop.result.length > 0) {
           let loadedGallery = reqKop.result;
-          // Migrasi otomatis ke galeri SMKS IT Al-Hawari jika masih galeri bawaan lama
-          if (loadedGallery.some(k => k.name?.includes('SURABAYA') || k.dataUrl?.includes('SURABAYA') || k.description?.includes('pemerintah provinsi dan dinas pendidikan dengan garis ganda'))) {
+          // Migrasi otomatis ke galeri SMK IT Al-Hawari jika masih galeri bawaan lama
+          if (loadedGallery.some(k => k.name?.includes('SURABAYA') || k.dataUrl?.includes('SURABAYA') || k.description?.includes('pemerintah provinsi dan dinas pendidikan dengan garis ganda') || k.name?.includes('SMKS') || k.dataUrl?.includes('SMKS'))) {
             loadedGallery = JSON.parse(JSON.stringify(DEFAULT_KOP_GALLERY));
             this.saveKopGallery(loadedGallery);
           }

@@ -431,7 +431,7 @@ export async function parseDocxForEditing(docxData) {
 
   const nonBlank = allParagraphs.filter(p => p.fullText.trim().length > 0);
 
-  // 1. Cek apakah dokumen ini dari SMKS IT Al-Hawari
+  // 1. Cek apakah dokumen ini dari SMK IT Al-Hawari
   const isAlHawari = nonBlank.some(p => /al-hawari|cibiuk|nunuk\s*kartini|smk\s*islam\s*terpadu/i.test(p.fullText));
 
   // 2. Deteksi Judul Dokumen yang Akurat (Title)
@@ -818,7 +818,7 @@ export function convertDocxToDocumentModel(parsedDocx, schoolProfile = null, opt
   return {
     meta: {
       title,
-      author: schoolProfile?.schoolName || 'SMKS IT Al-Hawari',
+      author: schoolProfile?.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: options.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',

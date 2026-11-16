@@ -2,5 +2,7 @@ node_modules/
 .netlify/
 dist/
 API/
+akunlogin.txt
+apps-script/.clasp.json
 .env
 .env.*

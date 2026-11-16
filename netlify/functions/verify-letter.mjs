@@ -99,7 +99,7 @@ export async function handleVerifyRequest(req, context = {}, storeFactory = defa
       perihal: String(body.perihal || body.title || '-').slice(0, 220),
       recipientName: String(body.recipientName || '-').slice(0, 180),
       tanggalSurat: String(body.tanggalSurat || '-').slice(0, 80),
-      schoolName: String(body.schoolName || 'SMKS IT AL-HAWARI').slice(0, 160),
+      schoolName: String(body.schoolName || 'SMK IT AL-HAWARI').slice(0, 160),
       schoolNpsn: String(body.schoolNpsn || '').slice(0, 40),
       schoolAddress: String(body.schoolAddress || '').slice(0, 240),
       signerRole: String(body.signerRole || 'kepala_sekolah').slice(0, 40),

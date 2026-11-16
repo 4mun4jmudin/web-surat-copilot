@@ -774,7 +774,7 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
   const docModel = {
     meta: {
       title,
-      author: school.schoolName || 'SMKS IT Al-Hawari',
+      author: school.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: options.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',

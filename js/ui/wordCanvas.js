@@ -14,10 +14,12 @@ import { parseDocxForEditing, applyCanvasEditsToDocx, convertDocxToDocumentModel
 import { polishMessyDocumentWithAi, editDocumentWithAi } from '../ai/client.js';
 import { LETTER_TYPE_CODES, formatSmartNomorSurat } from '../letters/numbering.js';
 import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
+import { canSignWithRole, resolveDefaultAllowedSignerRole } from '../auth/permissions.js';
 import {
   openPrintSignatureChoiceModal,
   buildSignerRoleSelectorHtml,
   authorizeAndRecordOutgoing,
+  requestAccForOutgoing,
   printWithTemporaryQrOverlay
 } from './printChoiceModal.js';
 import { downloadFile } from '../utils/download.js';
@@ -432,7 +434,7 @@ export function renderWordCanvas(container) {
               </div>
               <div class="quick-ai-chips-row">
                 <span style="font-size: 11px; color: #475569; font-weight: 600;">Contoh Instruksi Cepat:</span>
-                <button type="button" class="quick-ai-chip" data-edit="Tambahkan baris Hari/Tanggal: Sabtu, 20 November 2026, Waktu: 08.00 WIB s.d Selesai, dan Tempat: Ruang Rapat SMKS IT Al-Hawari">
+                <button type="button" class="quick-ai-chip" data-edit="Tambahkan baris Hari/Tanggal: Sabtu, 20 November 2026, Waktu: 08.00 WIB s.d Selesai, dan Tempat: Ruang Rapat SMK IT Al-Hawari">
                   <span style="color: #0f766e; display: inline-flex;">${ICON_CALENDAR}</span> Tambah Jadwal &amp; Tempat
                 </button>
                 <button type="button" class="quick-ai-chip" data-edit="Perbaiki tata bahasa, ejaan typo, dan kalimat pada surat ini agar lebih sopan dan baku sesuai PUEBI tanpa mengubah data">
@@ -2527,7 +2529,7 @@ function bindDynamicBlockControls(container) {
     temp.innerHTML = buildIdentityTableBlockHtml([
       { label: 'Hari / Tanggal', value: ': ...........................' },
       { label: 'Waktu', value: ': 08.00 WIB s.d Selesai' },
-      { label: 'Tempat', value: ': SMKS IT Al-Hawari' }
+      { label: 'Tempat', value: ': SMK IT Al-Hawari' }
     ]).trim();
     const newWrapper = temp.firstElementChild;
 
@@ -3039,7 +3041,7 @@ function buildModelFromCanvas(container) {
   return {
     meta: {
       title: rawTitleText || titleText,
-      author: sigName || state.schoolProfile?.principalName || 'SMKS IT Al-Hawari',
+      author: sigName || state.schoolProfile?.principalName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: paperSize,
@@ -3353,7 +3355,7 @@ function applyEditedResultToCanvas(container, edited, prevSnapshot) {
   const updatedDocModel = {
     meta: {
       title: finalTitle,
-      author: sig.name || school.principalName || 'SMKS IT Al-Hawari',
+      author: sig.name || school.principalName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: opts.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
@@ -3622,20 +3624,79 @@ function bindRecordOutgoingModal(container) {
     });
   };
 
+  container.__requestStandardAcc = async (signerRole = 'kepala_sekolah', clearAfterSave = false) => {
+    currentSeqInfo = null;
+    const { entryBase } = buildEntryBase('', signerRole);
+    return requestAccForOutgoing({
+      entryBase,
+      school: store.getState().schoolProfile,
+      requestedSignerRole: signerRole,
+      syncActiveDocMode: 'standard',
+      clearAfterSave
+    });
+  };
+
   if (btnConfirm) {
-    btnConfirm.addEventListener('click', async () => {
-      const selectedRole = modal.querySelector('input[name="out-signer-role"]:checked')?.value || 'kepala_sekolah';
+    const syncConfirmBtnLabel = () => {
+      const checked = modal.querySelector('input[name="out-signer-role"]:checked');
       const authorizeSah = modal.querySelector('#chk-out-authorize-sah')?.checked !== false;
+      const reqAcc = authorizeSah && checked?.dataset?.requiresAcc === '1';
+      btnConfirm.textContent = reqAcc
+        ? '📨 Ajukan Minta ACC Kepsek & Catat'
+        : authorizeSah
+        ? '🛡️ Kunci, Sahkan & Catat'
+        : '💾 Catat Surat Keluar';
+    };
+    modal.querySelectorAll('input[name="out-signer-role"], #chk-out-authorize-sah').forEach(el => {
+      el.addEventListener('change', syncConfirmBtnLabel);
+    });
+    syncConfirmBtnLabel();
+
+    btnConfirm.addEventListener('click', async () => {
+      const stNow = store.getState();
+      const selectedRadio = modal.querySelector('input[name="out-signer-role"]:checked');
+      const selectedRole = selectedRadio?.value
+        || resolveDefaultAllowedSignerRole(stNow.authUser, stNow.authPermissions, 'kepala_sekolah');
+      const authorizeSah = modal.querySelector('#chk-out-authorize-sah')?.checked !== false;
+      const roleAllowed = canSignWithRole(stNow.authUser, stNow.authPermissions, selectedRole).allowed;
+      const requiresAcc = authorizeSah && (selectedRadio?.dataset?.requiresAcc === '1' || !roleAllowed);
       const shouldClearAfterSave = Boolean(container.__clearCanvasAfterOutgoing);
 
       btnConfirm.disabled = true;
-      btnConfirm.textContent = authorizeSah ? 'Menyimpan & Mengesahkan QR...' : 'Menyimpan ke Surat Keluar...';
+      btnConfirm.textContent = requiresAcc
+        ? 'Mengirim Antrean ACC Kepala Sekolah...'
+        : authorizeSah
+        ? 'Menyimpan & Mengesahkan QR...'
+        : 'Menyimpan ke Surat Keluar...';
 
       try {
         const { entryBase } = buildEntryBase('', authorizeSah ? selectedRole : '');
+        if (requiresAcc) {
+          const { recorded } = await requestAccForOutgoing({
+            entryBase,
+            school: stNow.schoolProfile,
+            requestedSignerRole: selectedRole,
+            syncActiveDocMode: 'standard',
+            clearAfterSave: shouldClearAfterSave
+          });
+          closeModal(false);
+          container.__clearCanvasAfterOutgoing = false;
+          if (postPrintBar) postPrintBar.classList.add('hidden');
+          if (shouldClearAfterSave) {
+            resetWordCanvasToBlank(container);
+          } else {
+            renderWordCanvas(container);
+          }
+          showToast(
+            `⏳ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat}) masuk Antrean ACC Kepala Sekolah! Anda bebas melanjutkan membuat surat lain.`,
+            'info'
+          );
+          return;
+        }
+
         const { recorded, cloudResult } = await authorizeAndRecordOutgoing({
           entryBase,
-          school: store.getState().schoolProfile,
+          school: stNow.schoolProfile,
           signerRole: selectedRole,
           authorizeSah,
           syncActiveDocMode: 'standard',
@@ -3659,9 +3720,11 @@ function bindRecordOutgoingModal(container) {
           );
           renderWordCanvas(container);
         }
+      } catch (err) {
+        showToast(err?.message || 'Gagal mencatat Surat Keluar.', 'error');
       } finally {
         btnConfirm.disabled = false;
-        btnConfirm.textContent = '🛡️ Kunci, Sahkan & Catat';
+        syncConfirmBtnLabel();
       }
     });
   }
@@ -3675,6 +3738,8 @@ export function triggerWordCanvasPrintWithChoice(container) {
   const doc = store.getState().document;
   const verification = doc?.verification || null;
   const isRevoked = verification?.verificationStatus === 'revoked';
+  const isPendingAcc = verification?.verificationStatus === 'pending_acc' || verification?.accStatus === 'pending';
+  const isRejectedAcc = verification?.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
   const titleText = container.querySelector('#editable-doc-title')?.innerText.trim() || doc?.meta?.title || 'SURAT DINAS';
   const nomorText = (container.querySelector('#editable-doc-nomor')?.innerText.trim() || verification?.nomorSurat || '-').replace(/^Nomor:\s*/i, '');
@@ -3705,6 +3770,9 @@ export function triggerWordCanvasPrintWithChoice(container) {
     actionType: 'print',
     isVerifiedSah,
     isRevoked,
+    isPendingAcc,
+    isRejectedAcc,
+    rejectedReason: verification?.rejectedReason || '',
     nomorSurat: nomorText,
     title: titleText,
     qrDataUrl: verification?.qrDataUrl || '',
@@ -3717,6 +3785,12 @@ export function triggerWordCanvasPrintWithChoice(container) {
       if (typeof container.__authorizeStandardLetter !== 'function') return;
       const result = await container.__authorizeStandardLetter(selectedRole, false);
       runPrint('qr', result.qrDataUrl, selectedRole, result.payload);
+    },
+    onRequestAcc: async (selectedRole) => {
+      if (typeof container.__requestStandardAcc !== 'function') return;
+      const res = await container.__requestStandardAcc(selectedRole, false);
+      showToast(`⏳ Surat #${String(res.recorded.sequenceNumber).padStart(3, '0')} masuk Antrean ACC Kepala Sekolah!`, 'info');
+      renderWordCanvas(container);
     }
   });
 }
@@ -3745,6 +3819,8 @@ export function triggerWordCanvasDownloadWithChoice(container) {
   const doc = store.getState().document;
   const verification = doc?.verification || null;
   const isRevoked = verification?.verificationStatus === 'revoked';
+  const isPendingAcc = verification?.verificationStatus === 'pending_acc' || verification?.accStatus === 'pending';
+  const isRejectedAcc = verification?.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
   const titleText = container.querySelector('#editable-doc-title')?.innerText.trim() || doc?.meta?.title || 'SURAT DINAS';
   const nomorText = (container.querySelector('#editable-doc-nomor')?.innerText.trim() || verification?.nomorSurat || '-').replace(/^Nomor:\s*/i, '');
@@ -3780,6 +3856,9 @@ export function triggerWordCanvasDownloadWithChoice(container) {
     actionType: 'docx',
     isVerifiedSah,
     isRevoked,
+    isPendingAcc,
+    isRejectedAcc,
+    rejectedReason: verification?.rejectedReason || '',
     nomorSurat: nomorText,
     title: titleText,
     qrDataUrl: verification?.qrDataUrl || '',
@@ -3798,6 +3877,12 @@ export function triggerWordCanvasDownloadWithChoice(container) {
         signerRole: selectedRole,
         roleLabel: roleInfo.roleLabel
       });
+    },
+    onRequestAcc: async (selectedRole) => {
+      if (typeof container.__requestStandardAcc !== 'function') return;
+      const res = await container.__requestStandardAcc(selectedRole, false);
+      showToast(`⏳ Surat #${String(res.recorded.sequenceNumber).padStart(3, '0')} masuk Antrean ACC Kepala Sekolah!`, 'info');
+      renderWordCanvas(container);
     }
   });
 }

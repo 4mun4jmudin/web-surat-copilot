@@ -17,7 +17,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" href="img/logo.png">
   <link rel="apple-touch-icon" href="img/icon-192.png">
-  <link rel="stylesheet" href="css/app.css?v=20261115_qr9">
+  <link rel="stylesheet" href="css/app.css?v=20261116_mobhdr1">
   <style id="critical-layout-fix">
     @media screen {
 
@@ -28,7 +28,9 @@
         width: 100vw !important;
         max-width: 100vw !important;
         height: 100vh !important;
+        height: 100dvh !important;
         max-height: 100vh !important;
+        max-height: 100dvh !important;
         overflow: hidden !important;
         margin: 0 !important;
         padding: 0 !important;
@@ -42,7 +44,9 @@
         width: 100vw !important;
         max-width: 100vw !important;
         height: 100vh !important;
+        height: 100dvh !important;
         max-height: 100vh !important;
+        max-height: 100dvh !important;
         min-width: 0 !important;
         min-height: 0 !important;
         overflow: hidden !important;
@@ -59,10 +63,10 @@
         min-width: 0 !important;
         min-height: 50px !important;
         height: auto !important;
-        padding: 6px 20px !important;
-        gap: 12px !important;
+        padding: 6px 20px;
+        gap: 12px;
         box-sizing: border-box !important;
-        overflow: visible !important;
+        overflow: visible;
         flex-shrink: 0 !important;
         z-index: 60 !important;
       }
@@ -71,8 +75,8 @@
         display: flex !important;
         align-items: center !important;
         gap: 8px !important;
-        flex-shrink: 0 !important;
-        min-width: max-content !important;
+        flex-shrink: 0;
+        min-width: 0;
         visibility: visible !important;
         opacity: 1 !important;
       }
@@ -80,7 +84,6 @@
       .brand-title {
         font-size: 13.5px !important;
         font-weight: 700 !important;
-        color: #0f172a !important;
         line-height: 1.15 !important;
         margin: 0 !important;
         white-space: nowrap !important;
@@ -89,10 +92,30 @@
 
       .brand-subtitle {
         font-size: 10px !important;
-        color: #475569 !important;
         line-height: 1.15 !important;
-        white-space: nowrap !important;
+        white-space: nowrap;
         display: block !important;
+      }
+
+      @media (min-width: 861px) {
+        .brand-title {
+          color: #0f172a !important;
+        }
+        .brand-subtitle {
+          color: #475569 !important;
+        }
+      }
+
+      @media (max-width: 860px) {
+        .app-header {
+          padding: 0 !important;
+          gap: 0 !important;
+          justify-content: space-between !important;
+        }
+        .brand-group {
+          flex: 1 1 0% !important;
+          padding: 9px 0 13px 12px !important;
+        }
       }
 
       #main-content-view,
@@ -167,20 +190,45 @@
 <body>
   <div id="app" class="app-layout">
     <!-- HEADER UTAMA -->
-    <header class="app-header">
-      <div class="brand-group" style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
+    <header class="app-header" id="app-header">
+      <div class="brand-group">
         <div class="brand-logo" style="display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-          <img src="img/logo.png" alt="Logo AI DocBuilder" class="brand-logo-img"
+          <img src="img/AI_DocBuilder_Mobile_UI_Assets/branding/brand_logo_original.png" alt="Logo AI DocBuilder" class="brand-logo-img"
             style="width: 30px; height: 30px; object-fit: contain; display: block; border-radius: 6px;">
         </div>
-        <div style="display: flex; flex-direction: column; justify-content: center; flex-shrink: 0;">
+        <div class="brand-text-wrap" style="display: flex; flex-direction: column; justify-content: center; min-width: 0;">
           <h1 class="brand-title"
             style="font-size: 14.5px; font-weight: 800; color: #0f172a; margin: 0; line-height: 1.15;">AI DocBuilder
           </h1>
           <span class="brand-subtitle"
-            style="font-size: 10.5px; color: #64748b; display: block; line-height: 1.15;">Persuratan SMKS IT
+            style="font-size: 10.5px; color: #64748b; display: block; line-height: 1.15;">Persuratan SMK IT
             Al-Hawari</span>
         </div>
+      </div>
+
+      <div class="mobile-header-controls">
+        <button type="button" id="btn-mobile-notif" class="mobile-icon-circle-btn hidden" title="Notifikasi Antrean ACC" aria-label="Notifikasi Antrean ACC">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          </svg>
+          <span id="mobile-menu-badge" class="mobile-menu-badge hidden">0</span>
+        </button>
+        <button type="button" id="mobile-user-chip" class="mobile-user-pill hidden" title="Status Akun &amp; Sinkronisasi">
+          <span id="mobile-user-chip-label">👤</span>
+          <span id="mobile-sync-dot" class="mobile-sync-dot">☁️</span>
+        </button>
+        <button type="button" id="btn-mobile-menu" class="mobile-profile-trigger" aria-expanded="false" aria-label="Buka Menu Akun &amp; Navigasi">
+          <span class="mobile-avatar-circle">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </span>
+          <svg class="mobile-chevron-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
       </div>
 
       <nav class="app-nav-header">
@@ -238,9 +286,38 @@
           </svg>
           <span>Gudang API</span>
         </button>
+        <button class="btn btn-sm nav-tab" data-tab="acc-queue" title="Antrean ACC Kepala Sekolah &amp; Monitoring Status QR">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3L22 4" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+          </svg>
+          <span>Antrean ACC</span>
+          <span id="nav-acc-badge" class="nav-acc-badge hidden">0</span>
+        </button>
+        <button class="btn btn-sm nav-tab" data-tab="access" title="Hak Akses, Akun Pengguna, & Sinkron Google Drive">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <span>Akses &amp; Drive</span>
+        </button>
+        <button type="button" id="btn-mobile-more-tabs" class="btn btn-sm mobile-more-tab-btn" aria-expanded="false" title="Tampilkan Semua Menu">
+          <svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="3" y="14" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="7" height="7" rx="1" />
+          </svg>
+          <span>Lainnya ▾</span>
+        </button>
       </nav>
 
       <div class="header-actions">
+        <button id="header-user-pill" class="btn btn-sm btn-secondary hidden" title="Akun Aktif & Status Sinkronisasi">
+          <span id="header-user-role-badge">👤 Akun</span>
+          <span id="header-sync-dot" class="sync-dot-pill">☁️</span>
+        </button>
         <button id="header-btn-install" class="btn btn-sm btn-secondary hidden"
           title="Pasang AI DocBuilder sebagai aplikasi di perangkat Anda"
           style="border-color: #156c3b; color: #156c3b; background: #ecfdf5;">
@@ -272,6 +349,9 @@
           </svg>
           <span>Cetak/PDF</span>
         </button>
+        <button id="header-btn-logout" class="btn btn-sm btn-secondary hidden" title="Keluar dari akun aktif">
+          <span>Keluar</span>
+        </button>
       </div>
     </header>
 
@@ -279,7 +359,56 @@
     <main id="main-content-view"
       style="flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; width: 100%; height: 100%;">
     </main>
+
+    <!-- BOTTOM NAVIGATION BAR KHUSUS MOBILE (STANDAR PRO MOBILE APP) -->
+    <nav id="mobile-bottom-nav" class="mobile-bottom-nav" aria-label="Navigasi Utama Mobile">
+      <button type="button" class="mobile-bottom-item" data-bottom-slot="home">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          <polyline points="9 22 9 12 15 12 15 22" />
+        </svg>
+        <span id="bottom-home-label">Beranda</span>
+      </button>
+      <button type="button" class="mobile-bottom-item" data-bottom-slot="acc">
+        <span class="mobile-bottom-icon-wrap">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3L22 4" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+          </svg>
+          <span id="bottom-acc-badge" class="mobile-bottom-badge hidden">0</span>
+        </span>
+        <span>Antrean ACC</span>
+      </button>
+      <button type="button" id="btn-mobile-fab" class="mobile-bottom-item mobile-bottom-action" title="Aksi Cepat" aria-label="Aksi Cepat">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9" />
+          <line x1="12" y1="8" x2="12" y2="16" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+        <span id="bottom-fab-label">Aksi Cepat</span>
+      </button>
+      <button type="button" class="mobile-bottom-item" data-bottom-slot="outgoing">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+        <span>Riwayat</span>
+      </button>
+      <button type="button" class="mobile-bottom-item" data-bottom-slot="settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        <span>Pengaturan</span>
+      </button>
+    </nav>
   </div>
+
+  <!-- BOTTOM SHEET AKSI CEPAT MOBILE -->
+  <div id="mobile-fab-sheet" class="mobile-fab-sheet-backdrop hidden" aria-hidden="true"></div>
+
+  <!-- TRAY ANTREAN ACC REAL-TIME (NON-BLOCKING) -->
+  <div id="live-acc-tray" class="live-acc-tray"></div>
 
   <!-- CONTAINER TOAST NOTIFIKASI -->
   <div id="toast-container" class="toast-container"></div>
@@ -289,7 +418,7 @@
   <script src="vendor/docx-preview.min.js"></script>
 
   <!-- APLIKASI UTAMA (ES MODULES MURNI) -->
-  <script type="module" src="js/main.js?v=20261115_qr9"></script>
+  <script type="module" src="js/main.js?v=20261116_mobhdr1"></script>
 </body>
 
 </html>

@@ -3,7 +3,7 @@
  * Menyediakan caching offline untuk antarmuka, aset Word (.docx) generator, dan pustaka lokal.
  */
 
-const CACHE_NAME = 'ai-docbuilder-pwa-v9-20261115';
+const CACHE_NAME = 'ai-docbuilder-pwa-v16-20261116';
 
 const PRECACHE_ASSETS = [
   './',
@@ -15,6 +15,17 @@ const PRECACHE_ASSETS = [
   './img/icon-512.png',
   './img/icon-512-maskable.png',
   './img/Calm Green Wave Gradient Background.png',
+  './img/AI_DocBuilder_Mobile_UI_Assets/branding/brand_logo_original.png',
+  './img/AI_DocBuilder_Mobile_UI_Assets/backgrounds/01_header_emerald.png',
+  './img/AI_DocBuilder_Mobile_UI_Assets/backgrounds/02_page_background.png',
+  './img/AI_DocBuilder_Mobile_UI_Assets/illustrations/01_document_qr_approved.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/illustrations/02_empty_queue_approved.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/illustrations/03_mobile_qr_approved.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/icons/icon_archive.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/icons/icon_approval.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/icons/icon_file.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/icons/icon_scan.svg',
+  './img/AI_DocBuilder_Mobile_UI_Assets/icons/icon_history.svg',
   './vendor/jszip.min.js',
   './vendor/docx-preview.min.js',
   './vendor/docx-preview.min.mjs',
@@ -23,6 +34,9 @@ const PRECACHE_ASSETS = [
   './js/main.js',
   './js/pwa.js',
   './js/state.js',
+  './js/auth/permissions.js',
+  './js/sync/workspaceClient.js',
+  './js/sync/liveSync.js',
   './js/ai/client.js',
   './js/ai/prompts.js',
   './js/checks/consistency.js',
@@ -44,11 +58,15 @@ const PRECACHE_ASSETS = [
   './js/letters/verification.js',
   './js/model/sample.js',
   './js/model/schema.js',
+  './js/ui/accApprovalView.js',
+  './js/ui/accQueueWidget.js',
+  './js/ui/accessControlView.js',
   './js/ui/aiView.js',
   './js/ui/consistencyView.js',
   './js/ui/editor.js',
   './js/ui/icons.js',
   './js/ui/letterFormView.js',
+  './js/ui/loginView.js',
   './js/ui/notification.js',
   './js/ui/outgoingLettersView.js',
   './js/ui/patchView.js',

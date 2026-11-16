@@ -6,6 +6,7 @@
 
 import { store, isUsingBuiltinSystemKey, getBuiltinSystemKey } from '../state.js';
 import { executeAiRequest, detectActiveGeminiModel, detectActiveGroqModel, LATEST_GEMINI_DEFAULT_MODEL, LATEST_GROQ_DEFAULT_MODEL } from '../ai/client.js';
+import { canManageApiVault } from '../auth/permissions.js';
 import { showToast } from './notification.js';
 
 function renderProviderBrand(provider) {
@@ -79,6 +80,7 @@ export function renderSettingsView(container) {
   const state = store.getState();
   const vault = store.getApiVault();
   const activeId = state.activeApiId;
+  const allowEditVault = canManageApiVault(state.authUser, state.authPermissions);
 
   container.innerHTML = `
     <div class="view-atmosphere">
@@ -89,16 +91,25 @@ export function renderSettingsView(container) {
           <div class="view-header-lead">
             <div class="view-header-badge">${SVG_CHAIN_22}</div>
             <div>
-              <h2 class="view-title">Gudang API Multi-Provider</h2>
+              <h2 class="view-title">
+                <span>Gudang API Multi-Provider</span>
+                <span class="status-chip status-chip-green" style="font-size:11px;">☁️ Tersinkron (${vault.length} Koneksi AI)</span>
+              </h2>
               <p class="view-subtitle">
-                Kelola dan hubungkan berbagai layanan AI (multi-provider) untuk kebutuhan penulisan, analisis, ringkasan, dan penyusunan surat secara cerdas.
+                Kelola dan hubungkan berbagai layanan AI (multi-provider) tanpa batas jumlah koneksi. Kunci yang Anda tambahkan otomatis disinkronkan lintas perangkat untuk akun sekolah.
               </p>
             </div>
           </div>
         </div>
 
+        ${!allowEditVault ? `
+          <div style="background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;">
+            🔒 Pengelolaan &amp; penambahan kunci API AI untuk peran Tata Usaha sedang dibatasi oleh Administrator. Anda tetap dapat menggunakan kunci aktif untuk AI Copilot.
+          </div>
+        ` : ''}
+
         <div style="margin-bottom: 18px;">
-          <button id="btn-add-vault-entry" class="btn btn-primary" style="padding: 9px 18px; font-weight: 700; font-size: 13px; border-radius: 8px;">
+          <button id="btn-add-vault-entry" class="btn btn-primary" style="padding: 9px 18px; font-weight: 700; font-size: 13px; border-radius: 8px;" ${allowEditVault ? '' : 'disabled'}>
             + Tambah Koneksi API Baru
           </button>
         </div>
@@ -168,6 +179,7 @@ export function renderSettingsView(container) {
                     ${SVG_SIGNAL_14}
                     <span>Uji Koneksi</span>
                   </button>
+                  ${allowEditVault ? `
                   <button type="button" class="btn btn-sm btn-secondary btn-edit-vault" data-id="${entry.id}" style="padding: 7px 12px; font-weight: 600; border-radius: 8px;">
                     ${SVG_EDIT_14}
                     <span>Edit</span>
@@ -195,6 +207,7 @@ export function renderSettingsView(container) {
                       ` : ''}
                     </div>
                   </div>
+                  ` : ''}
                 </div>
               </div>
             `;

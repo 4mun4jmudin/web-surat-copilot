@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="590" viewBox="0 0 1080 590"><defs>
+ <linearGradient id="dark" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#004D32"/><stop offset=".52" stop-color="#007348"/><stop offset="1" stop-color="#0D9266"/></linearGradient>
+ <linearGradient id="green" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#005934"/><stop offset="1" stop-color="#008655"/></linearGradient>
+ <linearGradient id="light" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FFFFFF"/><stop offset=".54" stop-color="#F7FCFA"/><stop offset="1" stop-color="#D7F2E3"/></linearGradient>
+ <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#F9FBFD"/><stop offset=".55" stop-color="#F5F8FA"/><stop offset="1" stop-color="#EBF8F2"/></linearGradient>
+ <linearGradient id="card" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FFFFFF"/><stop offset=".75" stop-color="#F8FEFB"/><stop offset="1" stop-color="#E0F6E9"/></linearGradient>
+ <linearGradient id="aqua" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#E3F8ED"/><stop offset="1" stop-color="#BCECCF"/></linearGradient>
+ <radialGradient id="glow"><stop stop-color="#A7E7C7" stop-opacity=".70"/><stop offset="1" stop-color="#A7E7C7" stop-opacity="0"/></radialGradient>
+ <radialGradient id="subtle"><stop stop-color="#D6EEE6" stop-opacity=".65"/><stop offset="1" stop-color="#D6EEE6" stop-opacity="0"/></radialGradient>
+ <filter id="shadow" x="-35%" y="-35%" width="170%" height="190%"><feDropShadow dx="0" dy="16" stdDeviation="15" flood-color="#0B4C39" flood-opacity=".13"/></filter>
+ <filter id="smallShadow" x="-35%" y="-35%" width="170%" height="190%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0B4C39" flood-opacity=".12"/></filter>
+ <filter id="blur"><feGaussianBlur stdDeviation="32"/></filter>
+ </defs><rect x="14" y="15" width="1052" height="550" rx="40" fill="#FFFFFF" filter="url(#smallShadow)"/>
+ <rect x="14.5" y="15.5" width="1051" height="549" rx="40" fill="none" stroke="#DEEAE8"/>
+ <ellipse cx="540" cy="220" rx="280" ry="195" fill="url(#subtle)" opacity=".65"/>
+ <path d="M820 570 Q975 420 1110 440" stroke="#AEE7CA" stroke-width="105" opacity=".1" fill="none"/></svg>

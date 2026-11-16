@@ -132,7 +132,7 @@ export function renderSchoolProfileView(container) {
                 </h3>
 
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px;">
-                  ${iconInput({ label: 'Nama Resmi Sekolah *', name: 'schoolName', value: school.schoolName || 'SMKS IT AL-HAWARI', icon: SVG_BLDG_15 })}
+                  ${iconInput({ label: 'Nama Resmi Sekolah *', name: 'schoolName', value: school.schoolName || 'SMK IT AL-HAWARI', icon: SVG_BLDG_15 })}
                   ${iconInput({ label: 'NPSN', name: 'npsn', value: school.npsn || '69758993', icon: SVG_BARCODE_15 })}
                   ${iconInput({ label: 'Dinas Pendidikan', name: 'department', value: school.department || 'DINAS PENDIDIKAN', icon: SVG_LAYERS(15) })}
                   ${iconSelect({ label: 'Status &amp; Akreditasi', name: 'accreditation', value: school.accreditation || 'Swasta / Akreditasi B', icon: SVG_AWARD_15, options: accreditationOptions })}
@@ -145,7 +145,7 @@ export function renderSchoolProfileView(container) {
                   <div style="font-size: 13px; font-weight: 700; color: #166534; display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
                     ${SVG_STAR_15}
                     <span style="color: #cbd5e1;">|</span>
-                    <span>Kompetensi Keahlian (Jurusan Resmi SMKS IT Al-Hawari)</span>
+                    <span>Kompetensi Keahlian (Jurusan Resmi SMK IT Al-Hawari)</span>
                   </div>
                   <ul style="margin: 0 0 0 18px; padding: 0; font-size: 12.5px; color: #1e293b; line-height: 1.65;">
                     <li><strong>Multimedia (MM)</strong> <span style="color: #15803d;">•</span> <span style="color: #475569;">Desain Grafis, Animasi, Fotografi, Videografi, Media Digital</span></li>
@@ -201,7 +201,7 @@ export function renderSchoolProfileView(container) {
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px; margin-bottom: 16px;">
                   ${iconInput({ label: 'Nama Lengkap &amp; Gelar', name: 'principalName', value: school.principalName || 'Dian Nurhadian, S.Pd.', icon: SVG_USER_15 })}
                   ${iconInput({ label: "NIP / NUPTK (Isi '-' jika swasta)", name: 'principalNip', value: school.principalNip || '-', icon: SVG_BARCODE_15 })}
-                  ${iconInput({ label: 'Pangkat / Keterangan', name: 'principalRank', value: school.principalRank || 'Kepala SMKS IT Al-Hawari', icon: SVG_AWARD_15 })}
+                  ${iconInput({ label: 'Pangkat / Keterangan', name: 'principalRank', value: school.principalRank || 'Kepala SMK IT Al-Hawari', icon: SVG_AWARD_15 })}
                   ${iconInput({ label: 'Jabatan Resmi', name: 'principalTitle', value: school.principalTitle || 'Kepala Sekolah', icon: SVG_CAP_15 })}
                 </div>
 
@@ -209,7 +209,7 @@ export function renderSchoolProfileView(container) {
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 14px;">
                   ${iconInput({ label: 'Nama Kepala / Staf TU', name: 'tuName', value: school.tuName || 'Staf Tata Usaha (TU)', icon: SVG_USER_15 })}
                   ${iconInput({ label: "NIP / NUPTK TU (Isi '-' jika swasta)", name: 'tuNip', value: school.tuNip || '-', icon: SVG_BARCODE_15 })}
-                  ${iconInput({ label: 'Keterangan Unit TU', name: 'tuRank', value: school.tuRank || 'Tata Usaha SMKS IT Al-Hawari', icon: SVG_AWARD_15 })}
+                  ${iconInput({ label: 'Keterangan Unit TU', name: 'tuRank', value: school.tuRank || 'Tata Usaha SMK IT Al-Hawari', icon: SVG_AWARD_15 })}
                   ${iconInput({ label: 'Jabatan Resmi TU', name: 'tuTitle', value: school.tuTitle || 'Kepala Tata Usaha', icon: SVG_CAP_15 })}
                 </div>
               </div>
@@ -359,7 +359,7 @@ export function renderSchoolProfileView(container) {
   const btnReset = container.querySelector('#btn-reset-school-default');
   if (btnReset) {
     btnReset.addEventListener('click', () => {
-      if (confirm('Kembalikan data profil sekolah dan kop surat ke pengaturan awal bawaan SMKS IT Al-Hawari?')) {
+      if (confirm('Kembalikan data profil sekolah dan kop surat ke pengaturan awal bawaan SMK IT Al-Hawari?')) {
         const defaultCopy = JSON.parse(JSON.stringify(DEFAULT_SCHOOL_PROFILE));
         defaultCopy.kopImage = DEFAULT_KOP_DATA_URL;
         defaultCopy.showKopLeftLogo = true;

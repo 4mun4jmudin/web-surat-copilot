@@ -23,6 +23,25 @@ import {
 import { openPrintSignatureChoiceModal, buildPrintQrBoxHtml, runSafeWindowPrint } from './printChoiceModal.js';
 import { renderQrVerificationView } from './verifyView.js';
 import { damerauLevenshtein } from './vaultView.js';
+import {
+  canApproveOrRejectAcc,
+  canDeleteOutgoingItem,
+  canRevokeOutgoingItem,
+  canSignWithRole,
+  getSelectableSignerRoles,
+  resolveDefaultAllowedSignerRole
+} from '../auth/permissions.js';
+import {
+  approveAccCloud,
+  authorizeOutgoingCloud,
+  blobToBase64,
+  deleteOutgoingCloud,
+  getStoredAuthToken,
+  requestAccCloud,
+  revokeOutgoingCloud,
+  syncDriveCloud
+} from '../sync/workspaceClient.js';
+import { setLastKnownSyncRev } from '../sync/liveSync.js';
 
 let outgoingSearchQuery = '';
 let outgoingTypeFilter = 'all';
@@ -397,6 +416,11 @@ function updateOutgoingListInPlace(container) {
             ${items.map(item => {
               const isSah = item.verificationStatus === 'sah' || item.isVerifiedSah;
               const isRevoked = item.verificationStatus === 'revoked';
+              const isPendingAcc = item.verificationStatus === 'pending_acc' || item.accStatus === 'pending';
+              const isRejected = item.verificationStatus === 'rejected';
+              const stAuth = store.getState();
+              const canApprove = canApproveOrRejectAcc(stAuth.authUser);
+              const canDelete = canDeleteOutgoingItem(stAuth.authUser, stAuth.authPermissions);
               const roleBadge = item.signerRole === 'tata_usaha'
                 ? 'a.n. TU'
                 : item.signerRole === 'kepsek_dan_tu'
@@ -404,6 +428,10 @@ function updateOutgoingListInPlace(container) {
                 : 'a.n. Kepala Sekolah';
               const statusChipHtml = isRevoked
                 ? '<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 7px;">⛔ Dicabut</span>'
+                : isPendingAcc
+                ? '<span class="status-chip acc-row-pending-chip"><span class="acc-live-spinner acc-spinner-sm"></span> Menunggu ACC Kepsek</span>'
+                : isRejected
+                ? `<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 7px;" title="${escapeHtml(item.rejectedReason || '')}">❌ Ditolak Kepsek</span>`
                 : isSah
                 ? `<span class="status-chip" style="background:#dcfce7;color:#15803d;font-size:10px;padding:1px 7px;">✓ SAH (${escapeHtml(roleBadge)})</span>`
                 : '<span class="status-chip" style="background:#f1f5f9;color:#475569;font-size:10px;padding:1px 7px;">Manual (Belum SAH)</span>';
@@ -412,8 +440,15 @@ function updateOutgoingListInPlace(container) {
                     ? '<span class="status-chip" style="background:#eff6ff;color:#1d4ed8;font-size:10px;padding:1px 6px;" title="Tersinkron ke server verifikasi publik Netlify">☁️ Online</span>'
                     : '<span class="status-chip" style="background:#fef3c7;color:#b45309;font-size:10px;padding:1px 6px;" title="Belum tersinkron ke cloud; klik QR untuk Sync">⚠️ Lokal</span>')
                 : '';
+              const driveLink = item.driveDocxUrl || item.driveJsonUrl || '';
+              const driveChipHtml = item.driveSynced && driveLink
+                ? `<a href="${escapeHtml(driveLink)}" target="_blank" rel="noopener" class="status-chip" style="background:#ecfdf5;color:#15803d;font-size:10px;padding:1px 6px;text-decoration:none;" title="Buka arsip file di Google Drive">📁 Drive ↗</a>`
+                : '';
+              const qrBtnLabel = isPendingAcc
+                ? (canApprove ? '✅ ACC' : '⏳ ACC')
+                : (isSah && !isRevoked ? '▣ QR' : '🛡️ Sahkan');
               return `
-              <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.12s;" class="outgoing-row">
+              <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.12s;" class="outgoing-row ${isPendingAcc ? 'is-pending-acc-row' : ''}">
                 <td style="padding: 12px 14px; font-weight: 800; color: #156c3b;">
                   #${String(item.sequenceNumber || 0).padStart(3, '0')}
                 </td>
@@ -427,6 +462,7 @@ function updateOutgoingListInPlace(container) {
                     </span>
                     ${statusChipHtml}
                     ${cloudChipHtml}
+                    ${driveChipHtml}
                   </div>
                 </td>
                 <td style="padding: 12px 14px;">
@@ -443,11 +479,11 @@ function updateOutgoingListInPlace(container) {
                 </td>
                 <td style="padding: 12px 14px; text-align: right; white-space: nowrap;">
                   <button type="button" class="btn btn-sm btn-secondary btn-out-view" data-id="${escapeHtml(item.id)}" title="Lihat pratinjau surat (Read-Only)">👁️ Lihat</button>
-                  <button type="button" class="btn btn-sm btn-secondary btn-out-qr" data-id="${escapeHtml(item.id)}" title="Kelola Pengesahan SAH &amp; Barcode QR">${isSah && !isRevoked ? '▣ QR' : '🛡️ Sahkan'}</button>
+                  <button type="button" class="btn btn-sm ${isPendingAcc && canApprove ? 'btn-primary acc-glow-btn' : 'btn-secondary'} btn-out-qr" data-id="${escapeHtml(item.id)}" title="Kelola Pengesahan SAH &amp; Barcode QR">${qrBtnLabel}</button>
                   <button type="button" class="btn btn-sm btn-secondary btn-out-print" data-id="${escapeHtml(item.id)}" title="Cetak / PDF (Pilih Barcode QR atau Kosongan TTD Manual)">🖨️</button>
                   <button type="button" class="btn btn-sm btn-success btn-out-download" data-id="${escapeHtml(item.id)}" title="Unduh berkas .docx resmi (Pilih QR atau TTD Manual)">⬇️</button>
                   <button type="button" class="btn btn-sm btn-secondary btn-out-clone" data-id="${escapeHtml(item.id)}" title="Salin isi surat sebagai draf baru di Lembar Kerja (tanpa mengubah arsip ini)">📋 Salin</button>
-                  ${showDeleteActions ? `<button type="button" class="btn btn-sm btn-danger btn-out-delete" data-id="${escapeHtml(item.id)}" title="Hapus data Surat Keluar ini">🗑️ Hapus</button>` : ''}
+                  ${showDeleteActions && canDelete ? `<button type="button" class="btn btn-sm btn-danger btn-out-delete" data-id="${escapeHtml(item.id)}" title="Hapus data Surat Keluar ini">🗑️ Hapus</button>` : ''}
                 </td>
               </tr>
             `;
@@ -505,6 +541,11 @@ function bindOutgoingEvents(container) {
   const btnExitDelMode = container.querySelector('#btn-exit-delete-mode');
 
   const toggleDeleteMode = (forceState = null) => {
+    const st = store.getState();
+    if (!canDeleteOutgoingItem(st.authUser, st.authPermissions)) {
+      showToast('🔒 Mode hapus Surat Keluar hanya diizinkan untuk Administrator atau Kepala Sekolah.', 'warning');
+      return;
+    }
     showDeleteActions = forceState !== null ? Boolean(forceState) : !showDeleteActions;
     if (delBanner) {
       delBanner.classList.toggle('hidden', !showDeleteActions);
@@ -590,7 +631,15 @@ function bindOutgoingRowActions(container) {
       delModal.classList.remove('hidden');
 
       if (btnConfirmDel) {
-        btnConfirmDel.onclick = () => {
+        btnConfirmDel.onclick = async () => {
+          if (getStoredAuthToken()) {
+            const delRes = await deleteOutgoingCloud(item.id);
+            if (!delRes.ok && delRes.forbidden) {
+              closeDelModal();
+              showToast(delRes.error || 'Tidak memiliki izin menghapus surat keluar.', 'error');
+              return;
+            }
+          }
           store.removeOutgoingLetter(item.id);
           closeDelModal();
           showToast(`🗑️ Data Surat Keluar #${String(item.sequenceNumber || 0).padStart(3, '0')} (${item.nomorSurat}) dihapus.`, 'success');
@@ -656,7 +705,14 @@ function bindOutgoingRowActions(container) {
 }
 
 async function authorizeExistingOutgoingItem(item, signerRole = 'kepala_sekolah') {
-  const school = store.getState().schoolProfile || {};
+  const st = store.getState();
+  const school = st.schoolProfile || {};
+  const roleCheck = canSignWithRole(st.authUser, st.authPermissions, signerRole);
+  if (!roleCheck.allowed) {
+    showToast(roleCheck.reason || 'Anda tidak memiliki izin pengesahan atas nama pejabat tersebut.', 'error');
+    return item;
+  }
+
   const payload = buildVerificationPayload({
     entry: {
       ...item,
@@ -671,10 +727,28 @@ async function authorizeExistingOutgoingItem(item, signerRole = 'kepala_sekolah'
     ? item.qrDataUrl
     : generateQrPngDataUrl(payload.verificationUrl);
 
+  if (getStoredAuthToken()) {
+    const res = await authorizeOutgoingCloud({
+      outgoingId: item.id,
+      signerRole,
+      verificationPayload: payload,
+      qrDataUrl
+    });
+    if (res.forbidden) {
+      showToast(res.error || 'Pengesahan ditolak oleh server.', 'error');
+      return item;
+    }
+    if (res.ok && res.item) {
+      const updatedCloud = store.upsertOutgoingLetterFromCloud(res.item);
+      showToast(`✓ Surat #${String(item.sequenceNumber).padStart(3, '0')} disahkan & tersinkron ke cloud!`, 'success');
+      return updatedCloud;
+    }
+  }
+
   const cloudResult = item.cloudSynced && item.verificationStatus === 'revoked'
     ? await updateCloudVerificationStatus({
         verificationId: payload.verificationId,
-        manageToken: payload.manageToken,
+        manageToken: item.manageToken || payload.manageToken,
         status: 'sah'
       })
     : await registerVerificationInCloud(payload);
@@ -707,7 +781,7 @@ async function authorizeExistingOutgoingItem(item, signerRole = 'kepala_sekolah'
   return updated || item;
 }
 
-function printOutgoingItem(item, { mode = 'manual' } = {}) {
+export function printOutgoingItem(item, { mode = 'manual' } = {}) {
   document.getElementById('outgoing-print-sandbox')?.remove();
   const sandbox = document.createElement('div');
   sandbox.id = 'outgoing-print-sandbox';
@@ -728,8 +802,10 @@ function printOutgoingItem(item, { mode = 'manual' } = {}) {
   });
 }
 
-function promptOutgoingActionWithChoice(item, actionType, container) {
+export function promptOutgoingActionWithChoice(item, actionType, container) {
   const isRevoked = item.verificationStatus === 'revoked';
+  const isPendingAcc = item.verificationStatus === 'pending_acc' || item.accStatus === 'pending';
+  const isRejectedAcc = item.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean((item.verificationStatus === 'sah' || item.isVerifiedSah) && !isRevoked && item.qrDataUrl);
   const signerInfo = buildSignerSelectionInfo(store.getState().schoolProfile, item.signerRole || 'kepala_sekolah');
 
@@ -737,6 +813,9 @@ function promptOutgoingActionWithChoice(item, actionType, container) {
     actionType,
     isVerifiedSah,
     isRevoked,
+    isPendingAcc,
+    isRejectedAcc,
+    rejectedReason: item.rejectedReason || '',
     nomorSurat: item.nomorSurat,
     title: item.title,
     qrDataUrl: item.qrDataUrl || '',
@@ -765,7 +844,23 @@ function promptOutgoingActionWithChoice(item, actionType, container) {
       } else {
         await downloadOutgoingItem(updatedItem, { mode: 'qr' });
       }
-    }
+    },
+    onRequestAcc: getStoredAuthToken()
+      ? async (selectedRole) => {
+          const res = await requestAccCloud({
+            outgoingId: item.id,
+            signerRole: selectedRole || 'kepala_sekolah'
+          });
+          if (!res.ok || !res.item) {
+            showToast(res.error || 'Gagal mengirim permintaan ACC ke Kepala Sekolah.', 'error');
+            return;
+          }
+          store.upsertOutgoingLetterFromCloud(res.item);
+          if (res.syncRev) setLastKnownSyncRev(res.syncRev);
+          updateOutgoingListInPlace(container);
+          showToast('⏳ Permintaan ACC dikirim ke Kepala Sekolah. Antrean otomatis sinkron tanpa refresh!', 'success');
+        }
+      : null
   });
 }
 
@@ -776,12 +871,18 @@ function openOutgoingQrModal(initialItem, container) {
   if (!modal || !body) return;
 
   const renderModalContent = () => {
+    const st = store.getState();
     const item = store.getOutgoingLetters().find(x => x.id === initialItem.id) || initialItem;
-    const school = store.getState().schoolProfile || {};
+    const school = st.schoolProfile || {};
     const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
     const isRevoked = item.verificationStatus === 'revoked';
-    const activeRole = item.signerRole || 'kepala_sekolah';
-    const roleInfo = buildSignerSelectionInfo(school, activeRole);
+    const isPendingAcc = item.verificationStatus === 'pending_acc' || item.accStatus === 'pending';
+    const canApprove = canApproveOrRejectAcc(st.authUser);
+    const activeRole = resolveDefaultAllowedSignerRole(st.authUser, st.authPermissions, item.signerRole || 'kepala_sekolah');
+    const roleInfo = buildSignerSelectionInfo(school, item.signerRole || activeRole);
+    const selectableRoles = getSelectableSignerRoles(st.authUser, st.authPermissions, SIGNER_ROLE_OPTIONS);
+    const canRevoke = canRevokeOutgoingItem(st.authUser, st.authPermissions, item);
+    const canRequestAnyRole = st.authUser?.role === 'tu' && Boolean(getStoredAuthToken());
 
     if (subtitle) {
       subtitle.textContent = `#${String(item.sequenceNumber || 0).padStart(3, '0')} • ${item.nomorSurat} • ${item.title}`;
@@ -791,14 +892,21 @@ function openOutgoingQrModal(initialItem, container) {
       <div style="margin-top: 10px;">
         <label style="display:block;font-size:11.5px;font-weight:700;color:#334155;margin-bottom:6px;">Pilih Pejabat Pengesahan:</label>
         <div class="signer-role-grid">
-          ${SIGNER_ROLE_OPTIONS.map(opt => {
+          ${selectableRoles.map(opt => {
             const info = buildSignerSelectionInfo(school, opt.id);
+            const allowClick = opt.allowed || canRequestAnyRole;
+            const roleStatusBadge = !opt.allowed
+              ? (canRequestAnyRole
+                  ? `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">📨 Minta ACC Kepala Sekolah</div>`
+                  : `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">🔒 Perlu Izin Kepsek/Admin</div>`)
+              : (opt.delegated ? `<div style="font-size:10px;color:#15803d;font-weight:700;margin-top:2px;">✓ Izin Delegasi Aktif</div>` : '');
             return `
-              <label class="signer-role-option">
-                <input type="radio" name="modal-out-signer-role" value="${escapeHtml(opt.id)}" ${opt.id === activeRole ? 'checked' : ''} />
+              <label class="signer-role-option ${opt.allowed ? '' : 'is-request-acc'}" title="${escapeHtml(opt.lockReason || opt.description)}">
+                <input type="radio" name="modal-out-signer-role" value="${escapeHtml(opt.id)}" ${opt.id === activeRole ? 'checked' : ''} ${allowClick ? '' : 'disabled'} data-allowed="${opt.allowed ? '1' : '0'}" />
                 <div class="signer-role-card">
                   <div class="signer-role-title">${escapeHtml(opt.label)}</div>
                   <div class="signer-role-name">${escapeHtml(info.signerName)}</div>
+                  ${roleStatusBadge}
                 </div>
               </label>
             `;
@@ -840,7 +948,8 @@ function openOutgoingQrModal(initialItem, container) {
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
               <button type="button" id="btn-qr-preview-page" class="btn btn-sm btn-primary">🔍 Pratinjau Halaman Scan</button>
               ${!item.cloudSynced ? '<button type="button" id="btn-qr-sync-cloud" class="btn btn-sm btn-secondary" style="border-color:#0284c7;color:#0369a1;">☁️ Sinkron Cloud</button>' : ''}
-              <button type="button" id="btn-qr-revoke" class="btn btn-sm btn-danger">⛔ Cabut Pengesahan</button>
+              ${item.driveDocxUrl ? `<a href="${escapeHtml(item.driveDocxUrl)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="text-decoration:none;border-color:#15803d;color:#15803d;">📁 Buka .docx di Drive ↗</a>` : (getStoredAuthToken() ? '<button type="button" id="btn-qr-push-drive" class="btn btn-sm btn-secondary" style="border-color:#15803d;color:#15803d;">📤 Upload .docx ke Drive</button>' : '')}
+              ${canRevoke ? '<button type="button" id="btn-qr-revoke" class="btn btn-sm btn-danger">⛔ Cabut Pengesahan</button>' : '<span style="font-size:11px;color:#64748b;">🔒 Pencabutan khusus Kepsek/Admin</span>'}
             </div>
           </div>
         </div>
@@ -895,36 +1004,130 @@ function openOutgoingQrModal(initialItem, container) {
         };
       }
 
-      body.querySelector('#btn-qr-revoke').onclick = async () => {
-        const reason = prompt('Masukkan alasan pencabutan pengesahan surat ini (opsional):', 'Revisi / Pembatalan surat resmi');
-        if (reason === null) return;
-        const btnRev = body.querySelector('#btn-qr-revoke');
-        btnRev.disabled = true;
-        btnRev.textContent = 'Mencabut...';
-
-        let cloudOk = false;
-        if (item.cloudSynced && item.manageToken) {
-          const res = await updateCloudVerificationStatus({
-            verificationId: item.verificationId,
-            manageToken: item.manageToken,
-            status: 'revoked',
-            reason
-          });
-          cloudOk = res.ok;
-          if (!res.ok) {
-            showToast(`Status dicabut di arsip lokal (${res.error}).`, 'warning');
+      const btnPushDrive = body.querySelector('#btn-qr-push-drive');
+      if (btnPushDrive) {
+        btnPushDrive.onclick = async () => {
+          btnPushDrive.disabled = true;
+          btnPushDrive.textContent = 'Mengunggah ke Drive...';
+          try {
+            let docxBase64 = '';
+            if (item.documentSnapshot) {
+              const qrDocModel = applySignatureModeToDocModel(item.documentSnapshot, {
+                mode: 'qr',
+                qrDataUrl: item.qrDataUrl,
+                verificationUrl: item.verificationUrl || '',
+                signerRole: item.signerRole || 'kepala_sekolah',
+                signerInfo: roleInfo,
+                school,
+                syncSignerFields: false
+              });
+              const blob = await renderDocx(qrDocModel, 'blob');
+              docxBase64 = await blobToBase64(blob);
+            }
+            const res = await syncDriveCloud({ mode: 'single_outgoing', outgoingId: item.id, docxBase64 });
+            if (res.ok && res.item) {
+              store.upsertOutgoingLetterFromCloud(res.item);
+              updateOutgoingListInPlace(container);
+              renderModalContent();
+              showToast('📁 Arsip .docx berhasil diunggah ke Google Drive!', 'success');
+            } else {
+              showToast(res.error || 'Gagal mengunggah ke Google Drive.', 'warning');
+              btnPushDrive.disabled = false;
+              btnPushDrive.textContent = '📤 Upload .docx ke Drive';
+            }
+          } catch (err) {
+            showToast(err.message, 'error');
+            btnPushDrive.disabled = false;
+            btnPushDrive.textContent = '📤 Upload .docx ke Drive';
           }
-        }
-        store.updateOutgoingLetterVerification(item.id, {
-          verificationStatus: 'revoked',
-          isVerifiedSah: false,
-          revokedAt: new Date().toISOString(),
-          revokedReason: reason || 'Pengesahan dibatalkan oleh admin'
-        });
-        updateOutgoingListInPlace(container);
-        renderModalContent();
-        showToast(cloudOk ? '⛔ Pengesahan surat dicabut di arsip & cloud.' : '⛔ Pengesahan surat dicabut di arsip lokal.', 'info');
-      };
+        };
+      }
+
+      const btnRevokeEl = body.querySelector('#btn-qr-revoke');
+      if (btnRevokeEl) {
+        btnRevokeEl.onclick = async () => {
+          const reason = prompt('Masukkan alasan pencabutan pengesahan surat ini (opsional):', 'Revisi / Pembatalan surat resmi');
+          if (reason === null) return;
+          btnRevokeEl.disabled = true;
+          btnRevokeEl.textContent = 'Mencabut...';
+
+          let cloudOk = false;
+          if (getStoredAuthToken()) {
+            const res = await revokeOutgoingCloud({
+              outgoingId: item.id,
+              status: 'revoked',
+              reason
+            });
+            if (res.forbidden) {
+              showToast(res.error || 'Tidak memiliki izin mencabut pengesahan ini.', 'error');
+              btnRevokeEl.disabled = false;
+              btnRevokeEl.textContent = '⛔ Cabut Pengesahan';
+              return;
+            }
+            cloudOk = res.ok;
+          } else if (item.cloudSynced && item.manageToken) {
+            const res = await updateCloudVerificationStatus({
+              verificationId: item.verificationId,
+              manageToken: item.manageToken,
+              status: 'revoked',
+              reason
+            });
+            cloudOk = res.ok;
+            if (!res.ok) {
+              showToast(`Status dicabut di arsip lokal (${res.error}).`, 'warning');
+            }
+          }
+          store.updateOutgoingLetterVerification(item.id, {
+            verificationStatus: 'revoked',
+            isVerifiedSah: false,
+            revokedAt: new Date().toISOString(),
+            revokedReason: reason || 'Pengesahan dibatalkan oleh admin'
+          });
+          updateOutgoingListInPlace(container);
+          renderModalContent();
+          showToast(cloudOk ? '⛔ Pengesahan surat dicabut di arsip & cloud.' : '⛔ Pengesahan surat dicabut di arsip lokal.', 'info');
+        };
+      }
+      return;
+    }
+
+    if (isPendingAcc && !isSah) {
+      body.innerHTML = `
+        <div class="choice-status-banner choice-banner-pending" style="margin-bottom: 12px;">
+          <strong style="display:flex;align-items:center;gap:8px;"><span class="acc-live-spinner acc-spinner-sm"></span> Menunggu ACC Kepala Sekolah</strong>
+          <span>Pengajuan Barcode QR dari <strong>${escapeHtml(item.requestedByName || item.recordedBy || 'TU')}</strong> sedang menunggu persetujuan Kepala Sekolah. Surat tetap otomatis ter-update tanpa perlu refresh halaman.</span>
+        </div>
+        ${canApprove ? `
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+            <button type="button" id="btn-qr-approve-acc-now" class="btn btn-primary acc-glow-btn">
+              ✅ ACC &amp; Terbitkan Barcode QR Sekarang
+            </button>
+          </div>
+        ` : ''}
+      `;
+      const btnApprove = body.querySelector('#btn-qr-approve-acc-now');
+      if (btnApprove) {
+        btnApprove.onclick = async () => {
+          btnApprove.disabled = true;
+          btnApprove.textContent = '⟳ Meng-ACC & Menerbitkan QR...';
+          const res = await approveAccCloud({
+            outgoingId: item.id,
+            signerRole: item.signerRole || 'kepala_sekolah',
+            verificationOrigin: window.location.origin
+          });
+          if (!res.ok || !res.item) {
+            btnApprove.disabled = false;
+            btnApprove.textContent = '✅ ACC & Terbitkan Barcode QR Sekarang';
+            showToast(res.error || 'Gagal meng-ACC surat.', 'error');
+            return;
+          }
+          store.upsertOutgoingLetterFromCloud(res.item);
+          if (res.syncRev) setLastKnownSyncRev(res.syncRev);
+          updateOutgoingListInPlace(container);
+          renderModalContent();
+          showToast('✅ Surat di-ACC Kepala Sekolah & QR aktif!', 'success');
+        };
+      }
       return;
     }
 
@@ -933,7 +1136,7 @@ function openOutgoingQrModal(initialItem, container) {
         <strong>${isRevoked ? '⛔ Pengesahan Surat Ini Telah Dicabut' : '⚠️ Surat Belum Dinyatakan SAH'}</strong>
         <span>${isRevoked
           ? `Dicabut${item.revokedReason ? ` (${escapeHtml(item.revokedReason)})` : ''}. Anda dapat mengesahkannya kembali dengan memilih pejabat di bawah.`
-          : 'Terbitkan pengesahan SAH dan Barcode QR sekarang agar surat ini bisa dicetak pakai QR dan diverifikasi saat dipindai HP.'}</span>
+          : 'Terbitkan pengesahan SAH dan Barcode QR sekarang, atau ajukan permintaan ACC ke Kepala Sekolah.'}</span>
       </div>
       ${roleSelectHtml}
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
@@ -943,10 +1146,45 @@ function openOutgoingQrModal(initialItem, container) {
       </div>
     `;
 
-    body.querySelector('#btn-qr-authorize-now').onclick = async (e) => {
+    const btnAuthEl = body.querySelector('#btn-qr-authorize-now');
+    const syncAuthBtnLabel = () => {
+      const checked = body.querySelector('input[name="modal-out-signer-role"]:checked');
+      const isDirectAllowed = checked?.dataset?.allowed !== '0';
+      if (btnAuthEl) {
+        btnAuthEl.textContent = isDirectAllowed
+          ? (isRevoked ? '🛡️ Sahkan Ulang & Aktifkan QR' : '🛡️ Nyatakan SAH & Terbitkan Barcode QR')
+          : '📨 Ajukan Minta ACC Kepala Sekolah';
+      }
+    };
+    body.querySelectorAll('input[name="modal-out-signer-role"]').forEach(r => {
+      r.addEventListener('change', syncAuthBtnLabel);
+    });
+    syncAuthBtnLabel();
+
+    btnAuthEl.onclick = async (e) => {
       const btnAuth = e.currentTarget;
-      const selectedRole = body.querySelector('input[name="modal-out-signer-role"]:checked')?.value || 'kepala_sekolah';
+      const checked = body.querySelector('input[name="modal-out-signer-role"]:checked');
+      const selectedRole = checked?.value || activeRole;
+      const isDirectAllowed = checked?.dataset?.allowed !== '0';
       btnAuth.disabled = true;
+
+      if (!isDirectAllowed && canRequestAnyRole) {
+        btnAuth.textContent = '⟳ Mengirim ke Antrean ACC Kepsek...';
+        const res = await requestAccCloud({ outgoingId: item.id, signerRole: selectedRole });
+        if (!res.ok || !res.item) {
+          btnAuth.disabled = false;
+          syncAuthBtnLabel();
+          showToast(res.error || 'Gagal mengajukan ACC.', 'error');
+          return;
+        }
+        store.upsertOutgoingLetterFromCloud(res.item);
+        if (res.syncRev) setLastKnownSyncRev(res.syncRev);
+        updateOutgoingListInPlace(container);
+        renderModalContent();
+        showToast('⏳ Permintaan ACC dikirim ke Kepala Sekolah!', 'success');
+        return;
+      }
+
       btnAuth.textContent = 'Mengesahkan & Menghubungi Cloud...';
       await authorizeExistingOutgoingItem(item, selectedRole);
       updateOutgoingListInPlace(container);
@@ -958,7 +1196,7 @@ function openOutgoingQrModal(initialItem, container) {
   modal.classList.remove('hidden');
 }
 
-async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
+export async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
   const school = store.getState().schoolProfile || {};
   const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
   const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah', {
@@ -1022,7 +1260,7 @@ function cloneOutgoingItem(item) {
   }
 }
 
-function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isForPrint = false } = {}) {
+export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isForPrint = false } = {}) {
   const doc = item.documentSnapshot;
   const school = store.getState().schoolProfile || {};
   const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah');

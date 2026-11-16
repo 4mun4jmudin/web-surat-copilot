@@ -27,7 +27,7 @@ test('Konversi Teks Docx Impor: Menghasilkan Document Model Resmi Standar Sekola
       identityRows: [
         { label: 'Hari / Tanggal', value: 'Senin, 16 November 2026' },
         { label: 'Waktu', value: '09.00 WIB s/d Selesai' },
-        { label: 'Tempat', value: 'Ruang Bimbingan Konseling (BK) SMKS IT Al-Hawari' },
+        { label: 'Tempat', value: 'Ruang Bimbingan Konseling (BK) SMK IT Al-Hawari' },
         { label: 'Bertemu Dengan', value: 'Wali Kelas & Guru BK' }
       ],
       closing: { text: 'Demikian Surat pemberitahuan ini kami sampaikan untuk dapat diketahui oleh orang tua/wali siswa, atas perhatian dan kerjasamanya diucapkan terima kasih.' },
@@ -100,11 +100,11 @@ test('AI Document Polisher: Prompt Sistem dan Pembentukan User Prompt', () => {
 
   const prompt = buildPolisherUserPrompt({
     messyText: 'surat panggilan ortu siswa ahmad fauzi bolos 3 hari garut 14 nov 2026',
-    schoolName: 'SMKS IT Al-Hawari',
+    schoolName: 'SMK IT Al-Hawari',
     principalName: 'Dian Nurhadian, S.Pd.',
     dateStr: '14 November 2026'
   });
 
   assert.ok(prompt.includes('ahmad fauzi'), 'Prompt pengguna harus menyertakan teks berantakan');
-  assert.ok(prompt.includes('SMKS IT Al-Hawari'), 'Prompt pengguna harus menyertakan nama sekolah');
+  assert.ok(prompt.includes('SMK IT Al-Hawari'), 'Prompt pengguna harus menyertakan nama sekolah');
 });

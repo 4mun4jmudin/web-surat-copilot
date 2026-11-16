@@ -146,7 +146,7 @@ test('Word Pro: Snapshot & AI JSON converter mempertahankan struktur surat untuk
     nomorSurat: '050/UND.SMKITA/XI/2026',
     sifat: 'Penting',
     hal: 'Undangan Rapat Kenaikan Kelas',
-    tujuan: 'Bapak/Ibu Dewan Guru SMKS IT Al-Hawari',
+    tujuan: 'Bapak/Ibu Dewan Guru SMK IT Al-Hawari',
     blocks: [
       { type: 'paragraph', text: 'Assalamualaikum Wr. Wb. Dengan hormat, kami mengundang Bapak/Ibu pada:' },
       {

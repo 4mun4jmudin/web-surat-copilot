@@ -46,7 +46,7 @@ ATURAN WAJIB:
 }
 
 ATURAN WAJIB KODE NOMOR SURAT SESUAI JENIS SURAT:
-Format baku nomor surat SMKS IT Al-Hawari adalah "{urut}/{KODE_JENIS}.SMKITA/{bulanRomawi}/{tahun}".
+Format baku nomor surat SMK IT Al-Hawari adalah "{urut}/{KODE_JENIS}.SMKITA/{bulanRomawi}/{tahun}".
 Kamu WAJIB memilih {KODE_JENIS} yang tepat berdasarkan jenis atau asal surat:
 - Surat Undangan (rapat guru, orang tua/wali, komite, acara) -> KODE: "UND" -> contoh: "050/UND.SMKITA/XI/2026"
 - Surat dari Tata Usaha (TU) / Administrasi Umum TU -> KODE: "TU" -> contoh: "050/TU.SMKITA/XI/2026"
@@ -93,7 +93,7 @@ Permintaan Pembuatan Dokumen:
 "${userPrompt}"
 
 Informasi Sekolah yang Tersedia:
-- Nama Sekolah: ${schoolName || 'SMKS IT Al-Hawari'}
+- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
 - Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
 - Tanggal Hari Ini: ${dateStr || '14 November 2026'}
 
@@ -167,7 +167,7 @@ ${messyText}
 """
 
 Identitas Sekolah:
-- Nama Sekolah: ${schoolName || 'SMKS IT Al-Hawari'}
+- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
 - Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
 - Tanggal Surat: ${dateStr || '14 November 2026'}
 
@@ -238,7 +238,7 @@ INSTRUKSI PENGEDITAN / PENAMBAHAN / PERBAIKAN DARI PENGGUNA:
 "${userInstruction}"
 
  Konteks Sekolah:
-- Nama Sekolah: ${schoolName || 'SMKS IT Al-Hawari'}
+- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
 - Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
 - Tanggal Hari Ini: ${dateStr || '14 November 2026'}
 

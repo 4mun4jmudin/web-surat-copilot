@@ -2,7 +2,7 @@
  * Public QR Digital Verification Portal View (?v=<verificationId>)
  *
  * Displayed cleanly on mobile/desktop when someone scans the printed QR Code
- * on an authorized SMKS IT Al-Hawari outgoing letter.
+ * on an authorized SMK IT Al-Hawari outgoing letter.
  * Fetches live verification status (SAH / REVOKED / NOT FOUND) from Netlify Functions + Blobs,
  * and presents structured details tailored to the exact letter typeCode plus
  * the chosen authorizing authority statement (Kepala Sekolah / Tata Usaha / Keduanya).
@@ -66,7 +66,7 @@ function buildVerificationCardHtml(v, { isLocalPreview = false } = {}) {
         <div>
           <div class="verify-status-kicker">VERIFIKASI DIGITAL BERHASIL</div>
           <h2>DOKUMEN ASLI &amp; DINYATAKAN SAH</h2>
-          <p>Surat keluar ini terdaftar resmi dalam sistem persuratan ${esc(v.schoolName || 'SMKS IT Al-Hawari')}.</p>
+          <p>Surat keluar ini terdaftar resmi dalam sistem persuratan ${esc(v.schoolName || 'SMK IT Al-Hawari')}.</p>
         </div>
       </div>
     `
@@ -98,7 +98,7 @@ function buildVerificationCardHtml(v, { isLocalPreview = false } = {}) {
         ${logoSrc ? `<img src="${esc(logoSrc)}" alt="Logo Sekolah" class="verify-school-logo" />` : '<div class="verify-school-logo-fallback">🏫</div>'}
         <div class="verify-school-meta">
           <div class="verify-portal-tag">PORTAL VERIFIKASI SURAT RESMI</div>
-          <h1>${esc(v.schoolName || 'SMKS IT Al-Hawari')}</h1>
+          <h1>${esc(v.schoolName || 'SMK IT Al-Hawari')}</h1>
           <p>${v.schoolNpsn ? `NPSN: ${esc(v.schoolNpsn)} • ` : ''}${esc(v.schoolAddress || 'Cibiuk, Kabupaten Garut')}</p>
         </div>
       </div>
@@ -159,7 +159,7 @@ function buildVerificationCardHtml(v, { isLocalPreview = false } = {}) {
       </div>
 
       <div class="verify-footer">
-        <span>Sistem Persuratan Digital ${esc(v.schoolName || 'SMKS IT Al-Hawari')} • Terverifikasi melalui Barcode QR</span>
+        <span>Sistem Persuratan Digital ${esc(v.schoolName || 'SMK IT Al-Hawari')} • Terverifikasi melalui Barcode QR</span>
         <a href="${esc(window.location.pathname || '/')}" class="verify-admin-link">Masuk ke Portal Admin TU →</a>
       </div>
     </div>

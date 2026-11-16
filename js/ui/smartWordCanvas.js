@@ -39,10 +39,12 @@ import { COPILOT_SYSTEM_PROMPT, buildCopilotUserPrompt } from '../ai/prompts.js'
 import { renderDocx } from '../docx/render.js';
 import { downloadFile } from '../utils/download.js';
 import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
+import { canSignWithRole, resolveDefaultAllowedSignerRole } from '../auth/permissions.js';
 import {
   openPrintSignatureChoiceModal,
   buildSignerRoleSelectorHtml,
   authorizeAndRecordOutgoing,
+  requestAccForOutgoing,
   printWithTemporaryQrOverlay
 } from './printChoiceModal.js';
 
@@ -575,7 +577,7 @@ export function buildDocModelFromSmartPagesData({
   return {
     meta: {
       title: extractedTitle,
-      author: schoolProfile.schoolName || 'SMKS IT Al-Hawari',
+      author: schoolProfile.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: profileName,
@@ -920,7 +922,7 @@ export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, lette
   return {
     meta: {
       title,
-      author: schoolProfile.schoolName || 'SMKS IT Al-Hawari',
+      author: schoolProfile.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: letterOptions.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
@@ -946,6 +948,7 @@ export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, lette
 
 let activeLivePagesExtractor = null;
 let activeSmartAuthorizeHandler = null;
+let activeSmartRequestAccHandler = null;
 let activeSmartPagesRoot = null;
 
 /**
@@ -978,6 +981,8 @@ export function triggerSmartCanvasPrintWithChoice() {
   const smartDoc = store.getState().smartDocument;
   const verification = smartDoc?.verification || null;
   const isRevoked = verification?.verificationStatus === 'revoked';
+  const isPendingAcc = verification?.verificationStatus === 'pending_acc' || verification?.accStatus === 'pending';
+  const isRejectedAcc = verification?.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
   const model = getActiveSmartDocModel();
   const titleText = model.letterData?.formData?.judulSurat || model.meta?.title || 'SURAT DINAS';
@@ -1009,6 +1014,9 @@ export function triggerSmartCanvasPrintWithChoice() {
     actionType: 'print',
     isVerifiedSah,
     isRevoked,
+    isPendingAcc,
+    isRejectedAcc,
+    rejectedReason: verification?.rejectedReason || '',
     nomorSurat: nomorText,
     title: titleText,
     qrDataUrl: verification?.qrDataUrl || '',
@@ -1021,6 +1029,11 @@ export function triggerSmartCanvasPrintWithChoice() {
       if (typeof activeSmartAuthorizeHandler !== 'function') return;
       const result = await activeSmartAuthorizeHandler(selectedRole, false);
       runSmartPrint('qr', result.qrDataUrl, selectedRole, result.payload);
+    },
+    onRequestAcc: async (selectedRole) => {
+      if (typeof activeSmartRequestAccHandler !== 'function') return;
+      const res = await activeSmartRequestAccHandler(selectedRole, false);
+      showToast(`⏳ Surat #${String(res.recorded.sequenceNumber).padStart(3, '0')} masuk Antrean ACC Kepala Sekolah!`, 'info');
     }
   });
 }
@@ -1032,6 +1045,8 @@ export function triggerSmartCanvasDownloadWithChoice() {
   const smartDoc = store.getState().smartDocument;
   const verification = smartDoc?.verification || null;
   const isRevoked = verification?.verificationStatus === 'revoked';
+  const isPendingAcc = verification?.verificationStatus === 'pending_acc' || verification?.accStatus === 'pending';
+  const isRejectedAcc = verification?.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean(verification?.isVerifiedSah && !isRevoked && verification?.qrDataUrl);
   const model = getActiveSmartDocModel();
   const titleText = model.letterData?.formData?.judulSurat || model.meta?.title || 'SURAT DINAS';
@@ -1082,6 +1097,9 @@ export function triggerSmartCanvasDownloadWithChoice() {
     actionType: 'docx',
     isVerifiedSah,
     isRevoked,
+    isPendingAcc,
+    isRejectedAcc,
+    rejectedReason: verification?.rejectedReason || '',
     nomorSurat: nomorText,
     title: titleText,
     qrDataUrl: verification?.qrDataUrl || '',
@@ -1100,6 +1118,11 @@ export function triggerSmartCanvasDownloadWithChoice() {
         signerRole: selectedRole,
         roleLabel: roleInfo.roleLabel
       });
+    },
+    onRequestAcc: async (selectedRole) => {
+      if (typeof activeSmartRequestAccHandler !== 'function') return;
+      const res = await activeSmartRequestAccHandler(selectedRole, false);
+      showToast(`⏳ Surat #${String(res.recorded.sequenceNumber).padStart(3, '0')} masuk Antrean ACC Kepala Sekolah!`, 'info');
     }
   });
 }
@@ -1420,7 +1443,7 @@ export function renderSmartWordCanvas(container) {
             </div>
 
             <div class="copilot-chips">
-              <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Undangan Rapat Dewan Guru SMKS IT Al-Hawari beserta lampiran susunan acara dan daftar hadir pada halaman 2">${ICON_MAIL} Undangan + Lampiran</button>
+              <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Undangan Rapat Dewan Guru SMK IT Al-Hawari beserta lampiran susunan acara dan daftar hadir pada halaman 2">${ICON_MAIL} Undangan + Lampiran</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Edaran Tata Usaha pemberitahuan pembagian rapor semester ganjil untuk orang tua/wali">${ICON_BUILDING} Surat Tata Usaha (TU)</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keputusan (SK) Kepala Sekolah tentang Pembagian Tugas Guru Mengajar beserta rincian lengkap pada halaman ke-2">${ICON_BRIEFCASE} SK Multi-Halaman (KEP)</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keterangan Siswa Aktif atas nama [Nama Siswa] NIS [NIS] kelas [Kelas]">${ICON_ID_CARD} Ket. Siswa Aktif (KET)</button>
@@ -2873,6 +2896,16 @@ export function renderSmartWordCanvas(container) {
     });
     return result;
   };
+  activeSmartRequestAccHandler = async (signerRole = 'kepala_sekolah', clearAfterSave = false) => {
+    const { entryBase } = buildSmartEntryBase('');
+    return requestAccForOutgoing({
+      entryBase,
+      school: store.getSchoolProfile(),
+      requestedSignerRole: signerRole,
+      syncActiveDocMode: 'smart',
+      clearAfterSave
+    });
+  };
 
   function openSmartRecordOutgoingModal({ clearAfterSave = false } = {}) {
     const { snap, nextInfo } = buildSmartEntryBase('');
@@ -2909,9 +2942,32 @@ export function renderSmartWordCanvas(container) {
     modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
     modalRoot.querySelector('#smart-modal-cancel').onclick = closeSmartModal;
     const btnSaveOut = modalRoot.querySelector('#smart-modal-save-out');
+    const syncSmartSaveLabel = () => {
+      const checked = modalRoot.querySelector('input[name="sm-out-signer-role"]:checked');
+      const authChecked = modalRoot.querySelector('#sm-chk-authorize-sah')?.checked !== false;
+      const reqAcc = authChecked && checked?.dataset?.requiresAcc === '1';
+      if (btnSaveOut) {
+        btnSaveOut.textContent = reqAcc
+          ? (clearAfterSave ? '📨 Ajukan ACC, Catat & Kosongkan' : '📨 Ajukan ACC & Simpan Surat Keluar')
+          : authChecked
+          ? (clearAfterSave ? '🛡️ Sahkan, Catat & Kosongkan' : '🛡️ Sahkan & Simpan Surat Keluar')
+          : (clearAfterSave ? '💾 Catat & Kosongkan' : '💾 Simpan Surat Keluar');
+      }
+    };
+    modalRoot.querySelectorAll('input[name="sm-out-signer-role"], #sm-chk-authorize-sah').forEach(el => {
+      el.addEventListener('change', syncSmartSaveLabel);
+    });
+    syncSmartSaveLabel();
+
     btnSaveOut.onclick = async () => {
-      const selectedRole = modalRoot.querySelector('input[name="sm-out-signer-role"]:checked')?.value || 'kepala_sekolah';
+      const stNow = store.getState();
+      const selectedRadio = modalRoot.querySelector('input[name="sm-out-signer-role"]:checked');
+      const selectedRole = selectedRadio?.value
+        || resolveDefaultAllowedSignerRole(stNow.authUser, stNow.authPermissions, 'kepala_sekolah');
       const authorizeSah = modalRoot.querySelector('#sm-chk-authorize-sah')?.checked !== false;
+      const roleAllowed = canSignWithRole(stNow.authUser, stNow.authPermissions, selectedRole).allowed;
+      const requiresAcc = authorizeSah && (selectedRadio?.dataset?.requiresAcc === '1' || !roleAllowed);
+
       const recordedNomor = modalRoot.querySelector('#sm-out-nomor').value.trim();
       const titleVal = modalRoot.querySelector('#sm-out-title').value.trim() || snap.letterTitle;
       const halVal = modalRoot.querySelector('#sm-out-hal').value.trim() || titleVal;
@@ -2921,24 +2977,49 @@ export function renderSmartWordCanvas(container) {
       const firstPara = (snap.blocks || []).find(b => b.type === 'paragraph' && b.text)?.text || '';
 
       btnSaveOut.disabled = true;
-      btnSaveOut.textContent = authorizeSah ? 'Menyimpan & Mengesahkan QR...' : 'Menyimpan ke Surat Keluar...';
+      btnSaveOut.textContent = requiresAcc
+        ? 'Mengirim Antrean ACC Kepala Sekolah...'
+        : authorizeSah
+        ? 'Menyimpan & Mengesahkan QR...'
+        : 'Menyimpan ke Surat Keluar...';
 
       try {
+        const entryBase = {
+          nomorSurat: recordedNomor,
+          sequenceNumber: nextInfo.sequenceNumber,
+          typeCode: nextInfo.typeCode,
+          year: nextInfo.year,
+          title: titleVal,
+          perihal: halVal,
+          recipientName: toVal,
+          tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+          signerName: snap.signer?.name || school?.principalName || 'Kepala Sekolah',
+          summary: firstPara.slice(0, 160),
+          sourceMode: 'smart',
+          document: liveModel
+        };
+
+        if (requiresAcc) {
+          const { recorded } = await requestAccForOutgoing({
+            entryBase,
+            school,
+            requestedSignerRole: selectedRole,
+            syncActiveDocMode: 'smart',
+            clearAfterSave
+          });
+          closeSmartModal();
+          if (clearAfterSave) {
+            resetSmartCanvasToEmpty(false);
+          }
+          showToast(
+            `⏳ Surat #${String(recorded.sequenceNumber).padStart(3, '0')} (${recorded.nomorSurat}) masuk Antrean ACC Kepala Sekolah! Anda bebas lanjut membuat surat lain.`,
+            'info'
+          );
+          return;
+        }
+
         const { recorded, cloudResult } = await authorizeAndRecordOutgoing({
-          entryBase: {
-            nomorSurat: recordedNomor,
-            sequenceNumber: nextInfo.sequenceNumber,
-            typeCode: nextInfo.typeCode,
-            year: nextInfo.year,
-            title: titleVal,
-            perihal: halVal,
-            recipientName: toVal,
-            tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-            signerName: snap.signer?.name || school?.principalName || 'Kepala Sekolah',
-            summary: firstPara.slice(0, 160),
-            sourceMode: 'smart',
-            document: liveModel
-          },
+          entryBase,
           school,
           signerRole: selectedRole,
           authorizeSah,
@@ -2956,8 +3037,11 @@ export function renderSmartWordCanvas(container) {
             'success'
           );
         }
+      } catch (err) {
+        showToast(err?.message || 'Gagal mencatat Surat Keluar.', 'error');
       } finally {
         btnSaveOut.disabled = false;
+        syncSmartSaveLabel();
       }
     };
   }

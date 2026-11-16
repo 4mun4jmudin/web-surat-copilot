@@ -64,7 +64,7 @@ test('QR PNG Generator menghasilkan data URL PNG valid di Node/Browser tanpa can
 test('Pemilihan Pejabat Pengesahan mendukung Kepala Sekolah, Tata Usaha (TU), dan Kepsek & TU', () => {
   const customSchool = {
     ...DEFAULT_SCHOOL_PROFILE,
-    name: 'SMKS IT Al-Hawari',
+    name: 'SMK IT Al-Hawari',
     principalName: 'Dian Nurhadian, S.Pd.',
     principalTitle: 'Kepala Sekolah',
     tuName: 'Hendra Wijaya, S.Kom.',
@@ -201,7 +201,7 @@ test('Render .docx Mode QR menyematkan media/qr.png & rIdQr, sedangkan Mode Manu
   assert.ok(qrDocXml.includes('Disahkan secara elektronik'));
   assert.ok(!qrDocXml.includes('a.n.'), 'DOKUMEN .docx tidak boleh mencantumkan a.n.');
   assert.ok(qrDocXml.includes('NIP. -'), 'Jika belum memiliki NIP, baris di bawah nama harus menampilkan NIP. -');
-  assert.ok(!qrDocXml.includes('Kepala SMKS IT Al-Hawari'), 'Keterangan Kepala SMKS IT Al-Hawari tidak boleh muncul di bawah nama TTD');
+  assert.ok(!qrDocXml.includes('Kepala SMKS IT Al-Hawari') && !qrDocXml.includes('Kepala SMK IT Al-Hawari'), 'Keterangan Kepala SMK IT Al-Hawari tidak boleh muncul di bawah nama TTD');
   assert.equal((qrDocXml.match(/166534/g) || []).length, 1, 'Caption QR hanya 1 baris hijau tanpa duplikasi nama');
 
   const parsedQrXml = new XmlDomParser().parseFromString(qrDocXml, 'text/xml');
@@ -222,7 +222,7 @@ test('Render .docx Mode QR menyematkan media/qr.png & rIdQr, sedangkan Mode Manu
   const qrKepsekXml = await qrKepsekZip.file('word/document.xml').async('text');
   assert.ok(qrKepsekXml.includes('Disahkan secara elektronik'));
   assert.ok(qrKepsekXml.includes('NIP. -'));
-  assert.ok(!qrKepsekXml.includes('Kepala SMKS IT Al-Hawari'));
+  assert.ok(!qrKepsekXml.includes('Kepala SMKS IT Al-Hawari') && !qrKepsekXml.includes('Kepala SMK IT Al-Hawari'));
   assert.equal((qrKepsekXml.match(/166534/g) || []).length, 1, 'Mode Kepala Sekolah cukup 1 baris hijau Disahkan secara elektronik agar tidak duplikat nama');
   assert.ok(!qrKepsekXml.includes('a.n.'));
 

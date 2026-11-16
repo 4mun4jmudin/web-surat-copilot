@@ -14,12 +14,25 @@ import { store } from '../state.js';
 import { showToast } from './notification.js';
 import {
   SIGNER_ROLE_OPTIONS,
+  applySignatureModeToDocModel,
   buildSignerSelectionInfo,
   buildQrCaptionLines,
   buildVerificationPayload,
   generateQrPngDataUrl,
   registerVerificationInCloud
 } from '../letters/verification.js';
+import {
+  canSignWithRole,
+  getSelectableSignerRoles,
+  resolveDefaultAllowedSignerRole
+} from '../auth/permissions.js';
+import {
+  blobToBase64,
+  getStoredAuthToken,
+  recordOutgoingCloud
+} from '../sync/workspaceClient.js';
+import { setLastKnownSyncRev } from '../sync/liveSync.js';
+import { renderDocx } from '../docx/render.js';
 
 export function escPrintHtml(value) {
   return String(value ?? '')
@@ -38,15 +51,33 @@ export function buildSignerRoleSelectorHtml({
   defaultRole = 'kepala_sekolah',
   school = {}
 } = {}) {
-  const roles = SIGNER_ROLE_OPTIONS.map(opt => {
+  const st = store.getState();
+  const selectable = getSelectableSignerRoles(st.authUser, st.authPermissions, SIGNER_ROLE_OPTIONS);
+  const resolvedDefault = resolveDefaultAllowedSignerRole(st.authUser, st.authPermissions, defaultRole);
+  const isDelegated = selectable.some(s => s.id === 'kepala_sekolah' && s.allowed && s.delegated);
+  const canRequestAcc = st.authUser?.role === 'tu' && Boolean(getStoredAuthToken());
+  const hasLockedKepsekOption = selectable.some(s => !s.allowed);
+
+  const roles = selectable.map(opt => {
     const info = buildSignerSelectionInfo(school, opt.id);
-    const checked = opt.id === defaultRole ? 'checked' : '';
+    const checked = opt.id === resolvedDefault ? 'checked' : '';
+    const allowSelection = opt.allowed || canRequestAcc;
+    const disabledAttr = allowSelection ? '' : 'disabled';
+    const requiresAccAttr = !opt.allowed && canRequestAcc ? '1' : '0';
+    const lockTag = !opt.allowed
+      ? (canRequestAcc
+          ? `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">📨 Minta ACC Kepsek</div>`
+          : `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">🔒 Perlu Izin Kepsek/Admin</div>`)
+      : (opt.delegated
+          ? `<div style="font-size:10px;color:#15803d;font-weight:700;margin-top:2px;">✓ Izin Delegasi Aktif</div>`
+          : '');
     return `
-      <label class="signer-role-option">
-        <input type="radio" name="${escPrintHtml(radioName)}" value="${escPrintHtml(opt.id)}" ${checked} />
+      <label class="signer-role-option ${opt.allowed ? '' : (canRequestAcc ? 'is-request-acc' : 'is-locked')}" title="${escPrintHtml(opt.lockReason || opt.description)}">
+        <input type="radio" name="${escPrintHtml(radioName)}" value="${escPrintHtml(opt.id)}" data-requires-acc="${requiresAccAttr}" ${checked} ${disabledAttr} />
         <div class="signer-role-card">
           <div class="signer-role-title">${escPrintHtml(opt.label)}</div>
           <div class="signer-role-name">${escPrintHtml(info.signerName)}</div>
+          ${lockTag}
         </div>
       </label>
     `;
@@ -57,8 +88,8 @@ export function buildSignerRoleSelectorHtml({
       <label class="authorize-toggle-row">
         <input type="checkbox" id="${escPrintHtml(checkboxId)}" checked />
         <div>
-          <strong>🛡️ Nyatakan SAH &amp; Terbitkan Barcode QR Verifikasi</strong>
-          <small>Barcode QR akan aktif saat cetak PDF / unduh .docx jika surat dinyatakan SAH.</small>
+          <strong>🛡️ Nyatakan SAH / Ajukan ACC &amp; Terbitkan Barcode QR</strong>
+          <small>Barcode QR akan aktif setelah pengesahan SAH${isDelegated ? ' (Delegasi Pengesahan Kepala Sekolah ke TU Aktif)' : ''}. ${canRequestAcc && hasLockedKepsekOption ? 'Jika memilih Kepala Sekolah tanpa izin delegasi, surat otomatis masuk ke antrean ACC Kepala Sekolah.' : ''}</small>
         </div>
       </label>
       <div class="signer-role-section">
@@ -70,7 +101,7 @@ export function buildSignerRoleSelectorHtml({
 }
 
 /**
- * Unified helper to declare SAH, generate Barcode QR PNG, sync to Netlify Blobs (/api/verify),
+ * Unified helper to declare SAH, generate Barcode QR PNG, sync to Netlify Cloud + Google Drive,
  * and record/lock the entry in Buku Surat Keluar.
  */
 export async function authorizeAndRecordOutgoing({
@@ -81,11 +112,34 @@ export async function authorizeAndRecordOutgoing({
   syncActiveDocMode = '', // 'standard' | 'smart' | ''
   clearAfterSave = false
 } = {}) {
-  const effectiveSchool = school || store.getState().schoolProfile || {};
-  const signerInfo = buildSignerSelectionInfo(effectiveSchool, signerRole);
+  const st = store.getState();
+  const effectiveSchool = school || st.schoolProfile || {};
+  const effectiveRole = signerRole || resolveDefaultAllowedSignerRole(st.authUser, st.authPermissions);
+
+  if (authorizeSah) {
+    const roleCheck = canSignWithRole(st.authUser, st.authPermissions, effectiveRole);
+    if (!roleCheck.allowed) {
+      showToast(roleCheck.reason || 'Anda tidak memiliki izin pengesahan untuk pejabat ini.', 'error');
+      throw new Error(roleCheck.reason || 'Akses pengesahan ditolak.');
+    }
+  }
+
+  const signerInfo = buildSignerSelectionInfo(effectiveSchool, effectiveRole);
+  const authToken = getStoredAuthToken();
+
+  let docxBase64 = '';
+  if (authToken && entryBase?.document && typeof window !== 'undefined') {
+    try {
+      const previewDocForDrive = authorizeSah
+        ? entryBase.document
+        : applySignatureModeToDocModel(entryBase.document, { mode: 'manual' });
+      const blob = await renderDocx(previewDocForDrive, 'blob');
+      docxBase64 = await blobToBase64(blob);
+    } catch {}
+  }
 
   if (!authorizeSah) {
-    const recorded = store.addOutgoingLetter({
+    const draftEntry = {
       ...entryBase,
       signerRole: signerInfo.signerRole,
       signerTitle: signerInfo.signerTitle,
@@ -93,7 +147,32 @@ export async function authorizeAndRecordOutgoing({
       signerNip: signerInfo.signerNip,
       signerRank: signerInfo.signerRank,
       isVerifiedSah: false,
-      verificationStatus: 'unverified',
+      verificationStatus: 'unverified'
+    };
+
+    if (authToken) {
+      const cloudSave = await recordOutgoingCloud({
+        authorizeSah: false,
+        signerRole: effectiveRole,
+        docxBase64,
+        entry: {
+          ...draftEntry,
+          documentSnapshot: entryBase.document || null
+        }
+      });
+      if (cloudSave.ok && cloudSave.item) {
+        const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+        if (!clearAfterSave && syncActiveDocMode) {
+          store.setActiveDocumentVerification(null, syncActiveDocMode);
+        } else if (clearAfterSave) {
+          store.syncActiveDocumentNumberToNextOutgoing(true);
+        }
+        return { recorded, qrDataUrl: '', payload: null, cloudResult: cloudSave };
+      }
+    }
+
+    const recorded = store.addOutgoingLetter({
+      ...draftEntry,
       cloudSynced: false,
       skipAutoAdvanceNumber: !clearAfterSave
     });
@@ -106,9 +185,89 @@ export async function authorizeAndRecordOutgoing({
   const payload = buildVerificationPayload({
     entry: entryBase,
     school: effectiveSchool,
-    signerRole
+    signerRole: effectiveRole
   });
   const qrDataUrl = generateQrPngDataUrl(payload.verificationUrl);
+
+  if (authToken && entryBase?.document && typeof window !== 'undefined') {
+    try {
+      const qrDocForDrive = applySignatureModeToDocModel(entryBase.document, {
+        mode: 'qr',
+        qrDataUrl,
+        verificationUrl: payload.verificationUrl,
+        signerRole: effectiveRole,
+        signerInfo,
+        school: effectiveSchool,
+        syncSignerFields: false
+      });
+      const qrBlob = await renderDocx(qrDocForDrive, 'blob');
+      docxBase64 = await blobToBase64(qrBlob);
+    } catch {}
+  }
+
+  if (authToken) {
+    const cloudSave = await recordOutgoingCloud({
+      authorizeSah: true,
+      signerRole: effectiveRole,
+      docxBase64,
+      entry: {
+        ...entryBase,
+        signerRole: payload.signerRole,
+        signerTitle: payload.signerTitle,
+        signerName: payload.signerName,
+        signerNip: payload.signerNip,
+        signerRank: payload.signerRank,
+        verificationId: payload.verificationId,
+        verificationUrl: payload.verificationUrl,
+        qrDataUrl,
+        manageToken: payload.manageToken,
+        verificationStatement: payload.verificationStatement,
+        verificationDetails: payload.details,
+        isVerifiedSah: true,
+        verificationStatus: 'sah',
+        documentSnapshot: entryBase.document || null
+      },
+      verificationPayload: payload
+    });
+
+    if (cloudSave.forbidden) {
+      showToast(cloudSave.error || 'Akses pengesahan ditolak server.', 'error');
+      throw new Error(cloudSave.error || 'Forbidden');
+    }
+
+    if (cloudSave.ok && cloudSave.item) {
+      const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+      if (cloudSave.syncRev) setLastKnownSyncRev(cloudSave.syncRev);
+      if (clearAfterSave) {
+        store.syncActiveDocumentNumberToNextOutgoing(true);
+      } else if (syncActiveDocMode) {
+        store.setActiveDocumentVerification({
+          outgoingId: recorded.id,
+          isVerifiedSah: true,
+          verificationStatus: 'sah',
+          verificationId: recorded.verificationId || payload.verificationId,
+          verificationUrl: recorded.verificationUrl || payload.verificationUrl,
+          qrDataUrl,
+          manageToken: recorded.manageToken || payload.manageToken,
+          signerRole: recorded.signerRole || payload.signerRole,
+          roleLabel: signerInfo.roleLabel,
+          signerTitle: recorded.signerTitle || payload.signerTitle,
+          signerName: recorded.signerName || payload.signerName,
+          signerNip: recorded.signerNip ?? payload.signerNip,
+          signerRank: recorded.signerRank || payload.signerRank,
+          verificationStatement: recorded.verificationStatement || payload.verificationStatement,
+          nomorSurat: recorded.nomorSurat,
+          cloudSynced: true
+        }, syncActiveDocMode);
+      }
+
+      if (cloudSave.driveSync && !cloudSave.driveSync.ok && cloudSave.driveSync.error) {
+        showToast(`Surat #${String(recorded.sequenceNumber).padStart(3, '0')} tersimpan di Server Cloud (Drive menyusul: ${cloudSave.driveSync.error}).`, 'info');
+      }
+      return { recorded, payload, qrDataUrl, cloudResult: cloudSave };
+    }
+  }
+
   const cloudResult = await registerVerificationInCloud(payload);
 
   const recorded = store.addOutgoingLetter({
@@ -321,10 +480,97 @@ export function printWithTemporaryQrOverlay({
   });
 }
 
+/**
+ * Helper terpadu untuk mencatat surat keluar sebagai antrean ACC Kepala Sekolah
+ * (ketika TU belum diberi izin delegasi pengesahan oleh Kepala Sekolah).
+ */
+export async function requestAccForOutgoing({
+  entryBase,
+  school,
+  requestedSignerRole = 'kepala_sekolah',
+  requestNote = '',
+  syncActiveDocMode = 'standard',
+  clearAfterSave = false
+} = {}) {
+  const effectiveSchool = school || store.getState().schoolProfile || {};
+  const signerInfo = buildSignerSelectionInfo(effectiveSchool, requestedSignerRole);
+  const authToken = getStoredAuthToken();
+
+  let docxBase64 = '';
+  if (authToken && entryBase?.document && typeof window !== 'undefined') {
+    try {
+      const manualDoc = applySignatureModeToDocModel(entryBase.document, { mode: 'manual' });
+      const blob = await renderDocx(manualDoc, 'blob');
+      docxBase64 = await blobToBase64(blob);
+    } catch {}
+  }
+
+  const pendingEntry = {
+    ...entryBase,
+    signerRole: signerInfo.signerRole,
+    signerTitle: signerInfo.signerTitle,
+    signerName: signerInfo.signerName,
+    signerNip: signerInfo.signerNip,
+    signerRank: signerInfo.signerRank,
+    isVerifiedSah: false,
+    verificationStatus: 'pending_acc',
+    accStatus: 'pending'
+  };
+
+  if (authToken) {
+    const cloudSave = await recordOutgoingCloud({
+      authorizeSah: false,
+      requestAcc: true,
+      signerRole: signerInfo.signerRole,
+      requestNote,
+      docxBase64,
+      entry: {
+        ...pendingEntry,
+        documentSnapshot: entryBase.document || null
+      }
+    });
+
+    if (!cloudSave.ok || !cloudSave.item) {
+      throw new Error(cloudSave.error || 'Gagal mengirim pengajuan ACC ke Kepala Sekolah.');
+    }
+
+    const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+    if (cloudSave.syncRev) setLastKnownSyncRev(cloudSave.syncRev);
+
+    if (clearAfterSave) {
+      store.syncActiveDocumentNumberToNextOutgoing(true);
+    } else if (syncActiveDocMode) {
+      store.setActiveDocumentVerification({
+        outgoingId: recorded.id,
+        isVerifiedSah: false,
+        verificationStatus: 'pending_acc',
+        accStatus: 'pending',
+        signerRole: recorded.signerRole,
+        roleLabel: signerInfo.roleLabel,
+        signerTitle: recorded.signerTitle,
+        signerName: recorded.signerName,
+        nomorSurat: recorded.nomorSurat
+      }, syncActiveDocMode);
+    }
+
+    return { recorded, cloudResult: cloudSave };
+  }
+
+  const recorded = store.addOutgoingLetter({
+    ...pendingEntry,
+    cloudSynced: false,
+    skipAutoAdvanceNumber: !clearAfterSave
+  });
+  return { recorded, cloudResult: { ok: false, skipped: true } };
+}
+
 export function openPrintSignatureChoiceModal({
   actionType = 'print', // 'print' | 'docx'
   isVerifiedSah = false,
   isRevoked = false,
+  isPendingAcc = false,
+  isRejectedAcc = false,
+  rejectedReason = '',
   nomorSurat = '-',
   title = 'SURAT DINAS',
   qrDataUrl = '',
@@ -333,12 +579,15 @@ export function openPrintSignatureChoiceModal({
   signerName = '',
   onChooseQr,
   onChooseManual,
-  onAuthorizeAndQr
+  onAuthorizeAndQr,
+  onRequestAcc
 } = {}) {
   document.getElementById('modal-print-signature-choice')?.remove();
 
   const verbLabel = actionType === 'docx' ? 'Unduh .docx' : 'Cetak / PDF';
   const canUseQrDirectly = Boolean(isVerifiedSah) && !isRevoked && Boolean(qrDataUrl);
+  const stNow = store.getState();
+  const canRequestAccRole = typeof onRequestAcc === 'function' && stNow.authUser?.role === 'tu' && Boolean(getStoredAuthToken());
 
   const overlay = document.createElement('div');
   overlay.id = 'modal-print-signature-choice';
@@ -369,10 +618,20 @@ export function openPrintSignatureChoiceModal({
           <strong>✓ Status Dokumen: SUDAH DINYATAKAN SAH</strong>
           <span>Disahkan atas nama <strong>${escPrintHtml(signerLabel)}</strong>${signerName ? ` (${escPrintHtml(signerName)})` : ''}. Pilih apakah ingin menampilkan Barcode QR atau dikosongkan untuk TTD pulpen.</span>
         </div>
+      ` : isPendingAcc ? `
+        <div class="choice-status-banner choice-banner-pending">
+          <strong style="display:flex;align-items:center;gap:8px;"><span class="acc-live-spinner acc-spinner-sm"></span> Menunggu ACC Kepala Sekolah</strong>
+          <span>Surat ini berada dalam antrean ACC Kepala Sekolah. Barcode QR otomatis terbit tanpa refresh begitu di-ACC. Sementara itu Anda tetap bebas menggunakan TTD Manual atau membuat surat lainnya.</span>
+        </div>
+      ` : isRejectedAcc ? `
+        <div class="choice-status-banner choice-banner-danger">
+          <strong>❌ Permintaan ACC Ditolak Kepala Sekolah</strong>
+          <span>Catatan Kepsek: ${escPrintHtml(rejectedReason || 'Perlu revisi sebelum pengesahan')}. Anda dapat mengajukan ulang permintaan ACC di bawah atau menggunakan TTD Manual.</span>
+        </div>
       ` : `
         <div class="choice-status-banner choice-banner-warn">
           <strong>⚠️ Draft Belum Dinyatakan SAH</strong>
-          <span>Barcode QR hanya terbit setelah surat dinyatakan <strong>SAH</strong> &amp; dicatat ke Surat Keluar. Anda bisa langsung mengesahkannya di bawah ini atau mencetak kosongan untuk TTD manual pulpen.</span>
+          <span>Barcode QR hanya terbit setelah surat dinyatakan <strong>SAH</strong>. ${canRequestAccRole ? 'Jika memilih Kepala Sekolah tanpa izin delegasi, Anda dapat langsung mengirim permintaan ACC ke Kepala Sekolah.' : 'Anda bisa langsung mengesahkannya di bawah ini atau mencetak kosongan TTD manual.'}</span>
         </div>
       `}
 
@@ -393,14 +652,25 @@ export function openPrintSignatureChoiceModal({
               ▣ ${escPrintHtml(verbLabel)} Pakai Barcode QR
             </button>
           </div>
+        ` : isPendingAcc ? `
+          <div class="choice-option-card choice-option-disabled">
+            <div class="choice-card-top">
+              <div class="choice-qr-placeholder"><span class="acc-live-spinner"></span></div>
+              <div>
+                <div class="choice-card-badge badge-pending">Antrean ACC Aktif</div>
+                <h4>Menunggu ACC Kepala Sekolah</h4>
+                <p>Barcode QR akan aktif otomatis secara real-time di aplikasi segera setelah Kepala Sekolah menekan tombol ACC.</p>
+              </div>
+            </div>
+          </div>
         ` : !isRevoked && typeof onAuthorizeAndQr === 'function' ? `
           <div class="choice-option-card choice-option-qr">
             <div class="choice-card-top">
               <div class="choice-qr-placeholder">QR</div>
               <div>
                 <div class="choice-card-badge badge-pending">Perlu Pengesahan SAH</div>
-                <h4>Sahkan Surat &amp; Pakai Barcode QR</h4>
-                <p>Otomatis mencatat ke Surat Keluar sebagai surat <strong>SAH</strong> dan menerbitkan Barcode QR verifikasi resmi.</p>
+                <h4>Sahkan / Minta ACC Barcode QR</h4>
+                <p>Mencatat ke Surat Keluar serta langsung menerbitkan Barcode QR atau mengajukan ke Antrean ACC Kepala Sekolah.</p>
               </div>
             </div>
             <div style="margin-top: 10px;">
@@ -408,11 +678,20 @@ export function openPrintSignatureChoiceModal({
                 Pernyataan Pengesahan Atas Nama:
               </label>
               <select id="choice-authorize-role" class="form-control" style="font-size: 12px; height: 34px;">
-                ${SIGNER_ROLE_OPTIONS.map(opt => `
-                  <option value="${escPrintHtml(opt.id)}" ${opt.id === defaultSignerRole ? 'selected' : ''}>
-                    ${escPrintHtml(opt.label)} — ${escPrintHtml(opt.description)}
-                  </option>
-                `).join('')}
+                ${(() => {
+                  const opts = getSelectableSignerRoles(stNow.authUser, stNow.authPermissions, SIGNER_ROLE_OPTIONS);
+                  const defRole = resolveDefaultAllowedSignerRole(stNow.authUser, stNow.authPermissions, defaultSignerRole);
+                  return opts.map(opt => {
+                    const allowOpt = opt.allowed || canRequestAccRole;
+                    const reqAcc = !opt.allowed && canRequestAccRole ? '1' : '0';
+                    const optText = opt.allowed
+                      ? `${opt.label} ${opt.delegated ? '(Izin Delegasi Aktif)' : `— ${opt.description}`}`
+                      : (canRequestAccRole
+                          ? `${opt.label} 📨 (Minta ACC Kepala Sekolah)`
+                          : `${opt.label} 🔒 (Perlu Izin Kepsek/Admin)`);
+                    return `<option value="${escPrintHtml(opt.id)}" data-requires-acc="${reqAcc}" ${opt.id === defRole ? 'selected' : ''} ${allowOpt ? '' : 'disabled'}>${escPrintHtml(optText)}</option>`;
+                  }).join('');
+                })()}
               </select>
             </div>
             <button type="button" id="btn-choice-authorize-qr" class="btn btn-primary" style="width: 100%; margin-top: 10px;">
@@ -482,14 +761,31 @@ export function openPrintSignatureChoiceModal({
     };
   }
 
+  const roleSelectEl = overlay.querySelector('#choice-authorize-role');
   const btnAuthQr = overlay.querySelector('#btn-choice-authorize-qr');
   if (btnAuthQr) {
+    const syncAuthBtnState = () => {
+      const selectedOpt = roleSelectEl?.options?.[roleSelectEl.selectedIndex];
+      const requiresAcc = selectedOpt?.dataset?.requiresAcc === '1';
+      btnAuthQr.textContent = requiresAcc
+        ? '📨 Ajukan Minta ACC Kepala Sekolah'
+        : `🛡️ Sahkan & ${verbLabel} Pakai Barcode QR`;
+    };
+    roleSelectEl?.addEventListener('change', syncAuthBtnState);
+    syncAuthBtnState();
+
     btnAuthQr.onclick = async () => {
-      const selectedRole = overlay.querySelector('#choice-authorize-role')?.value || 'kepala_sekolah';
+      const selectedOpt = roleSelectEl?.options?.[roleSelectEl.selectedIndex];
+      const selectedRole = roleSelectEl?.value || 'kepala_sekolah';
+      const requiresAcc = selectedOpt?.dataset?.requiresAcc === '1';
       btnAuthQr.disabled = true;
-      btnAuthQr.textContent = 'Menyimpan pengesahan & membuat QR...';
+      btnAuthQr.textContent = requiresAcc
+        ? 'Mengirim permintaan ACC ke Kepala Sekolah...'
+        : 'Menyimpan pengesahan & membuat QR...';
       try {
-        if (typeof onAuthorizeAndQr === 'function') {
+        if (requiresAcc && typeof onRequestAcc === 'function') {
+          await onRequestAcc(selectedRole);
+        } else if (typeof onAuthorizeAndQr === 'function') {
           await onAuthorizeAndQr(selectedRole);
         }
       } finally {

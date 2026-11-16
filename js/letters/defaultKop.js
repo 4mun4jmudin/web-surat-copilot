@@ -6,7 +6,7 @@ export function createKopSvg({
   provinsi = 'PEMERINTAH DAERAH PROVINSI JAWA BARAT',
   dinas = 'DINAS PENDIDIKAN',
   cabang = 'CABANG DINAS PENDIDIKAN WILAYAH XI',
-  sekolah = 'SMKS IT AL-HAWARI',
+  sekolah = 'SMK IT AL-HAWARI',
   alamat = 'Kp. Curug RT 02/RW 06, Desa Cipareuan, Kec. Cibiuk, Kab. Garut 44193',
   kontak = 'Website: al-hawari.sch.id | Email: smkitalhawari@gmail.com | WA: +62 895-3266-12155',
   primaryColor = '#15803d',
@@ -47,11 +47,11 @@ export const DEFAULT_KOP_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAl
 export const DEFAULT_KOP_GALLERY = [
   {
     id: 'kop-smk-dinas',
-    name: 'Kop Resmi SMKS IT Al-Hawari (Dinas Pendidikan)',
+    name: 'Kop Resmi SMK IT Al-Hawari (Dinas Pendidikan)',
     category: 'Resmi Dinas',
     isDefault: true,
     dataUrl: DEFAULT_KOP_DATA_URL,
-    description: 'Format baku Pemerintah Provinsi Jawa Barat, Dinas Pendidikan Wilayah XI Garut, dan SMKS IT Al-Hawari.'
+    description: 'Format baku Pemerintah Provinsi Jawa Barat, Dinas Pendidikan Wilayah XI Garut, dan SMK IT Al-Hawari.'
   },
   {
     id: 'kop-yayasan-al-irsyad',
@@ -62,7 +62,7 @@ export const DEFAULT_KOP_GALLERY = [
       provinsi: 'YAYASAN NUNUK KARTINI AL-IRSYAD',
       dinas: 'AKTA NOTARIS & KEMENKUMHAM RI',
       cabang: 'SK OPERASIONAL: 425.11/1136-DISDIK',
-      sekolah: 'SMKS ISLAM TERPADU AL-HAWARI',
+      sekolah: 'SMK ISLAM TERPADU AL-HAWARI',
       badgeText: 'YYS',
       primaryColor: '#0f766e',
       secondaryColor: '#f59e0b',
@@ -73,12 +73,12 @@ export const DEFAULT_KOP_GALLERY = [
   },
   {
     id: 'kop-komite-sekolah',
-    name: 'Kop Komite Sekolah SMKS IT Al-Hawari',
+    name: 'Kop Komite Sekolah SMK IT Al-Hawari',
     category: 'Komite',
     isDefault: false,
     dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(createKopSvg({
       provinsi: 'KOMITE SEKOLAH',
-      dinas: 'SMKS IT AL-HAWARI CIBIUK GARUT',
+      dinas: 'SMK IT AL-HAWARI CIBIUK GARUT',
       cabang: 'FORUM KERJASAMA MASYARAKAT & WALI MURID',
       sekolah: 'PENGURUS KOMITE SEKOLAH',
       badgeText: 'KOMITE',
@@ -91,14 +91,14 @@ export const DEFAULT_KOP_GALLERY = [
   },
   {
     id: 'kop-osis-mpk',
-    name: 'Kop OSIS & MPK SMKS IT Al-Hawari',
+    name: 'Kop OSIS & MPK SMK IT Al-Hawari',
     category: 'Kesiswaan',
     isDefault: false,
     dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(createKopSvg({
       provinsi: 'ORGANISASI SISWA INTRA SEKOLAH (OSIS)',
       dinas: 'MAJELIS PERMUSYAWARATAN KELAS (MPK)',
       cabang: '',
-      sekolah: 'SMKS IT AL-HAWARI',
+      sekolah: 'SMK IT AL-HAWARI',
       badgeText: 'OSIS',
       primaryColor: '#15803d',
       secondaryColor: '#1d4ed8',
