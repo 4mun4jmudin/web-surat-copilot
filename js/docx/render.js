@@ -18,6 +18,7 @@ import {
   buildLetterMetaRecipientXml,
   buildIdentityTableXml,
   buildLetterSignatureXml,
+  buildQrDrawingXml,
   parseBase64Image
 } from '../letters/builder.js';
 import {
@@ -57,8 +58,14 @@ function renderRuns(runs = []) {
     if (run.bold) rPrParts.push('<w:b/>');
     if (run.italic) rPrParts.push('<w:i/>');
     if (run.underline) rPrParts.push('<w:u w:val="single"/>');
+    if (run.letterSpacing) rPrParts.push(`<w:spacing w:val="${Math.round(Number(run.letterSpacing) * 20)}"/>`);
+    if (run.fontSizeHalfPt) {
+      rPrParts.push(`<w:sz w:val="${Math.round(Number(run.fontSizeHalfPt))}"/>`);
+      rPrParts.push(`<w:szCs w:val="${Math.round(Number(run.fontSizeHalfPt))}"/>`);
+    }
     if (run.sup) rPrParts.push('<w:vertAlign w:val="superscript"/>');
     if (run.sub) rPrParts.push('<w:vertAlign w:val="subscript"/>');
+    if (run.color) rPrParts.push(`<w:color w:val="${escapeXml(String(run.color).replace(/^#/, ''))}"/>`);
 
     const rPrXml = rPrParts.length > 0 ? `<w:rPr>${rPrParts.join('')}</w:rPr>` : '';
     const textXml = buildTextElement(run.text || '');
@@ -72,6 +79,278 @@ function renderRuns(runs = []) {
 
     return runXml;
   }).join('');
+}
+
+function buildTableBordersXml(borderStyle = 'grid') {
+  const b = (val = 'single', sz = '4') => val === 'none'
+    ? 'w:val="none"'
+    : `w:val="${val}" w:sz="${sz}" w:space="0" w:color="000000"`;
+
+  if (borderStyle === 'none') {
+    return `
+      <w:tblBorders>
+        <w:top ${b('none')}/><w:bottom ${b('none')}/>
+        <w:left ${b('none')}/><w:right ${b('none')}/>
+        <w:insideH ${b('none')}/><w:insideV ${b('none')}/>
+      </w:tblBorders>
+    `.trim();
+  }
+  if (borderStyle === 'sppd') {
+    return `
+      <w:tblBorders>
+        <w:top ${b('single', '6')}/><w:bottom ${b('single', '6')}/>
+        <w:left ${b('none')}/><w:right ${b('none')}/>
+        <w:insideH ${b('single', '4')}/><w:insideV ${b('single', '4')}/>
+      </w:tblBorders>
+    `.trim();
+  }
+  return `
+    <w:tblBorders>
+      <w:top ${b('single', '4')}/><w:bottom ${b('single', '4')}/>
+      <w:left ${b('single', '4')}/><w:right ${b('single', '4')}/>
+      <w:insideH ${b('single', '4')}/><w:insideV ${b('single', '4')}/>
+    </w:tblBorders>
+  `.trim();
+}
+
+function normalizeTableRowEntry(rowEntry) {
+  if (Array.isArray(rowEntry)) {
+    return { cells: rowEntry, isHeader: null, minHeightTwips: 0, cantSplit: true };
+  }
+  if (rowEntry && typeof rowEntry === 'object' && Array.isArray(rowEntry.cells)) {
+    const minH = rowEntry.minHeightTwips
+      ? Math.round(Number(rowEntry.minHeightTwips))
+      : (rowEntry.minHeightCm ? Math.round(Number(rowEntry.minHeightCm) * 567) : 0);
+    return {
+      cells: rowEntry.cells,
+      isHeader: rowEntry.isHeader ?? null,
+      minHeightTwips: minH,
+      cantSplit: rowEntry.cantSplit !== false
+    };
+  }
+  return { cells: [], isHeader: false, minHeightTwips: 0, cantSplit: true };
+}
+
+function normalizeTableCellEntry(cell, fallbackAlign = 'left', fallbackBold = false) {
+  if (cell && typeof cell === 'object' && !Array.isArray(cell)) {
+    const colspan = Math.max(1, Number(cell.colspan) || 1);
+    const rowspan = Math.max(1, Number(cell.rowspan) || 1);
+    const align = cell.align || fallbackAlign;
+    const bold = cell.bold !== undefined ? Boolean(cell.bold) : fallbackBold;
+    const italic = Boolean(cell.italic);
+    const underline = Boolean(cell.underline);
+    let paragraphs = null;
+    if (Array.isArray(cell.paragraphs) && cell.paragraphs.length > 0) {
+      paragraphs = cell.paragraphs.map(p => (typeof p === 'string' ? { text: p, align, bold, italic, underline } : { align, bold, italic, underline, ...p }));
+    } else if (Array.isArray(cell.lines) && cell.lines.length > 0) {
+      paragraphs = cell.lines.map(l => (typeof l === 'string' ? { text: l, align, bold, italic, underline } : { align, bold, italic, underline, ...l }));
+    } else {
+      const rawText = cell.text !== undefined ? String(cell.text) : '';
+      const splitLines = rawText.split(/\r?\n/);
+      paragraphs = splitLines.map(lineText => ({ text: lineText, align, bold, italic, underline }));
+    }
+    return {
+      paragraphs,
+      colspan,
+      rowspan,
+      vAlign: cell.vAlign || '',
+      shade: cell.shade || '',
+      qrSlot: Boolean(cell.qrSlot),
+      qrCaption: cell.qrCaption || ''
+    };
+  }
+  const splitLines = String(cell ?? '').split(/\r?\n/);
+  return {
+    paragraphs: splitLines.map(lineText => ({ text: lineText, align: fallbackAlign, bold: fallbackBold })),
+    colspan: 1,
+    rowspan: 1,
+    vAlign: '',
+    shade: '',
+    qrSlot: false,
+    qrCaption: ''
+  };
+}
+
+function renderRichTableCellParagraphs(cellObj, { hasQrImage = false, borderStyle = 'grid' } = {}) {
+  const marTop = borderStyle === 'none' ? 30 : 75;
+  const marSide = borderStyle === 'none' ? 60 : 110;
+  const pXml = (cellObj.paragraphs || []).map((p) => {
+    if (p.qrSlot && hasQrImage) {
+      return `
+        ${buildQrDrawingXml('rIdQr', 2.0, 2.0)}
+        ${p.qrCaption ? `<w:p><w:pPr><w:spacing w:before="0" w:after="20" w:line="200" w:lineRule="auto"/><w:jc w:val="${p.align || 'center'}"/></w:pPr><w:r><w:rPr><w:i/><w:sz w:val="15"/><w:color w:val="166534"/></w:rPr><w:t>${escapeXml(p.qrCaption)}</w:t></w:r></w:p>` : ''}
+      `.trim();
+    }
+    const jc = p.align === 'both' || p.align === 'justify' ? 'both' : (p.align || 'left');
+    const runs = Array.isArray(p.runs) && p.runs.length > 0
+      ? p.runs.map(r => ({
+          ...r,
+          bold: r.bold !== undefined ? r.bold : p.bold,
+          italic: r.italic !== undefined ? r.italic : p.italic,
+          underline: r.underline !== undefined ? r.underline : p.underline,
+          fontSizeHalfPt: r.fontSizeHalfPt || p.fontSizeHalfPt
+        }))
+      : [{
+          text: String(p.text ?? ''),
+          bold: Boolean(p.bold),
+          italic: Boolean(p.italic),
+          underline: Boolean(p.underline),
+          fontSizeHalfPt: p.fontSizeHalfPt
+        }];
+    const after = p.spacingAfter !== undefined ? p.spacingAfter : 20;
+    const before = p.spacingBefore !== undefined ? p.spacingBefore : 0;
+    return `
+      <w:p>
+        <w:pPr>
+          <w:pStyle w:val="Normal"/>
+          <w:spacing w:before="${before}" w:after="${after}" w:line="240" w:lineRule="auto"/>
+          <w:jc w:val="${jc}"/>
+        </w:pPr>
+        ${renderRuns(runs)}
+      </w:p>
+    `.trim();
+  }).join('');
+
+  const qrInCellFallback = cellObj.qrSlot && hasQrImage && !(cellObj.paragraphs || []).some(p => p.qrSlot)
+    ? buildQrDrawingXml('rIdQr', 2.0, 2.0)
+    : '';
+
+  return {
+    contentXml: (pXml + qrInCellFallback) || '<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>',
+    marTop,
+    marSide
+  };
+}
+
+export function renderRichTableXml(block, profile, { hasQrImage = false } = {}) {
+  const rawRows = (block.rows || []).map(normalizeTableRowEntry);
+  if (rawRows.length === 0) return '';
+
+  const borderStyle = block.borderStyle || 'grid';
+  const useHeaderShading = block.headerShading !== undefined ? Boolean(block.headerShading) : (borderStyle === 'grid' && block.headerRow !== false);
+  const baseTwips = Math.max(4000, (profile.page?.width || 11906) - (profile.margins?.left || 1418) - (profile.margins?.right || 1134));
+  const widthPctFactor = (block.tableWidthPct && Number(block.tableWidthPct) >= 30 && Number(block.tableWidthPct) < 100)
+    ? (Number(block.tableWidthPct) / 100)
+    : 1;
+  const printableTwips = Math.max(3000, Math.round(baseTwips * widthPctFactor));
+
+  // Hitung jumlah kolom maksimal dengan memperhitungkan colspan & rowspan
+  let numCols = Array.isArray(block.colWidthsPct) && block.colWidthsPct.length > 0 ? block.colWidthsPct.length : 0;
+  {
+    const simTracker = [];
+    for (const r of rawRows) {
+      let c = 0;
+      for (const cell of r.cells) {
+        while ((simTracker[c] || 0) > 0) c++;
+        const cs = Math.max(1, Number(cell?.colspan) || 1);
+        const rs = Math.max(1, Number(cell?.rowspan) || 1);
+        if (rs > 1) {
+          for (let k = 0; k < cs; k++) simTracker[c + k] = Math.max(simTracker[c + k] || 0, rs - 1);
+        }
+        c += cs;
+        numCols = Math.max(numCols, c);
+      }
+      for (let k = 0; k < simTracker.length; k++) {
+        if (simTracker[k] > 0) simTracker[k]--;
+      }
+    }
+  }
+  numCols = Math.max(1, numCols);
+
+  const rawPcts = Array.isArray(block.colWidthsPct) && block.colWidthsPct.length === numCols
+    ? block.colWidthsPct.map(n => Math.max(1, Number(n) || 1))
+    : Array.from({ length: numCols }, () => 100 / numCols);
+  const pctSum = rawPcts.reduce((a, b) => a + b, 0) || 100;
+  const colWidthsTwips = rawPcts.map(p => Math.round((p / pctSum) * printableTwips));
+
+  const tblGridXml = `<w:tblGrid>${colWidthsTwips.map(w => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>`;
+
+  const tracker = Array.from({ length: numCols }, () => 0);
+  const rowsXml = rawRows.map((rowEntry, rIdx) => {
+    const isHeader = rowEntry.isHeader !== null ? rowEntry.isHeader : (rIdx === 0 && block.headerRow !== false);
+    const defaultAlign = isHeader ? 'center' : 'left';
+    const cellsXmlParts = [];
+    let colPtr = 0;
+    let cellIdx = 0;
+
+    while (colPtr < numCols) {
+      if (tracker[colPtr] > 0) {
+        const w = colWidthsTwips[colPtr] || Math.round(printableTwips / numCols);
+        cellsXmlParts.push(`
+          <w:tc>
+            <w:tcPr>
+              <w:tcW w:w="${w}" w:type="dxa"/>
+              <w:vMerge/>
+            </w:tcPr>
+            <w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>
+          </w:tc>
+        `.trim());
+        tracker[colPtr]--;
+        colPtr++;
+        continue;
+      }
+
+      if (cellIdx >= rowEntry.cells.length) {
+        const w = colWidthsTwips[colPtr] || Math.round(printableTwips / numCols);
+        cellsXmlParts.push(`
+          <w:tc>
+            <w:tcPr><w:tcW w:w="${w}" w:type="dxa"/></w:tcPr>
+            <w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>
+          </w:tc>
+        `.trim());
+        colPtr++;
+        continue;
+      }
+
+      const rawCell = rowEntry.cells[cellIdx++];
+      const cell = normalizeTableCellEntry(rawCell, defaultAlign, isHeader && (block.headerBold !== false));
+      const spanCols = Math.min(cell.colspan, numCols - colPtr);
+      let spanWidth = 0;
+      for (let k = 0; k < spanCols; k++) {
+        spanWidth += colWidthsTwips[colPtr + k] || Math.round(printableTwips / numCols);
+        if (cell.rowspan > 1) {
+          tracker[colPtr + k] = cell.rowspan - 1;
+        }
+      }
+
+      const { contentXml, marTop, marSide } = renderRichTableCellParagraphs(cell, { hasQrImage, borderStyle });
+      const shadeColor = cell.shade || (isHeader && useHeaderShading ? 'F2F2F2' : '');
+      const tcPrParts = [
+        `<w:tcW w:w="${spanWidth}" w:type="dxa"/>`,
+        spanCols > 1 ? `<w:gridSpan w:val="${spanCols}"/>` : '',
+        cell.rowspan > 1 ? '<w:vMerge w:val="restart"/>' : '',
+        shadeColor ? `<w:shd w:val="clear" w:color="auto" w:fill="${escapeXml(shadeColor)}"/>` : '',
+        `<w:tcMar><w:top w:w="${marTop}" w:type="dxa"/><w:bottom w:w="${marTop}" w:type="dxa"/><w:left w:w="${marSide}" w:type="dxa"/><w:right w:w="${marSide}" w:type="dxa"/></w:tcMar>`,
+        cell.vAlign ? `<w:vAlign w:val="${cell.vAlign === 'middle' ? 'center' : cell.vAlign}"/>` : ''
+      ].filter(Boolean).join('');
+
+      cellsXmlParts.push(`<w:tc><w:tcPr>${tcPrParts}</w:tcPr>${contentXml}</w:tc>`);
+      colPtr += spanCols;
+    }
+
+    const trPrParts = [
+      rowEntry.cantSplit ? '<w:cantSplit/>' : '',
+      isHeader ? '<w:tblHeader/>' : '',
+      rowEntry.minHeightTwips > 0 ? `<w:trHeight w:val="${rowEntry.minHeightTwips}" w:hRule="atLeast"/>` : ''
+    ].filter(Boolean).join('');
+
+    return `<w:tr>${trPrParts ? `<w:trPr>${trPrParts}</w:trPr>` : ''}${cellsXmlParts.join('')}</w:tr>`;
+  }).join('');
+
+  return `
+    <w:tbl>
+      <w:tblPr>
+        <w:tblStyle w:val="TableNormal"/>
+        <w:tblW w:w="${printableTwips}" w:type="dxa"/>
+        ${Array.isArray(block.colWidthsPct) && block.colWidthsPct.length > 0 ? '<w:tblLayout w:type="fixed"/>' : ''}
+        <w:jc w:val="${widthPctFactor < 1 ? 'left' : 'center'}"/>
+        ${buildTableBordersXml(borderStyle)}
+      </w:tblPr>
+      ${tblGridXml}
+      ${rowsXml}
+    </w:tbl>
+    <w:p><w:pPr><w:spacing w:before="0" w:after="60" w:line="220" w:lineRule="auto"/></w:pPr></w:p>
+  `.trim();
 }
 
 function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, footerRelId = null) {
@@ -137,7 +416,7 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
 
       // 3. TABEL IDENTITAS SISWA / PEGAWAI
       case 'identityTable': {
-        bodyXmlParts.push(buildIdentityTableXml(block.rows || []));
+        bodyXmlParts.push(buildIdentityTableXml(block.rows || [], block.colWidthsPct || null));
         break;
       }
 
@@ -178,14 +457,15 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
         const isLetterBody = block.style === 'letterBody' || isLetter;
         const indentVal = isLetterBody ? 0 : (profile.typography?.paragraphIndent || 709);
         const lineSpacing = profile.typography?.lineSpacing || 276;
-        const spacingAfter = isLetterBody ? 120 : (profile.typography?.paragraphSpacingAfter || 120);
+        const spacingAfter = block.spacingAfter !== undefined ? Number(block.spacingAfter) : (isLetterBody ? 100 : (profile.typography?.paragraphSpacingAfter || 120));
+        const spacingBefore = block.spacingBefore !== undefined ? Number(block.spacingBefore) : 0;
 
         bodyXmlParts.push(`
           <w:p>
             <w:pPr>
               <w:pStyle w:val="Normal"/>
               ${indentVal ? `<w:ind w:firstLine="${indentVal}"/>` : ''}
-              <w:spacing w:line="${lineSpacing}" w:lineRule="auto" w:after="${spacingAfter}"/>
+              <w:spacing w:before="${spacingBefore}" w:line="${lineSpacing}" w:lineRule="auto" w:after="${spacingAfter}"/>
               <w:jc w:val="${block.alignment || profile.typography?.alignment || 'both'}"/>
             </w:pPr>
             ${renderRuns(runs)}
@@ -237,62 +517,7 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
           `);
         }
 
-        const rowsXml = (block.rows || []).map((row, rIdx) => {
-          const isHeader = rIdx === 0 && block.headerRow !== false;
-          const cellsXml = (row || []).map(cell => {
-            const cellText = typeof cell === 'object' && cell.text !== undefined ? cell.text : String(cell);
-            return `
-              <w:tc>
-                <w:tcPr>
-                  <w:tcMar>
-                    <w:top w:w="100" w:type="dxa"/>
-                    <w:bottom w:w="100" w:type="dxa"/>
-                    <w:left w:w="120" w:type="dxa"/>
-                    <w:right w:w="120" w:type="dxa"/>
-                  </w:tcMar>
-                  ${isHeader ? '<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>' : ''}
-                </w:tcPr>
-                <w:p>
-                  <w:pPr>
-                    <w:pStyle w:val="Normal"/>
-                    <w:spacing w:line="240" w:lineRule="auto" w:after="0"/>
-                    <w:jc w:val="${isHeader ? 'center' : 'left'}"/>
-                  </w:pPr>
-                  <w:r>
-                    ${isHeader ? '<w:rPr><w:b/></w:rPr>' : ''}
-                    <w:t>${escapeXml(cellText)}</w:t>
-                  </w:r>
-                </w:p>
-              </w:tc>
-            `;
-          }).join('');
-
-          return `
-            <w:tr>
-              <w:trPr>${isHeader ? '<w:tblHeader/>' : ''}</w:trPr>
-              ${cellsXml}
-            </w:tr>
-          `;
-        }).join('');
-
-        bodyXmlParts.push(`
-          <w:tbl>
-            <w:tblPr>
-              <w:tblStyle w:val="TableNormal"/>
-              <w:tblW w:w="0" w:type="auto"/>
-              <w:tblBorders>
-                <w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-              </w:tblBorders>
-              <w:jc w:val="center"/>
-            </w:tblPr>
-            ${rowsXml}
-          </w:tbl>
-        `);
+        bodyXmlParts.push(renderRichTableXml(block, profile, { hasQrImage }));
         break;
       }
 
@@ -533,7 +758,7 @@ export async function renderDocx(docModel, outputType = 'blob') {
   // Cari gambar Barcode QR pengesahan jika signatureMode === 'qr'
   let qrParsed = null;
   const sigBlock = (docModel.blocks || []).find(b => b.type === 'letterSignature' && b.signatureMode === 'qr' && b.qrImage);
-  const qrDataUrl = sigBlock?.qrImage || '';
+  const qrDataUrl = sigBlock?.qrImage || docModel.qrSignatureOverlay?.qrImage || '';
   if (qrDataUrl) {
     qrParsed = parseBase64Image(qrDataUrl);
   }

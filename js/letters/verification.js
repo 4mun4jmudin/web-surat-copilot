@@ -561,6 +561,15 @@ export function applySignatureModeToDocModel(docModel, options = {}) {
       }
     }
   }
+  if (mode === 'qr') {
+    cloned.qrSignatureOverlay = {
+      qrImage: options.qrDataUrl,
+      qrCaption: options.qrCaption || defaultCaptions.line1
+    };
+  } else {
+    delete cloned.qrSignatureOverlay;
+  }
+
   return cloned;
 }
 

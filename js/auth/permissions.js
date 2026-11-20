@@ -17,6 +17,7 @@ export const DEFAULT_ACCESS_PERMISSIONS = Object.freeze({
   allowTuRevokePrincipalQr: false,
   allowTuManageApiVault: true,
   allowTuDeleteOutgoing: false,
+  allowTuDeleteIncoming: true,
   updatedAt: '',
   updatedBy: 'system',
   updatedByRole: 'admin',
@@ -123,6 +124,14 @@ export function canDeleteOutgoingItem(user, permissions = DEFAULT_ACCESS_PERMISS
   if (user.active === false) return false;
   if (user.role === 'admin' || user.role === 'kepsek') return true;
   if (user.role === 'tu') return permissions?.allowTuDeleteOutgoing === true;
+  return false;
+}
+
+export function canDeleteIncomingItem(user, permissions = DEFAULT_ACCESS_PERMISSIONS) {
+  if (!user) return true;
+  if (user.active === false) return false;
+  if (user.role === 'admin' || user.role === 'kepsek') return true;
+  if (user.role === 'tu') return permissions?.allowTuDeleteIncoming !== false;
   return false;
 }
 

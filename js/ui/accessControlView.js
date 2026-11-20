@@ -20,6 +20,7 @@ import {
   updatePermissionsCloud
 } from '../sync/workspaceClient.js';
 import { showToast } from './notification.js';
+import { APPS_SCRIPT_INCOMING_SNIPPET } from '../letters/incoming.js';
 
 function escapeHtml(value) {
   const div = document.createElement('div');
@@ -119,6 +120,13 @@ export function renderAccessControlView(container) {
                     <div>
                       <strong>Izinkan TU Menghapus Catatan Surat Keluar Terkunci (Alt+D)</strong>
                       <small>Nonaktifkan agar arsip surat keluar permanen hanya dapat dihapus oleh Admin atau Kepala Sekolah.</small>
+                    </div>
+                  </label>
+                  <label class="access-toggle-card">
+                    <input type="checkbox" id="chk-perm-tu-delete-in" ${perms.allowTuDeleteIncoming !== false ? 'checked' : ''} />
+                    <div>
+                      <strong>Izinkan TU Menghapus Catatan Surat Masuk</strong>
+                      <small>Nonaktifkan agar arsip Surat Masuk hanya dapat dihapus oleh Admin atau Kepala Sekolah.</small>
                     </div>
                   </label>
                 </div>
@@ -233,7 +241,8 @@ export function renderAccessControlView(container) {
                   <label style="font-size:12px;">Secret Bridge Apps Script (<code>GAS_WEBHOOK_SECRET</code>)</label>
                   <input type="password" id="input-drive-webhook-secret" class="form-control" placeholder="Kosongkan jika sudah terpasang di Environment Variable Netlify" />
                 </div>
-                <div style="display:flex; justify-content:flex-end;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                  <button type="button" id="btn-copy-gas-incoming-access" class="btn btn-sm btn-secondary">📋 Salin Handler Surat Masuk (archive_incoming) ke Code.gs</button>
                   <button type="submit" class="btn btn-sm btn-secondary">🔌 Simpan &amp; Uji Koneksi Drive</button>
                 </div>
               </form>
@@ -327,6 +336,7 @@ function bindAccessControlEvents(container) {
       patch.allowTuManageApiVault = Boolean(container.querySelector('#chk-perm-tu-api')?.checked);
       patch.allowTuRevokePrincipalQr = Boolean(container.querySelector('#chk-perm-tu-revoke')?.checked);
       patch.allowTuDeleteOutgoing = Boolean(container.querySelector('#chk-perm-tu-delete')?.checked);
+      patch.allowTuDeleteIncoming = Boolean(container.querySelector('#chk-perm-tu-delete-in')?.checked);
     }
 
     const res = await updatePermissionsCloud(patch);
@@ -382,6 +392,15 @@ function bindAccessControlEvents(container) {
   });
 
   // 3. Configure Drive Bridge (Admin)
+  container.querySelector('#btn-copy-gas-incoming-access')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(APPS_SCRIPT_INCOMING_SNIPPET);
+      showToast('✓ Kode handler Google Apps Script Surat Masuk (archive_incoming) berhasil disalin!', 'success');
+    } catch {
+      showToast('Buka tab Surat Masuk → ⚙️ Script Drive untuk menyalin kode manual.', 'info');
+    }
+  });
+
   container.querySelector('#form-configure-drive')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const webhookUrl = container.querySelector('#input-drive-webhook-url')?.value?.trim() || '';

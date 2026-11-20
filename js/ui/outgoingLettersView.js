@@ -21,6 +21,15 @@ import {
   updateCloudVerificationStatus
 } from '../letters/verification.js';
 import { openPrintSignatureChoiceModal, buildPrintQrBoxHtml, runSafeWindowPrint } from './printChoiceModal.js';
+import { docModelToSmartPages, escapeHtmlText } from './smartWordCanvas.js';
+import { DEFAULT_KOP_DATA_URL } from '../letters/defaultKop.js';
+import {
+  computePrintableDimsMm,
+  normalizeQrPlacement,
+  findPreferredSignatureQrPlacement,
+  calibratePlacementFromDom,
+  buildFloatingQrElementHtml
+} from './qrFloatingHelper.js';
 import { renderQrVerificationView } from './verifyView.js';
 import { damerauLevenshtein } from './vaultView.js';
 import {
@@ -309,7 +318,7 @@ export function renderOutgoingLettersView(container) {
 
     <!-- MODAL PRATINJAU READ-ONLY SURAT KELUAR -->
     <div id="modal-outgoing-preview" class="modal-overlay hidden">
-      <div class="modal-card" style="max-width: 760px; width: 92%; max-height: 88vh; display: flex; flex-direction: column;">
+      <div class="modal-card" style="max-width: 960px; width: 95%; max-height: 92vh; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
           <div>
             <h3 id="modal-out-title" style="margin: 0; font-size: 16px; color: #0f172a;">Pratinjau Surat Keluar</h3>
@@ -659,6 +668,7 @@ function bindOutgoingRowActions(container) {
       modalBody.innerHTML = renderReadOnlyDocumentHtml(item);
       modal.dataset.activeId = item.id;
       modal.classList.remove('hidden');
+      requestAnimationFrame(() => syncOutgoingPreviewContainer(modalBody, item));
 
       if (btnModalPrint) {
         btnModalPrint.onclick = () => promptOutgoingActionWithChoice(item, 'print', container);
@@ -790,14 +800,21 @@ export function printOutgoingItem(item, { mode = 'manual' } = {}) {
   document.body.appendChild(sandbox);
   document.body.classList.add('printing-outgoing-item');
 
+  if (mode === 'qr') {
+    calibrateOutgoingQrStages(sandbox, item);
+  }
+
+  const snapOpts = item.smartPagesSnapshot?.letterOptions || {};
+  const doc = item.documentSnapshot || {};
   const cleanup = () => {
     document.body.classList.remove('printing-outgoing-item');
     sandbox.remove();
   };
 
   runSafeWindowPrint({
-    paperSize: item.documentSnapshot?.paperSize,
-    orientation: item.documentSnapshot?.orientation,
+    paperSize: doc.paperSize || snapOpts.paperSize,
+    orientation: doc.orientation || snapOpts.orientation,
+    margins: doc.customMargins || snapOpts.margins,
     onAfterPrint: cleanup
   });
 }
@@ -1260,97 +1277,176 @@ function cloneOutgoingItem(item) {
   }
 }
 
+function syncSmartNomorInHtml(html = '', nomorSurat = '') {
+  const clean = String(nomorSurat || '').trim();
+  if (!clean || !html) return html;
+  const fullNomor = /^nomor\s*:/i.test(clean) ? clean : `Nomor: ${clean}`;
+  return String(html).replace(
+    /(<(?:p|div)[^>]*data-smart-role=["']nomor["'][^>]*>)([\s\S]*?)(<\/(?:p|div)>)/i,
+    `$1${escapeHtmlText(fullNomor)}$3`
+  );
+}
+
+function calibrateOutgoingQrStages(rootEl, item) {
+  if (!rootEl || !item) return;
+  const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
+  if (!isSah || !item.qrDataUrl) return;
+  const rawPlacement = item.documentSnapshot?.qrPlacement || item.qrPlacement || null;
+  if (rawPlacement?.customPositioned) return;
+
+  const stages = [...rootEl.querySelectorAll('.floating-qr-stage')];
+  if (stages.length === 0) return;
+  const school = store.getState().schoolProfile || {};
+  const basePlacement = rawPlacement
+    ? normalizeQrPlacement(rawPlacement, stages.length)
+    : findPreferredSignatureQrPlacement(item.documentSnapshot, stages.length);
+  const calibrated = calibratePlacementFromDom(stages, basePlacement, basePlacement.sizePx);
+  const html = buildFloatingQrElementHtml({
+    qrDataUrl: item.qrDataUrl,
+    placement: calibrated,
+    signerRole: item.signerRole || 'kepala_sekolah',
+    principalName: school.principalName || '',
+    signerName: item.signerName || '',
+    school,
+    interactive: false,
+    pageCount: stages.length
+  });
+  stages.forEach((stage, idx) => {
+    stage.innerHTML = idx === calibrated.pageIndex ? html : '';
+  });
+}
+
+function syncOutgoingPreviewContainer(modalBody, item) {
+  if (!modalBody) return;
+  const sheets = [...modalBody.querySelectorAll('.outgoing-sheet-zoom-slot')];
+  if (sheets.length > 0) {
+    const firstPaper = sheets[0].querySelector('.smart-paper-sheet');
+    const sheetWidthPx = firstPaper?.offsetWidth || 794;
+    const availW = Math.max(260, (modalBody.clientWidth || 760) - 28);
+    const scale = Math.min(1, Math.max(0.35, Number((availW / sheetWidthPx).toFixed(3))));
+    const stack = modalBody.querySelector('.outgoing-preview-stack');
+    if (stack) stack.style.setProperty('--prev-scale', String(scale));
+  }
+  calibrateOutgoingQrStages(modalBody, item);
+}
+
 export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isForPrint = false } = {}) {
   const doc = item.documentSnapshot;
   const school = store.getState().schoolProfile || {};
   const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah');
   const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
-  const showQrInSig = Boolean(item.qrDataUrl && isSah && (signatureMode === 'qr' || (signatureMode === 'auto' && !isForPrint)));
-  const sigSlotHtml = showQrInSig
-    ? buildPrintQrBoxHtml({
-        qrDataUrl: item.qrDataUrl,
-        signerRole: item.signerRole || 'kepala_sekolah',
-        principalName: school.principalName || '',
-        signerName: item.signerName || signerInfo.signerName,
-        school
-      })
-    : '<div style="height: 54px;"></div>';
+  const showQr = Boolean(item.qrDataUrl && isSah && (signatureMode === 'qr' || (signatureMode === 'auto' && !isForPrint)));
 
-  if (!doc || !Array.isArray(doc.blocks)) {
+  const snapOpts = item.smartPagesSnapshot?.letterOptions || {};
+  const defaultOpts = store.getLetterOptions();
+  const paperSize = String(doc?.paperSize || snapOpts.paperSize || defaultOpts.paperSize || 'a4').toLowerCase();
+  const orientation = String(doc?.orientation || snapOpts.orientation || defaultOpts.orientation || 'portrait').toLowerCase();
+  const margins = doc?.customMargins || snapOpts.margins || doc?.letterData?.options?.margins || defaultOpts.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
+  const fontFamily = snapOpts.fontFamily || defaultOpts.fontFamily || 'Times New Roman';
+  const fontSize = snapOpts.fontSize || defaultOpts.fontSize || '12';
+  const lineSpacing = snapOpts.lineSpacing || defaultOpts.lineSpacing || '1.15';
+  const hasDocKop = Array.isArray(doc?.blocks) ? doc.blocks.some(b => b?.type === 'letterKop') : true;
+  const showKop = snapOpts.showKop !== undefined ? snapOpts.showKop !== false : hasDocKop;
+  const kopBlock = (doc?.blocks || []).find(b => b?.type === 'letterKop');
+  const kopUrl = kopBlock?.image || doc?.letterData?.kopImage || school.kopImage || DEFAULT_KOP_DATA_URL;
+  const dims = computePrintableDimsMm({ paperSize, orientation, margins });
+
+  let pages = [];
+  if (Array.isArray(item.smartPagesSnapshot?.pages) && item.smartPagesSnapshot.pages.length > 0) {
+    pages = item.smartPagesSnapshot.pages.map((p, idx) => ({
+      ...p,
+      html: idx === 0 && item.nomorSurat ? syncSmartNomorInHtml(p.html || '', item.nomorSurat) : (p.html || '<p><br></p>')
+    }));
+  } else if (doc && Array.isArray(doc.blocks) && doc.blocks.length > 0) {
+    const clonedDoc = JSON.parse(JSON.stringify(doc));
+    const tBlock = clonedDoc.blocks.find(b => b?.type === 'letterTitle');
+    if (tBlock && item.nomorSurat) {
+      tBlock.nomor = /^nomor\s*:/i.test(item.nomorSurat) ? item.nomorSurat : `Nomor: ${item.nomorSurat}`;
+    }
+    pages = docModelToSmartPages(clonedDoc, school).pages || [];
+  } else {
+    const fallbackSig = `
+      <table class="smart-sig-table" data-smart-role="signature">
+        <tbody>
+          <tr>
+            <td class="smart-sig-spacer"></td>
+            <td class="smart-sig-cell">
+              ${escapeHtmlText(school.city || 'Garut')}, ${escapeHtmlText(item.tanggalSurat || '')}<br>
+              ${escapeHtmlText(item.signerTitle || signerInfo.signerTitle)}<br><br><br><br>
+              <strong><u>${escapeHtmlText(item.signerName || signerInfo.signerName)}</u></strong><br>
+              ${escapeHtmlText(formatSignerNipLine(item.signerNip || signerInfo.signerNip))}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+    pages = [{
+      id: 'out-fallback-1',
+      html: `
+        <h2 class="smart-doc-title" data-smart-role="title" style="text-align: center;">${escapeHtmlText(item.title)}</h2>
+        <p class="smart-doc-nomor" data-smart-role="nomor" style="text-align: center;">Nomor: ${escapeHtmlText(item.nomorSurat)}</p>
+        <p><strong>Atas Nama / Penerima:</strong> ${escapeHtmlText(item.recipientName)}</p>
+        <p>${escapeHtmlText(item.summary || '-')}</p>
+        ${fallbackSig}
+      `
+    }];
+  }
+
+  const rawPlacement = doc?.qrPlacement || item.qrPlacement || null;
+  const placement = rawPlacement
+    ? normalizeQrPlacement(rawPlacement, pages.length)
+    : findPreferredSignatureQrPlacement(doc, pages.length);
+
+  const pagesHtml = pages.map((page, idx) => {
+    const qrHtml = showQr && placement.pageIndex === idx
+      ? buildFloatingQrElementHtml({
+          qrDataUrl: item.qrDataUrl,
+          placement,
+          signerRole: item.signerRole || 'kepala_sekolah',
+          principalName: school.principalName || '',
+          signerName: item.signerName || signerInfo.signerName,
+          school,
+          interactive: false,
+          pageCount: pages.length
+        })
+      : '';
+
+    const sheetStyle = `
+      --margin-top: ${Number(margins.top ?? 2.0)}cm;
+      --margin-bottom: ${Number(margins.bottom ?? 2.0)}cm;
+      --margin-left: ${Number(margins.left ?? 2.5)}cm;
+      --margin-right: ${Number(margins.right ?? 2.0)}cm;
+      --printable-h-mm: ${dims.printableHeightMm}mm;
+      --doc-font: '${escapeHtmlText(fontFamily)}', serif;
+      --doc-font-size: ${escapeHtmlText(String(fontSize))}pt;
+      --doc-line-height: ${escapeHtmlText(String(lineSpacing))};
+    `.trim();
+
+    const innerSheet = `
+      <div class="smart-paper-sheet paper-${escapeHtmlText(paperSize)} ${orientation === 'landscape' ? 'landscape' : ''}" style="${sheetStyle}">
+        ${idx === 0 && showKop ? `<div class="sheet-kop-container"><img src="${kopUrl}" alt="Kop Surat" class="sheet-kop-image" /></div>` : ''}
+        <div class="smart-editable-page outgoing-readonly-page">${page.html || '<p><br></p>'}</div>
+        <div class="floating-qr-stage" data-qr-page="${idx}">${qrHtml}</div>
+      </div>
+    `;
+
+    if (isForPrint) {
+      return `<div class="smart-page-wrapper">${innerSheet}</div>`;
+    }
+
     return `
-      <div style="background: white; padding: ${isForPrint ? '0' : '28px'}; border-radius: 4px; font-family: 'Times New Roman', serif; line-height: 1.5; color: #0f172a;">
-        <h3 style="text-align: center; margin: 0 0 4px 0;">${escapeHtml(item.title)}</h3>
-        <div style="text-align: center; margin-bottom: 18px;">Nomor: ${escapeHtml(item.nomorSurat)}</div>
-        <p><strong>Atas Nama / Penerima:</strong> ${escapeHtml(item.recipientName)}</p>
-        <p>${escapeHtml(item.summary || '-')}</p>
-        <div style="display: flex; justify-content: flex-end; margin-top: 28px;">
-          <div style="width: 240px;">
-            <div>${escapeHtml(school.city || 'Garut')}, ${escapeHtml(item.tanggalSurat || '')}</div>
-            <div>${escapeHtml(item.signerTitle || signerInfo.signerTitle)},</div>
-            ${sigSlotHtml}
-            <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(item.signerName || signerInfo.signerName)}</div>
-            <div>${escapeHtml(formatSignerNipLine(item.signerNip || signerInfo.signerNip))}</div>
-          </div>
+      <div class="smart-page-wrapper outgoing-sheet-wrapper" style="--sheet-w-mm: ${dims.sheetWidthMm}; --sheet-h-mm: ${dims.sheetHeightMm};">
+        ${pages.length > 1 ? `<div class="smart-page-header-bar"><span class="smart-page-pill">Halaman ${idx + 1} dari ${pages.length}</span></div>` : ''}
+        <div class="outgoing-sheet-zoom-slot">
+          ${innerSheet}
         </div>
       </div>
     `;
-  }
-
-  const parts = [];
-  for (const b of doc.blocks) {
-    if (b.type === 'letterKop' && (b.image || doc.letterData?.kopImage || school.kopImage)) {
-      const imgSrc = b.image || doc.letterData?.kopImage || school.kopImage;
-      parts.push(`<div style="text-align: center; margin-bottom: 14px;"><img src="${imgSrc}" style="max-width: 100%; height: auto;" alt="Kop"></div>`);
-    } else if (b.type === 'letterTitle') {
-      parts.push(`
-        <div style="text-align: center; margin-bottom: 14px;">
-          <div style="font-weight: bold; text-decoration: underline; font-size: 13.5pt;">${escapeHtml(b.title)}</div>
-          <div style="font-size: 11.5pt;">${escapeHtml(b.nomor)}</div>
-        </div>
-      `);
-      if (b.metaRecipient && !b.metaRecipient.isDeleted) {
-        const metaRows = b.metaRecipient.metaRows || [];
-        const recLines = b.metaRecipient.recipientLines || [];
-        if (metaRows.length > 0) {
-          parts.push(`
-            <table style="margin-bottom: 8px; border-collapse: collapse;">
-              ${metaRows.map(r => `<tr><td style="width: 72px;">${escapeHtml(r.label)}</td><td style="width: 10px;">:</td><td>${escapeHtml(r.value)}</td></tr>`).join('')}
-            </table>
-          `);
-        }
-        if (recLines.length > 0) {
-          parts.push(`<div style="margin-bottom: 12px;">${recLines.map(l => `<div>${escapeHtml(l)}</div>`).join('')}</div>`);
-        }
-      }
-    } else if (b.type === 'paragraph') {
-      const txt = b.runs ? b.runs.map(r => r.text).join('') : (b.text || '');
-      if (txt.trim()) {
-        parts.push(`<p style="text-align: justify; margin: 0 0 10px 0; line-height: 1.4;">${escapeHtml(txt)}</p>`);
-      }
-    } else if (b.type === 'identityTable' && Array.isArray(b.rows)) {
-      parts.push(`
-        <table style="width: calc(100% - 16px); margin: 6px 0 12px 16px; border-collapse: collapse;">
-          ${b.rows.map(r => `<tr><td style="width: 30%; padding: 2px 4px; vertical-align: top;">${escapeHtml(r.label)}</td><td style="padding: 2px 4px; font-weight: bold;">${escapeHtml(r.value)}</td></tr>`).join('')}
-        </table>
-      `);
-    } else if (b.type === 'letterSignature') {
-      parts.push(`
-        <div style="display: flex; justify-content: flex-end; margin-top: 24px; page-break-inside: avoid; break-inside: avoid;">
-          <div style="width: 245px;">
-            <div>${escapeHtml(b.city || 'Garut')}, ${escapeHtml(b.date || '')}</div>
-            <div>${escapeHtml(b.title || 'Kepala Sekolah')},</div>
-            ${sigSlotHtml}
-            <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(b.name || '')}</div>
-            <div>${escapeHtml(formatSignerNipLine(b.nip))}</div>
-          </div>
-        </div>
-      `);
-    }
-  }
+  }).join('');
 
   return `
-    <div style="background: white; padding: ${isForPrint ? '12mm 16mm' : '28px 34px'}; border-radius: 4px; ${isForPrint ? '' : 'box-shadow: 0 2px 8px rgba(0,0,0,0.08);'} font-family: 'Times New Roman', serif; font-size: 11.5pt; color: #0f172a; user-select: text;">
-      ${parts.join('')}
+    <div class="smart-pages-stack ${isForPrint ? 'outgoing-print-stack' : 'outgoing-preview-stack'}" style="--prev-scale: 1;">
+      ${pagesHtml}
     </div>
   `;
 }

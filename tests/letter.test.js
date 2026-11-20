@@ -5,6 +5,7 @@ import { suratKeteranganTemplate } from '../js/letters/templates/suratKeterangan
 import { validateDocument } from '../js/model/schema.js';
 import { renderDocx, getProfile } from '../js/docx/render.js';
 import { readZipPackage } from '../js/utils/zip.js';
+import { buildPrintPageCssRule, normalizeMarginToCm } from '../js/ui/printChoiceModal.js';
 
 test('Surat Dinas: Profil suratDinas (A4) dan suratDinasF4 (Folio) memiliki dimensi baku', () => {
   const a4 = getProfile('suratDinas');
@@ -99,4 +100,24 @@ test('Profil Sekolah Bawaan: SMK IT Al-Hawari memiliki identitas lengkap dan aku
   assert.ok(DEFAULT_SCHOOL_PROFILE.majors.includes('Agribisnis Tanaman Pangan dan Hortikultura (ATPH)'));
   assert.ok(DEFAULT_SCHOOL_PROFILE.majors.includes('Desain Pemodelan dan Informasi Bangunan (DPIB)'));
   assert.equal(DEFAULT_SCHOOL_PROFILE.numberingPattern, '421.3/{urut}/SMKITA/{bulanRomawi}/{tahun}');
+});
+
+test('Aturan @page Cetak/PDF: Menyinkronkan ukuran F4/A4, orientasi, dan margin cm maupun twips secara akurat', () => {
+  const f4Css = buildPrintPageCssRule({
+    paperSize: 'f4',
+    orientation: 'portrait',
+    margins: { top: 2.0, right: 1.8, bottom: 2.5, left: 3.0 }
+  });
+  assert.match(f4Css, /size:\s*215mm 330mm;/);
+  assert.match(f4Css, /margin:\s*2cm 1\.8cm 2\.5cm 3cm;/);
+
+  const landscapeA4 = buildPrintPageCssRule({
+    paperSize: 'a4',
+    orientation: 'landscape',
+    margins: { top: 1134, right: 1134, bottom: 1418, left: 1701 } // twips
+  });
+  assert.match(landscapeA4, /size:\s*297mm 210mm;/);
+  assert.match(landscapeA4, /margin:\s*2cm 2cm 2\.5cm 3cm;/);
+  assert.equal(normalizeMarginToCm(1134), 2);
+  assert.equal(normalizeMarginToCm(0.1), 0.4);
 });

@@ -33,6 +33,13 @@ import {
 } from '../sync/workspaceClient.js';
 import { setLastKnownSyncRev } from '../sync/liveSync.js';
 import { renderDocx } from '../docx/render.js';
+import {
+  computePrintableDimsMm,
+  normalizeQrPlacement,
+  findPreferredSignatureQrPlacement,
+  calibratePlacementFromDom,
+  buildFloatingQrElementHtml
+} from './qrFloatingHelper.js';
 
 export function escPrintHtml(value) {
   return String(value ?? '')
@@ -327,26 +334,56 @@ const PAPER_MM_DIMENSIONS = {
   legal: { w: '215.9mm', h: '355.6mm' }
 };
 
-/**
- * Synchronize @page physical size with active document dimensions (A4/F4/Letter/Legal + orientation),
- * reset desk scroll offset so Page 1 top is never clipped, and trigger window.print().
- */
-export function runSafeWindowPrint({
-  paperSize,
-  orientation,
-  onAfterPrint = null,
-  fallbackTimeoutMs = 1500
-} = {}) {
+export function normalizeMarginToCm(val, fallbackCm = 2.0) {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0) return fallbackCm;
+  const cm = num > 50 ? num / 567 : num;
+  return Number(Math.max(0.4, Math.min(8.0, cm)).toFixed(2));
+}
+
+export function buildPrintPageCssRule({ paperSize, orientation, margins } = {}) {
   const opts = typeof store?.getLetterOptions === 'function' ? store.getLetterOptions() : {};
   const sizeKey = String(paperSize || opts?.paperSize || 'a4').toLowerCase();
   const orient = String(orientation || opts?.orientation || 'portrait').toLowerCase() === 'landscape' ? 'landscape' : 'portrait';
   const dim = PAPER_MM_DIMENSIONS[sizeKey] || PAPER_MM_DIMENSIONS.a4;
   const pageSizeCss = orient === 'landscape' ? `${dim.h} ${dim.w}` : `${dim.w} ${dim.h}`;
+  const rawMargins = margins || opts?.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
+  const mTop = normalizeMarginToCm(rawMargins.top, 2.0);
+  const mRight = normalizeMarginToCm(rawMargins.right, 2.0);
+  const mBottom = normalizeMarginToCm(rawMargins.bottom, 2.0);
+  const mLeft = normalizeMarginToCm(rawMargins.left, 2.5);
+  return `@page { size: ${pageSizeCss}; margin: ${mTop}cm ${mRight}cm ${mBottom}cm ${mLeft}cm; }`;
+}
+
+export function syncGlobalPrintPageStyle(options = {}) {
+  if (typeof document === 'undefined' || !document.head) return;
+  let styleEl = document.getElementById('live-print-page-style');
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = 'live-print-page-style';
+    document.head.appendChild(styleEl);
+  }
+  styleEl.textContent = buildPrintPageCssRule(options);
+}
+
+/**
+ * Synchronize @page physical size and margins with active document dimensions (A4/F4/Letter/Legal + orientation),
+ * reset desk scroll offset so Page 1 top is never clipped, and trigger window.print().
+ */
+export function runSafeWindowPrint({
+  paperSize,
+  orientation,
+  margins,
+  onAfterPrint = null,
+  fallbackTimeoutMs = 1500
+} = {}) {
+  const cssRule = buildPrintPageCssRule({ paperSize, orientation, margins });
+  syncGlobalPrintPageStyle({ paperSize, orientation, margins });
 
   document.getElementById('dynamic-print-page-style')?.remove();
   const pageStyleEl = document.createElement('style');
   pageStyleEl.id = 'dynamic-print-page-style';
-  pageStyleEl.textContent = `@page { size: ${pageSizeCss}; margin: 0mm; }`;
+  pageStyleEl.textContent = cssRule;
   document.head.appendChild(pageStyleEl);
 
   const desks = Array.from(document.querySelectorAll('.word-desk'));
@@ -408,14 +445,15 @@ export function buildPrintQrBoxHtml({
 }
 
 /**
- * Temporarily inject QR code into the live canvas signature holder right before window.print(),
- * and restore the clean manual blank state immediately after printing completes.
+ * Temporarily inject floating QR code onto the live canvas paper sheet(s) right before window.print(),
+ * without reflowing text/tables or causing blank overflow pages, and restore exact canvas state after printing.
  */
 export function printWithTemporaryQrOverlay({
   mode = 'manual', // 'qr' | 'manual'
+  pageSheetEls = null,
+  qrPlacement = null,
+  docModel = null,
   standardHolderEl = null,
-  smartSigCellEl = null,
-  smartFallbackEditableEl = null,
   qrDataUrl = '',
   signerRole = 'kepala_sekolah',
   principalName = '',
@@ -423,11 +461,70 @@ export function printWithTemporaryQrOverlay({
   school = null,
   paperSize,
   orientation,
+  margins,
   onAfterPrint = null
 } = {}) {
-  let restoreFn = () => {};
+  const restoreCallbacks = [];
+  const sheets = Array.isArray(pageSheetEls) ? pageSheetEls.filter(Boolean) : [];
+  const opts = typeof store?.getLetterOptions === 'function' ? store.getLetterOptions() : {};
+  const dims = computePrintableDimsMm({
+    paperSize: paperSize || opts?.paperSize || 'a4',
+    orientation: orientation || opts?.orientation || 'portrait',
+    margins: margins || opts?.margins
+  });
 
-  if (mode === 'qr' && qrDataUrl) {
+  if (sheets.length > 0) {
+    const stages = sheets.map((sheet, idx) => {
+      const prevPrintable = sheet.style.getPropertyValue('--printable-h-mm');
+      sheet.style.setProperty('--printable-h-mm', `${dims.printableHeightMm}mm`);
+      let stage = sheet.querySelector(':scope > .floating-qr-stage');
+      let createdTemp = false;
+      if (!stage) {
+        stage = document.createElement('div');
+        stage.className = 'floating-qr-stage';
+        stage.dataset.qrPage = String(idx);
+        sheet.appendChild(stage);
+        createdTemp = true;
+      }
+      const prevHtml = stage.innerHTML;
+      restoreCallbacks.push(() => {
+        if (prevPrintable) sheet.style.setProperty('--printable-h-mm', prevPrintable);
+        else sheet.style.removeProperty('--printable-h-mm');
+        if (createdTemp) stage.remove();
+        else stage.innerHTML = prevHtml;
+      });
+      return stage;
+    });
+
+    if (mode === 'qr' && qrDataUrl) {
+      let effectivePlacement = qrPlacement
+        ? normalizeQrPlacement(qrPlacement, stages.length)
+        : findPreferredSignatureQrPlacement(docModel, stages.length);
+      if (!qrPlacement?.customPositioned) {
+        effectivePlacement = calibratePlacementFromDom(stages, effectivePlacement, effectivePlacement.sizePx);
+      }
+
+      const floatingHtml = buildFloatingQrElementHtml({
+        qrDataUrl,
+        placement: effectivePlacement,
+        signerRole,
+        principalName,
+        signerName,
+        school: school || {},
+        interactive: false,
+        pageCount: stages.length
+      });
+
+      stages.forEach((stage, idx) => {
+        stage.innerHTML = idx === effectivePlacement.pageIndex ? floatingHtml : '';
+      });
+    } else {
+      // Mode manual TTD pulpen: pastikan barcode tersembunyi bersih saat dicetak
+      stages.forEach((stage) => {
+        stage.innerHTML = '';
+      });
+    }
+  } else if (mode === 'qr' && qrDataUrl && standardHolderEl) {
     const qrHtml = buildPrintQrBoxHtml({
       qrDataUrl,
       signerRole,
@@ -435,46 +532,22 @@ export function printWithTemporaryQrOverlay({
       signerName,
       school
     });
-    if (standardHolderEl) {
-      const prevHtml = standardHolderEl.innerHTML;
-      const hadActive = standardHolderEl.classList.contains('has-qr-print');
-      standardHolderEl.innerHTML = qrHtml;
-      standardHolderEl.classList.add('has-qr-print');
-      restoreFn = () => {
-        standardHolderEl.innerHTML = prevHtml;
-        if (!hadActive) standardHolderEl.classList.remove('has-qr-print');
-      };
-    } else if (smartSigCellEl) {
-      const prevHtml = smartSigCellEl.innerHTML;
-      // Ganti baris kosong beruntun (<br><br><br>) di atas nama penanda tangan dengan QR
-      const replaced = prevHtml.replace(/(<br\s*\/?>\s*){2,}/i, qrHtml);
-      if (replaced !== prevHtml) {
-        smartSigCellEl.innerHTML = replaced;
-      } else {
-        const strongNode = smartSigCellEl.querySelector('strong, u, b');
-        if (strongNode) {
-          strongNode.insertAdjacentHTML('beforebegin', qrHtml);
-        } else {
-          smartSigCellEl.insertAdjacentHTML('beforeend', qrHtml);
-        }
-      }
-      restoreFn = () => {
-        smartSigCellEl.innerHTML = prevHtml;
-      };
-    } else if (smartFallbackEditableEl) {
-      const tempNode = document.createElement('div');
-      tempNode.style.cssText = 'display:flex; justify-content:flex-end; margin-top:20px; page-break-inside:avoid; break-inside:avoid;';
-      tempNode.innerHTML = `<div style="width:230px;">${qrHtml}</div>`;
-      smartFallbackEditableEl.appendChild(tempNode);
-      restoreFn = () => tempNode.remove();
-    }
+    const prevHtml = standardHolderEl.innerHTML;
+    const hadActive = standardHolderEl.classList.contains('has-qr-print');
+    standardHolderEl.innerHTML = qrHtml;
+    standardHolderEl.classList.add('has-qr-print');
+    restoreCallbacks.push(() => {
+      standardHolderEl.innerHTML = prevHtml;
+      if (!hadActive) standardHolderEl.classList.remove('has-qr-print');
+    });
   }
 
   runSafeWindowPrint({
     paperSize,
     orientation,
+    margins,
     onAfterPrint: () => {
-      restoreFn();
+      for (const fn of restoreCallbacks) fn();
       if (typeof onAfterPrint === 'function') onAfterPrint();
     }
   });

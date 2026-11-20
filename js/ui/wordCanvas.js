@@ -8,19 +8,32 @@
  * 5. Integrasi Gudang API di AI Copilot dengan pemilih model real-time.
  */
 
-import { store, createEmptyDocumentModel } from '../state.js';
+import { store, createEmptyDocumentModel, computeDefaultDesktopZoom } from '../state.js';
 import { renderDocx } from '../docx/render.js';
 import { parseDocxForEditing, applyCanvasEditsToDocx, convertDocxToDocumentModel } from '../docx/patch.js';
-import { polishMessyDocumentWithAi, editDocumentWithAi } from '../ai/client.js';
+import { polishMessyDocumentWithAi, editDocumentWithAi, convertAiBlocksToDocumentBlocks } from '../ai/client.js';
+import { shouldAllowLayoutRestructure, buildSurgicalIndexFromDocModel, applySurgicalPatchesToDocModel } from '../ai/surgicalEdit.js';
+import { summarizeKnowledgeBaseStats, describeAiMatchFeedback } from '../ai/knowledgeBase.js';
+import { renderCanvasVaultBadge, openLockedMasterSaveChoiceModal } from './vaultSaveHelper.js';
 import { LETTER_TYPE_CODES, formatSmartNomorSurat } from '../letters/numbering.js';
 import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
+import { buildSuratTugasSppdDocModel } from '../letters/templates/suratTugasSppd.js';
+import { attachInteractiveTables } from './tableInteraction.js';
+import {
+  computePrintableDimsMm,
+  mountInteractiveFloatingQr,
+  updateCanvasQrToggleButton,
+  normalizeQrPlacement,
+  findPreferredSignatureQrPlacement
+} from './qrFloatingHelper.js';
 import { canSignWithRole, resolveDefaultAllowedSignerRole } from '../auth/permissions.js';
 import {
   openPrintSignatureChoiceModal,
   buildSignerRoleSelectorHtml,
   authorizeAndRecordOutgoing,
   requestAccForOutgoing,
-  printWithTemporaryQrOverlay
+  printWithTemporaryQrOverlay,
+  syncGlobalPrintPageStyle
 } from './printChoiceModal.js';
 import { downloadFile } from '../utils/download.js';
 import { showToast } from './notification.js';
@@ -35,14 +48,18 @@ import {
   ICON_TABLE, ICON_UNDO, ICON_REDO, ICON_PILCROW, ICON_GLOBE, ICON_MAXIMIZE,
   ICON_PORTRAIT, ICON_MAIL, ICON_FOLDER, ICON_BUILDING, ICON_ID_CARD,
   ICON_BRIEFCASE, ICON_USERS, ICON_CALENDAR, ICON_TARGET, ICON_PLUS,
-  ICON_BOT_SPARK, ICON_OPEN_BOOK, ICON_PENCIL_NOTE, ICON_REFRESH
+  ICON_BOT_SPARK, ICON_OPEN_BOOK, ICON_PENCIL_NOTE, ICON_REFRESH, ICON_COPY_DOC,
+  ICON_CLIPBOARD_CHECK
 } from './icons.js';
 
 let syncTimer = null;
+let wordPaginateTimer = null;
+let isWordPaginating = false;
 let isCopilotOpenState = null;
 
 export function renderWordCanvas(container) {
   if (!container) return;
+  syncGlobalPrintPageStyle(store.getState().letterOptions);
 
   // Pastikan scroll jendela utama selalu di titik (0,0) agar bagian kiri header & ribbon tidak pernah tergeser keluar layar
   if ('scrollRestoration' in history) {
@@ -64,11 +81,11 @@ export function renderWordCanvas(container) {
   const fontSize = state.letterOptions?.fontSize || '12';
   const lineSpacing = state.letterOptions?.lineSpacing || '1.15';
   const showKop = state.letterOptions?.showKop !== false;
-  const zoomLevel = state.zoomLevel || 100;
+  const zoomLevel = state.zoomUserAdjusted ? (state.zoomLevel || 100) : computeDefaultDesktopZoom();
   const apiVault = store.getApiVault();
   const activeApi = store.getActiveApi();
   const vaultLetters = store.getLetterVault();
-  const aiRefs = store.getAiReferences();
+  const kbStats = summarizeKnowledgeBaseStats(vaultLetters);
   const activeDocx = state.activeUploadedDocx;
 
   const isDocxPreviewMode = (state.docxViewMode === 'native_preview');
@@ -360,9 +377,21 @@ export function renderWordCanvas(container) {
               <span>Kop</span>
               <span class="badge-count badge-floating">${store.getKopGallery().length}</span>
             </button>
-            <button id="btn-ribbon-insert-table" class="ribbon-tile" type="button" data-canvas-insert="table" title="Sisipkan Tabel Rincian ke Surat">
+            <button id="btn-ribbon-insert-table" class="ribbon-tile" type="button" data-canvas-insert="table" title="Sisipkan Tabel Rincian Tanpa Garis (Nama : ...)">
               ${ICON_TABLE}
-              <span>Tabel</span>
+              <span>Rincian</span>
+            </button>
+            <button id="btn-ribbon-insert-grid-table" class="ribbon-tile" type="button" data-canvas-insert="grid-table" title="Sisipkan Tabel Grid Berbingkai (No | Nama | Jabatan)">
+              ${ICON_TABLE}
+              <span>Tabel Grid</span>
+            </button>
+            <button id="btn-ribbon-add-pagebreak" class="ribbon-tile" type="button" data-canvas-insert="pagebreak" title="Sisipkan Pindah Halaman Baru (Page Break)">
+              ${ICON_PLUS}
+              <span>Hal Baru</span>
+            </button>
+            <button id="btn-open-st-sppd-pro" class="ribbon-tile smart-ribbon-highlight" type="button" title="Buka Paket Resmi 3 Halaman Surat Tugas &amp; SPPD (1:1 MS Word) di Word Pro">
+              ${ICON_TARGET}
+              <span>ST + SPPD</span>
             </button>
             <input type="file" id="input-quick-kop-file" accept="image/png,image/jpeg,image/svg+xml" class="hidden">
             <button id="btn-quick-upload-kop" class="ribbon-tile" type="button" title="Unggah Berkas Gambar Kop Baru (PNG/JPG/SVG)">
@@ -380,13 +409,21 @@ export function renderWordCanvas(container) {
         <div class="ribbon-group" title="Simpan, Riwayat Edit, Impor Berkas &amp; AI Copilot">
           <span class="ribbon-label">Dokumen</span>
           <div class="ribbon-tiles-row">
-            <button id="btn-save-to-vault" class="ribbon-tile" type="button" title="Simpan ke Gudang Surat (Dapat Diedit &amp; Jadi Referensi AI)">
+            <button id="btn-save-to-vault" class="ribbon-tile" type="button" title="Simpan perubahan ke dokumen aktif di Gudang Surat (Ctrl+S)">
               ${ICON_SAVE}
               <span>Simpan</span>
+            </button>
+            <button id="btn-save-as-vault" class="ribbon-tile" type="button" title="Save As / Duplikat sebagai dokumen baru di Gudang Surat (Ctrl+Shift+S / F12)">
+              ${ICON_COPY_DOC}
+              <span>Save As</span>
             </button>
             <button id="btn-refresh-canvas" class="ribbon-tile" type="button" title="Refresh / Kosongkan Kertas Kerja ke Lembaran Baru">
               ${ICON_REFRESH}
               <span>Refresh</span>
+            </button>
+            <button id="btn-toggle-word-qr-canvas" class="ribbon-tile hidden" type="button" title="Tampilkan / Sembunyikan Barcode QR di Kanvas (tetap tercetak saat Print &amp; Surat Keluar)">
+              ${ICON_CLIPBOARD_CHECK}
+              <span data-qr-btn-label="1">Tampil QR</span>
             </button>
             <button id="cmd-undo" class="ribbon-tile" type="button" title="Urungkan Perubahan (Ctrl+Z)">
               ${ICON_UNDO}
@@ -509,16 +546,21 @@ export function renderWordCanvas(container) {
               <div id="docx-preview-mount" style="min-height: 297mm;"></div>
             </div>
           ` : `
-            <!-- LEMBAR KERTAS SKALA NYATA WORD -->
-            <div class="word-paper-sheet paper-${paperSize} ${orientation === 'landscape' ? 'landscape' : ''}" id="word-sheet"
-              style="
-                --margin-top: ${customMargins.top}cm;
-                --margin-bottom: ${customMargins.bottom}cm;
-                --margin-left: ${customMargins.left}cm;
-                --margin-right: ${customMargins.right}cm;
-                font-family: ${fontFamily};
-                font-size: ${fontSize}pt;
-              ">
+            <!-- LEMBAR KERTAS MULTI-HALAMAN SKALA NYATA WORD -->
+            <div class="word-page-wrapper" data-word-page="0">
+              <div class="word-page-header-bar no-print hidden">
+                <span class="word-page-pill">Halaman 1 dari 1</span>
+              </div>
+              <div class="word-paper-sheet paper-${paperSize} ${orientation === 'landscape' ? 'landscape' : ''}" id="word-sheet" data-word-page="0"
+                style="
+                  --margin-top: ${customMargins.top}cm;
+                  --margin-bottom: ${customMargins.bottom}cm;
+                  --margin-left: ${customMargins.left}cm;
+                  --margin-right: ${customMargins.right}cm;
+                  --printable-h-mm: ${computePrintableDimsMm({ paperSize, orientation, margins: customMargins }).printableHeightMm}mm;
+                  font-family: ${fontFamily};
+                  font-size: ${fontSize}pt;
+                ">
               
               <!-- BANNER KOP SURAT BERBASIS GAMBAR RESMI AL-HAWARI -->
               <div class="sheet-kop-container ${showKop ? '' : 'hidden'}" id="sheet-kop-container">
@@ -557,8 +599,10 @@ export function renderWordCanvas(container) {
                     ${renderDynamicImportedBlocksHtml(docxBodyList, docxIdentityRows, docxClosing)}
                   </div>
                   <div class="canvas-add-block-bar no-print">
-                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="para">+ Tambah Area Teks (Paragraf)</button>
-                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="table">+ Sisipkan Tabel Rincian</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="para">+ Tambah Area Teks</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="table">+ Tabel Rincian</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="grid-table">+ Tabel Grid (Kolom)</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="pagebreak">+ Pindah Halaman</button>
                   </div>
 
                   <!-- BLOK TANDA TANGAN DI KANAN BAWAH -->
@@ -604,8 +648,10 @@ export function renderWordCanvas(container) {
                     ${renderDynamicStandardBlocksHtml(doc)}
                   </div>
                   <div class="canvas-add-block-bar no-print">
-                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="para">+ Tambah Area Teks (Paragraf)</button>
-                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="table">+ Sisipkan Tabel Rincian</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="para">+ Tambah Area Teks</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="table">+ Tabel Rincian</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="grid-table">+ Tabel Grid (Kolom)</button>
+                    <button type="button" class="btn-add-canvas-block" data-canvas-insert="pagebreak">+ Pindah Halaman</button>
                     <button type="button" class="btn-add-canvas-block ${hasTitleBlock ? 'hidden' : ''}" data-canvas-insert="title">+ Judul &amp; Nomor</button>
                     <button type="button" class="btn-add-canvas-block ${!isBlankSheet && !isMetaDeleted ? 'hidden' : ''}" data-canvas-insert="meta">+ Sifat &amp; Kepada Yth</button>
                     <button type="button" class="btn-add-canvas-block ${hasSigBlock ? 'hidden' : ''}" data-canvas-insert="sig">+ Blok TTD</button>
@@ -624,6 +670,8 @@ export function renderWordCanvas(container) {
                 `}
 
               </div>
+              <div class="floating-qr-stage" data-qr-page="0"></div>
+            </div>
             </div>
           `}
           </div>
@@ -632,11 +680,13 @@ export function renderWordCanvas(container) {
           <!-- 3. STATUS BAR MICROSOFT WORD (DI BAWAH DESK KIRI) -->
           <footer class="word-status-bar">
             <div class="status-left">
-              <span class="status-item">${ICON_DOC} <span>Halaman 1 dari 1</span></span>
+              <span id="word-status-pages" class="status-item">${ICON_DOC} <span>Halaman 1 dari 1</span></span>
               <span class="status-sep">|</span>
               <span id="status-word-count" class="status-item status-word-count">128 kata</span>
               <span class="status-sep">|</span>
               <span class="status-item">${ICON_GLOBE} <span>Bahasa Indonesia (PUEBI)</span></span>
+              <span class="status-sep">|</span>
+              <span id="word-status-vault-badge" class="status-item status-vault-pill">📄 Draf Baru</span>
             </div>
 
             <div class="status-right">
@@ -830,7 +880,7 @@ export function renderWordCanvas(container) {
           <div class="copilot-kb-card">
             <div style="display: flex; align-items: flex-start; gap: 7px; min-width: 0;">
               <span style="color: #15803d; display: inline-flex; margin-top: 1px;">${ICON_OPEN_BOOK}</span>
-              <span><strong>Basis Pengetahuan:</strong> ${aiRefs.length} arsip surat aktif sebagai acuan gaya</span>
+              <span><strong>Basis Pengetahuan:</strong> ${kbStats.totalActive} arsip aktif dipelajari AI (${kbStats.masterCount} ⭐ Master Terkunci)</span>
             </div>
             <a href="javascript:void(0)" id="link-open-vault-from-copilot-kb" class="copilot-kb-btn">
               Kelola<br>Gudang
@@ -855,8 +905,8 @@ export function renderWordCanvas(container) {
             <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keterangan Siswa Aktif untuk keperluan beasiswa kuliah (Kode KET)">
               <span class="copilot-chip-icon" style="color: #0f766e;">${ICON_ID_CARD}</span><span>Ket. Siswa Aktif (KET)</span>
             </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Tugas untuk guru mengikuti bimbingan teknis kurikulum merdeka di dinas pendidikan (Kode ST)">
-              <span class="copilot-chip-icon" style="color: #b45309;">${ICON_BRIEFCASE}</span><span>Surat Tugas (ST)</span>
+            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Tugas Guru SMK IT Al-Hawari beserta lampiran SPPD 8 poin dan halaman Keterangan perjalanan dinas (Kode ST)">
+              <span class="copilot-chip-icon" style="color: #b45309;">${ICON_BRIEFCASE}</span><span>Surat Tugas + SPPD</span>
             </button>
             <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Panggilan Orang Tua/Wali Siswa terkait pembinaan kedisiplinan siswa (Kode PGL)">
               <span class="copilot-chip-icon" style="color: #334155;">${ICON_USERS}</span><span>Panggilan Ortu (PGL)</span>
@@ -997,6 +1047,7 @@ export function renderWordCanvas(container) {
         </div>
       </div>
 
+      <div id="word-save-modal-root"></div>
     </div>
   `;
 
@@ -1024,8 +1075,43 @@ export function renderWordCanvas(container) {
   // 8. Bind Refresh & Konfirmasi Simpan Modal
   bindRefreshCanvasModal(container);
 
-  // Update status kata
+  // Update status kata & paginasi multi-halaman awal
   updateWordCount(container);
+  const kopImgForPaginate = container.querySelector('#sheet-kop-image');
+  if (kopImgForPaginate && !kopImgForPaginate.complete) {
+    kopImgForPaginate.addEventListener('load', () => scheduleWordPagination(container), { once: true });
+  }
+  requestAnimationFrame(() => {
+    reflowWordCanvasPagination(container);
+    refreshWordFloatingQrOverlay(container);
+  });
+
+  // Toggle Tampil / Sembunyi Barcode QR di Kanvas Lembar Kerja Word
+  container.querySelector('#btn-toggle-word-qr-canvas')?.addEventListener('click', () => {
+    const curDoc = store.getState().document || {};
+    const stages = [...container.querySelectorAll('.word-paper-sheet .floating-qr-stage')];
+    const current = curDoc.qrPlacement
+      ? normalizeQrPlacement(curDoc.qrPlacement, Math.max(1, stages.length))
+      : findPreferredSignatureQrPlacement(curDoc, Math.max(1, stages.length));
+    const next = { ...current, visibleOnCanvas: !(current.visibleOnCanvas !== false) };
+    store.setActiveQrPlacement(next, 'standard');
+    refreshWordFloatingQrOverlay(container);
+    showToast(
+      next.visibleOnCanvas
+        ? '▣ Barcode QR ditampilkan di kanvas — bebas digeser, diubah ukuran, atau diletakkan di Depan/Belakang Teks.'
+        : '👁️ Barcode QR disembunyikan di kanvas (tetap muncul saat Cetak & Surat Keluar).',
+      'info'
+    );
+  });
+
+  const onWordVerifSync = () => {
+    if (!document.body.contains(container)) {
+      window.removeEventListener('docbuilder:verification-updated', onWordVerifSync);
+      return;
+    }
+    refreshWordFloatingQrOverlay(container);
+  };
+  window.addEventListener('docbuilder:verification-updated', onWordVerifSync);
 
   // Pastikan posisi ribbon dan window selalu terikat di paling kiri (Halaman & Margin selalu tampak penuh)
   const ribbonEl = container.querySelector('.word-ribbon');
@@ -1096,9 +1182,10 @@ function bindRibbonControls(container) {
   if (btnPilcrow) {
     btnPilcrow.addEventListener('mousedown', preventSelectionLoss);
     btnPilcrow.addEventListener('click', () => {
-      const sheet = container.querySelector('#word-sheet');
-      if (sheet) {
-        const shown = sheet.classList.toggle('show-pilcrow-marks');
+      const sheets = [...container.querySelectorAll('.word-paper-sheet')];
+      if (sheets.length > 0) {
+        const shown = !sheets[0].classList.contains('show-pilcrow-marks');
+        sheets.forEach(s => s.classList.toggle('show-pilcrow-marks', shown));
         btnPilcrow.classList.toggle('active', shown);
       }
     });
@@ -1213,13 +1300,14 @@ function bindRibbonControls(container) {
   if (spacingSelect) {
     spacingSelect.addEventListener('change', () => {
       const val = spacingSelect.value;
-      const bodyContent = container.querySelector('#sheet-body-content');
-      if (bodyContent) {
-        bodyContent.style.lineHeight = val === '1.0' ? '1.15' : (val === '1.5' ? '1.6' : (val === '2.0' ? '2.0' : '1.35'));
-      }
+      const cssLine = val === '1.0' ? '1.15' : (val === '1.5' ? '1.6' : (val === '2.0' ? '2.0' : '1.35'));
+      container.querySelectorAll('.sheet-content-editable').forEach(bodyEl => {
+        bodyEl.style.lineHeight = cssLine;
+      });
       store.updateLetterOptions({ lineSpacing: val });
       showToast(`Jarak spasi baris diatur ke ${val}`, 'info');
       scheduleSync(container);
+      scheduleWordPagination(container);
     });
   }
 
@@ -1229,6 +1317,7 @@ function bindRibbonControls(container) {
     paperSelect.addEventListener('change', () => {
       const size = paperSelect.value;
       store.updateLetterOptions({ paperSize: size });
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       showToast(`Ukuran kertas diubah ke ${size.toUpperCase()}`, 'info');
       renderWordCanvas(container);
     });
@@ -1239,6 +1328,7 @@ function bindRibbonControls(container) {
     orientationSelect.addEventListener('change', () => {
       const orientation = orientationSelect.value;
       store.updateLetterOptions({ orientation });
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       showToast(`Orientasi kertas diubah ke ${orientation === 'portrait' ? 'Potret' : 'Lanskap'}`, 'info');
       renderWordCanvas(container);
     });
@@ -1295,6 +1385,32 @@ function bindRibbonControls(container) {
       store.updateLetterOptions({ showKop: !isHidden });
       showToast(isHidden ? 'Kop surat disembunyikan.' : 'Kop surat ditampilkan.', 'info');
       scheduleSync(container);
+      scheduleWordPagination(container);
+    });
+  }
+
+  // Shortcut Paket Surat Tugas + SPPD (3 Halaman Resmi Word Pro)
+  const btnOpenStSppdPro = container.querySelector('#btn-open-st-sppd-pro');
+  if (btnOpenStSppdPro) {
+    btnOpenStSppdPro.addEventListener('click', () => {
+      const stNow = store.getState();
+      const optsNow = store.getLetterOptions();
+      const stSppdDoc = buildSuratTugasSppdDocModel({
+        nomorSurat: store.getNextFormattedOutgoingNomor({ title: 'SURAT TUGAS', forcedTypeCode: 'ST' }).nomorSurat
+      }, stNow.schoolProfile, {
+        ...optsNow,
+        paperSize: 'f4'
+      });
+      store.setState({
+        smartDocument: {
+          pages: [],
+          pendingDocModel: stSppdDoc,
+          meta: stSppdDoc.meta || { title: 'SURAT TUGAS & SPPD' }
+        }
+      }, false);
+      store.setActiveVaultId(null, 'smart');
+      showToast('Membuka Template Resmi Surat Tugas & SPPD (3 Halaman 1:1 MS Word) di Word Pro...', 'success');
+      document.querySelector('.nav-tab[data-tab="smart-canvas"]')?.click();
     });
   }
 
@@ -1342,19 +1458,34 @@ function bindRibbonControls(container) {
     reader.readAsDataURL(file);
   });
 
-  // Gudang & Arsip Surat: Simpan Surat ke Gudang
+  // Gudang & Arsip Surat: Simpan (Save: Ctrl+S) & Save As (Duplikat: Ctrl+Shift+S / F12)
+  updateWordVaultBadge(container);
   const btnSaveToVault = container.querySelector('#btn-save-to-vault');
   if (btnSaveToVault) {
-    btnSaveToVault.addEventListener('click', () => {
-      const result = saveCurrentCanvasToVault(container);
-      if (result.isImported) {
-        showToast('Dokumen tersimpan di Gudang Surat & aktif sebagai referensi AI!', 'success');
-      } else {
-        showToast(`Surat "${result.title}" berhasil disimpan ke Gudang Surat & otomatis jadi referensi AI!`, 'success');
-      }
-      renderWordCanvas(container);
-    });
+    btnSaveToVault.addEventListener('click', () => performWordSave(container, { clearAfterSave: false }));
   }
+  const btnSaveAsVault = container.querySelector('#btn-save-as-vault');
+  if (btnSaveAsVault) {
+    btnSaveAsVault.addEventListener('click', () => openWordSaveVaultModal(container, { mode: 'save-as', clearAfterSave: false }));
+  }
+
+  const wordWorkspaceRoot = container.querySelector('.word-workspace');
+  const onWordGlobalKeyDown = (e) => {
+    if (!wordWorkspaceRoot || !wordWorkspaceRoot.isConnected) {
+      document.removeEventListener('keydown', onWordGlobalKeyDown);
+      return;
+    }
+    const isSaveAs = ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') || e.key === 'F12';
+    const isSave = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 's';
+    if (isSaveAs) {
+      e.preventDefault();
+      openWordSaveVaultModal(container, { mode: 'save-as', clearAfterSave: false });
+    } else if (isSave) {
+      e.preventDefault();
+      performWordSave(container, { clearAfterSave: false });
+    }
+  };
+  document.addEventListener('keydown', onWordGlobalKeyDown);
 
   // Gudang & Arsip Surat: Buka Tab Gudang
   const btnOpenVaultTab = container.querySelector('#btn-open-vault-tab');
@@ -1401,6 +1532,7 @@ function bindRibbonControls(container) {
           document: convertedDoc,
           docxViewMode: 'canvas'
         }, true);
+        store.setActiveVaultId(null, 'standard');
 
         showToast(`Berkas "${file.name}" berhasil diimpor & teks dirapikan ke format resmi!`, 'success');
         renderWordCanvas(container);
@@ -1630,24 +1762,24 @@ function bindZoomControls(container) {
   const btnZoomOut = container.querySelector('#btn-zoom-out');
   const btnZoomFit = container.querySelector('#btn-zoom-fit');
 
-  const updateZoom = (val) => {
+  const updateZoom = (val, { fromUser = true } = {}) => {
     const clamped = Math.max(50, Math.min(180, Math.round(val)));
     sheetWrapper.style.transform = `scale(${clamped / 100})`;
     zoomSlider.value = clamped;
     zoomLabel.textContent = `${clamped}%`;
-    store.setZoomLevel(clamped);
+    store.setZoomLevel(clamped, { fromUser });
   };
 
   zoomSlider.addEventListener('input', () => {
-    updateZoom(parseFloat(zoomSlider.value));
+    updateZoom(parseFloat(zoomSlider.value), { fromUser: true });
   });
 
   btnZoomIn.addEventListener('click', () => {
-    updateZoom(parseFloat(zoomSlider.value) + 10);
+    updateZoom(parseFloat(zoomSlider.value) + 10, { fromUser: true });
   });
 
   btnZoomOut.addEventListener('click', () => {
-    updateZoom(parseFloat(zoomSlider.value) - 10);
+    updateZoom(parseFloat(zoomSlider.value) - 10, { fromUser: true });
   });
 
   btnZoomFit.addEventListener('click', () => {
@@ -1656,9 +1788,26 @@ function bindZoomControls(container) {
     const availableWidth = desk.clientWidth - 60;
     const sheetWidth = 210 * 3.78; // A4 approx px (794px)
     const fitZoom = Math.round((availableWidth / sheetWidth) * 100);
-    updateZoom(Math.max(60, Math.min(130, fitZoom)));
+    updateZoom(Math.max(60, Math.min(130, fitZoom)), { fromUser: true });
     showToast(`Zoom disesuaikan dengan lebar layar (${fitZoom}%)`, 'info');
   });
+
+  let resizeRaf = null;
+  const onViewportResize = () => {
+    if (!sheetWrapper.isConnected) {
+      window.removeEventListener('resize', onViewportResize);
+      return;
+    }
+    if (store.getState().zoomUserAdjusted) return;
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(() => {
+      const nextIdeal = computeDefaultDesktopZoom();
+      if (Math.round(parseFloat(zoomSlider.value)) !== nextIdeal) {
+        updateZoom(nextIdeal, { fromUser: false });
+      }
+    });
+  };
+  window.addEventListener('resize', onViewportResize);
 }
 
 /**
@@ -1931,16 +2080,58 @@ function bindCopilotDrawer(container) {
     }
 
     try {
-      const currentSnapshot = extractCanvasSnapshot(container);
-      const editedData = await editDocumentWithAi(currentSnapshot, cleanInstruction, {
-        schoolProfile: store.getSchoolProfile(),
-        preferredApiId: selectedApiId,
-        signal: copilotAbortController.signal
-      });
+      const state = store.getState();
+      const hasDomCanvas = Boolean(container.querySelector('#editable-doc-title') || container.querySelector('#sheet-dynamic-blocks'));
+      const currentDocModel = hasDomCanvas
+        ? buildModelFromCanvas(container)
+        : JSON.parse(JSON.stringify(state.document || buildModelFromCanvas(container)));
+      const allowLayoutRestructure = shouldAllowLayoutRestructure(cleanInstruction);
+      const hasExistingContent = !currentDocModel.isBlankDraft && (currentDocModel.blocks || []).some(
+        (b) => b && (b.type === 'table' || b.type === 'identityTable' || (b.type === 'paragraph' && String(b.text || b.runs?.map(r => r.text).join('') || '').trim()))
+      );
 
-      applyEditedResultToCanvas(container, editedData, currentSnapshot);
-      const changeNote = editedData.summaryOfChanges || 'Instruksi penambahan/perbaikan berhasil diterapkan!';
-      showToast(`✓ ${changeNote}`, 'success');
+      if (hasExistingContent) {
+        const indexObj = buildSurgicalIndexFromDocModel(currentDocModel);
+        const editedData = await editDocumentWithAi(indexObj.snapshot, cleanInstruction, {
+          schoolProfile: store.getSchoolProfile(),
+          preferredApiId: selectedApiId,
+          allowLayoutRestructure,
+          signal: copilotAbortController.signal
+        });
+
+        const patchResult = applySurgicalPatchesToDocModel(currentDocModel, editedData, { allowLayoutRestructure });
+        if (patchResult.mode === 'restructure_needed') {
+          const fallbackSnap = extractCanvasSnapshot(container);
+          applyEditedResultToCanvas(container, editedData, fallbackSnap);
+        } else {
+          const patchedDoc = {
+            ...patchResult.docModel,
+            ...(state.document?.verification ? { verification: state.document.verification } : {}),
+            ...(state.document?.qrPlacement ? { qrPlacement: state.document.qrPlacement } : {})
+          };
+          store.clearActiveUploadedDocx();
+          store.setState({ document: patchedDoc, docxViewMode: 'canvas' }, true);
+          renderWordCanvas(container);
+        }
+
+        const baseNote = editedData.summaryOfChanges || 'Instruksi penambahan/perbaikan berhasil diterapkan!';
+        const changeNote = patchResult.appliedCount > 0 && patchResult.mode !== 'restructure_needed'
+          ? `${baseNote} (${patchResult.appliedCount} bagian diperbarui, tata letak & tabel tetap terjaga)`
+          : baseNote;
+        showToast(`✓ ${changeNote}`, 'success');
+      } else {
+        const currentSnapshot = extractCanvasSnapshot(container);
+        const editedData = await editDocumentWithAi(currentSnapshot, cleanInstruction, {
+          schoolProfile: store.getSchoolProfile(),
+          preferredApiId: selectedApiId,
+          allowLayoutRestructure,
+          signal: copilotAbortController.signal
+        });
+
+        applyEditedResultToCanvas(container, editedData, currentSnapshot);
+        const changeNote = editedData.summaryOfChanges || 'Instruksi penambahan/perbaikan berhasil diterapkan!';
+        showToast(`✓ ${changeNote}`, 'success');
+      }
       if (fromQuickBar && quickEditInput) {
         quickEditInput.value = '';
       }
@@ -2044,12 +2235,15 @@ function bindCopilotDrawer(container) {
       const { COPILOT_SYSTEM_PROMPT, buildCopilotUserPrompt } = await import('../ai/prompts.js');
 
       const state = store.getState();
+      const kbSelection = store.getSmartAiReferencesForPrompt(userPrompt, 3);
       const prompt = buildCopilotUserPrompt({
         userPrompt,
         schoolName: state.schoolProfile?.schoolName,
         principalName: state.schoolProfile?.principalName,
         dateStr: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-        references: store.getAiReferences(3)
+        references: kbSelection.references,
+        matchMode: kbSelection.matchMode,
+        totalKnowledgeCount: kbSelection.totalKnowledgeCount
       });
 
       const aiResult = await callAiWithValidation({
@@ -2065,9 +2259,11 @@ function bindCopilotDrawer(container) {
         }
       });
 
-      // Terapkan hasil AI langsung ke lembar kerja Word!
+      // Terapkan hasil AI langsung ke lembar kerja Word sebagai dokumen baru!
+      store.setActiveVaultId(null, 'standard');
       applyAiResultToCanvas(container, aiResult);
-      showToast('Surat berhasil dibuat oleh AI Copilot!', 'success');
+      updateWordVaultBadge(container);
+      showToast(describeAiMatchFeedback(kbSelection), 'success');
 
     } catch (err) {
       if (copilotAbortController?.signal?.aborted || err.message.includes('dibatalkan')) {
@@ -2129,19 +2325,22 @@ function bindCopilotDrawer(container) {
 }
 
 function applyNewMargins(container, margins) {
-  const sheet = container.querySelector('#word-sheet');
-  sheet.style.setProperty('--margin-top', `${margins.top}cm`);
-  sheet.style.setProperty('--margin-bottom', `${margins.bottom}cm`);
-  sheet.style.setProperty('--margin-left', `${margins.left}cm`);
-  sheet.style.setProperty('--margin-right', `${margins.right}cm`);
+  container.querySelectorAll('.word-paper-sheet').forEach(sheet => {
+    sheet.style.setProperty('--margin-top', `${margins.top}cm`);
+    sheet.style.setProperty('--margin-bottom', `${margins.bottom}cm`);
+    sheet.style.setProperty('--margin-left', `${margins.left}cm`);
+    sheet.style.setProperty('--margin-right', `${margins.right}cm`);
+  });
 
   const btnMarginMenu = container.querySelector('#btn-margin-menu');
   if (btnMarginMenu) {
     btnMarginMenu.innerHTML = `${ICON_RULER} <span>Margin (${margins.left}•${margins.top})</span>`;
   }
   store.updateLetterOptions({ margins });
+  syncGlobalPrintPageStyle(store.getLetterOptions());
   showToast(`Margin lembar diatur: Kiri ${margins.left}cm, Kanan ${margins.right}cm, Atas ${margins.top}cm, Bawah ${margins.bottom}cm`, 'success');
   scheduleSync(container);
+  scheduleWordPagination(container);
 }
 
 /**
@@ -2242,10 +2441,79 @@ function bindCanvasLiveEditing(container) {
       }
       scheduleSync(container);
       updateWordCount(container);
+      scheduleWordPagination(container);
     });
   });
 
   bindDynamicBlockControls(container);
+}
+
+function runsToWordSafeHtml(runs = []) {
+  if (!Array.isArray(runs) || runs.length === 0) return '';
+  return runs.map((r) => {
+    let html = escapeHtml(r.text || '').replace(/\r?\n/g, '<br>');
+    if (r.bold) html = `<b>${html}</b>`;
+    if (r.italic) html = `<i>${html}</i>`;
+    if (r.underline) html = `<u>${html}</u>`;
+    if (r.sup) html = `<sup>${html}</sup>`;
+    if (r.sub) html = `<sub>${html}</sub>`;
+    return html;
+  }).join('');
+}
+
+function extractWordInlineRuns(rootEl, inherited = {}) {
+  const runs = [];
+  if (!rootEl) return runs;
+
+  for (const child of rootEl.childNodes || []) {
+    if (child.nodeType === 3) {
+      const txt = child.nodeValue || '';
+      if (txt) {
+        runs.push({
+          text: txt,
+          ...(inherited.bold ? { bold: true } : {}),
+          ...(inherited.italic ? { italic: true } : {}),
+          ...(inherited.underline ? { underline: true } : {}),
+          ...(inherited.sup ? { sup: true } : {}),
+          ...(inherited.sub ? { sub: true } : {})
+        });
+      }
+      continue;
+    }
+    if (child.nodeType !== 1) continue;
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'br') {
+      runs.push({ text: '\n', ...inherited });
+      continue;
+    }
+    const style = (child.getAttribute('style') || '').toLowerCase();
+    const nextFmt = {
+      bold: inherited.bold || tag === 'b' || tag === 'strong' || /font-weight\s*:\s*(bold|700|800|900)/.test(style),
+      italic: inherited.italic || tag === 'i' || tag === 'em' || /font-style\s*:\s*italic/.test(style),
+      underline: inherited.underline || tag === 'u' || /text-decoration[^;]*underline/.test(style),
+      sup: inherited.sup || tag === 'sup',
+      sub: inherited.sub || tag === 'sub'
+    };
+    runs.push(...extractWordInlineRuns(child, nextFmt));
+  }
+
+  const merged = [];
+  for (const r of runs) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      Boolean(prev.bold) === Boolean(r.bold) &&
+      Boolean(prev.italic) === Boolean(r.italic) &&
+      Boolean(prev.underline) === Boolean(r.underline) &&
+      Boolean(prev.sup) === Boolean(r.sup) &&
+      Boolean(prev.sub) === Boolean(r.sub)
+    ) {
+      prev.text += r.text;
+    } else {
+      merged.push({ ...r });
+    }
+  }
+  return merged;
 }
 
 /**
@@ -2253,14 +2521,21 @@ function bindCanvasLiveEditing(container) {
  */
 function buildParagraphBlockHtml({
   text = '',
+  runs = null,
   anchorIndex = '',
   alignment = 'justify',
   isBold = false,
   isImported = false
 } = {}) {
   const cleanText = String(text || '');
-  const isEmpty = cleanText.replace(/[\s\u00a0\u200b]/g, '').length === 0;
-  const alignCss = alignment === 'center' ? 'center' : alignment === 'right' ? 'right' : 'justify';
+  const innerHtml = Array.isArray(runs) && runs.length > 0
+    ? runsToWordSafeHtml(runs)
+    : escapeHtml(cleanText);
+  const checkStr = Array.isArray(runs) && runs.length > 0
+    ? runs.map(r => r.text || '').join('')
+    : cleanText;
+  const isEmpty = checkStr.replace(/[\s\u00a0\u200b]/g, '').length === 0;
+  const alignCss = alignment === 'center' ? 'center' : alignment === 'right' ? 'right' : alignment === 'left' ? 'left' : 'justify';
   const anchorAttr = (anchorIndex !== '' && anchorIndex !== undefined && anchorIndex !== -1)
     ? `data-anchor-index="${anchorIndex}"`
     : '';
@@ -2270,10 +2545,96 @@ function buildParagraphBlockHtml({
       <div class="block-hover-tools no-print">
         <button type="button" class="btn-block-tool" data-block-action="add-para-above" title="Tambah area teks di atas">+ Teks Atas</button>
         <button type="button" class="btn-block-tool" data-block-action="add-para-below" title="Tambah area teks di bawah (atau tekan Enter)">+ Teks Bawah</button>
-        <button type="button" class="btn-block-tool" data-block-action="add-table-below" title="Sisipkan tabel rincian di bawah">+ Tabel</button>
+        <button type="button" class="btn-block-tool" data-block-action="add-table-below" title="Sisipkan tabel rincian di bawah">+ Rincian</button>
         <button type="button" class="btn-block-tool btn-block-del" data-block-action="delete-block" title="Hapus area teks ini (atau tekan Backspace saat kosong)">✕ Hapus</button>
       </div>
-      <div contenteditable="true" class="editable-field paragraph-box ${isImported ? 'imported-field' : ''}" ${anchorAttr} data-empty="${isEmpty ? 'true' : 'false'}" data-placeholder="Ketik teks di sini... (Tekan Backspace/Delete atau klik ✕ Hapus untuk menghapus area kosong ini)" style="line-height: 1.35; text-align: ${alignCss}; ${isBold ? 'font-weight: bold;' : ''}" spellcheck="false">${escapeHtml(cleanText)}</div>
+      <div contenteditable="true" class="editable-field paragraph-box ${isImported ? 'imported-field' : ''}" ${anchorAttr} data-empty="${isEmpty ? 'true' : 'false'}" data-placeholder="Ketik teks di sini... (Tekan Backspace/Delete atau klik ✕ Hapus untuk menghapus area kosong ini)" style="line-height: 1.35; text-align: ${alignCss}; ${isBold ? 'font-weight: bold;' : ''}" spellcheck="false">${isEmpty ? '' : innerHtml}</div>
+    </div>
+  `;
+}
+
+/**
+ * Merender blok Tabel Grid Berbingkai (multi-kolom fleksibel ala Microsoft Word)
+ */
+function buildCustomGridTableBlockHtml(b = {}) {
+  const rows = Array.isArray(b.rows) && b.rows.length > 0
+    ? b.rows
+    : [
+        [{ text: 'No', align: 'center' }, { text: 'Nama', align: 'center' }, { text: 'Jabatan / Keterangan', align: 'center' }],
+        [{ text: '1', align: 'left' }, { text: '....................................', align: 'left' }, { text: 'Guru', align: 'center' }]
+      ];
+  const borderStyle = b.borderStyle || 'grid';
+  const headerShading = b.headerShading !== false;
+  const headerRow = b.headerRow !== false;
+  const colWidths = Array.isArray(b.colWidthsPct) && b.colWidthsPct.length > 0 ? b.colWidthsPct.join(',') : '';
+  const colgroupHtml = Array.isArray(b.colWidthsPct) && b.colWidthsPct.length > 0
+    ? `<colgroup>${b.colWidthsPct.map(w => `<col style="width: ${w}%;">`).join('')}</colgroup>`
+    : '';
+  const tableWidthPct = Number(b.tableWidthPct) || 0;
+  const widthAttr = (tableWidthPct >= 30 && tableWidthPct < 100)
+    ? `data-table-width-pct="${tableWidthPct}" style="width: ${tableWidthPct}%;"`
+    : '';
+
+  const renderCellHtml = (c, tag, isHeadCell) => {
+    const isObj = c && typeof c === 'object' && !Array.isArray(c);
+    const txt = isObj
+      ? (Array.isArray(c.paragraphs) ? c.paragraphs.map(p => p.text || '').join('\n') : (c.text ?? ''))
+      : String(c ?? '');
+    const cs = isObj && c.colspan > 1 ? ` colspan="${c.colspan}"` : '';
+    const rs = isObj && c.rowspan > 1 ? ` rowspan="${c.rowspan}"` : '';
+    const alignCss = isObj && c.align ? `text-align: ${c.align === 'both' ? 'justify' : c.align};` : '';
+    const boldStyle = isObj && c.bold ? 'font-weight: 700;' : '';
+    return `<${tag} contenteditable="true" spellcheck="false"${cs}${rs} style="${alignCss} ${boldStyle}">${escapeHtml(txt).replace(/\r?\n/g, '<br>')}</${tag}>`;
+  };
+
+  const rowsHtml = rows.map((rowEntry, idx) => {
+    const isObj = rowEntry && typeof rowEntry === 'object' && !Array.isArray(rowEntry);
+    const cells = isObj ? (rowEntry.cells || []) : (Array.isArray(rowEntry) ? rowEntry : []);
+    const isHead = isObj && 'isHeader' in rowEntry ? Boolean(rowEntry.isHeader) : (headerRow && idx === 0);
+    const minH = isObj && Number(rowEntry.minHeightCm) > 0 ? Number(rowEntry.minHeightCm) : 0;
+    const trAttrs = [
+      isHead ? 'data-header="true"' : '',
+      minH > 0 ? `data-min-height="${minH}" style="height: ${minH}cm;"` : ''
+    ].filter(Boolean).join(' ');
+    const tag = isHead ? 'th' : 'td';
+    return `<tr${trAttrs ? ` ${trAttrs}` : ''}>${cells.map(c => renderCellHtml(c, tag, isHead)).join('')}</tr>`;
+  }).join('');
+
+  return `
+    <div class="canvas-block-item sheet-custom-table-wrapper" data-block-type="custom-table">
+      <div class="block-hover-tools no-print">
+        <button type="button" class="btn-block-tool" data-grid-act="add-row" title="Tambah baris ke tabel ini">+ Baris</button>
+        <button type="button" class="btn-block-tool" data-grid-act="del-row" title="Hapus baris terakhir">− Baris</button>
+        <button type="button" class="btn-block-tool" data-grid-act="add-col" title="Tambah kolom di sebelah kanan">+ Kolom</button>
+        <button type="button" class="btn-block-tool" data-grid-act="del-col" title="Hapus kolom paling kanan">− Kolom</button>
+        <button type="button" class="btn-block-tool" data-grid-act="cycle-border" title="Ganti gaya garis tabel (Penuh / SPPD / Tanpa Garis)">Gaya Garis</button>
+        <button type="button" class="btn-block-tool" data-grid-act="toggle-header-bg" title="Aktif/nonaktifkan warna latar abu header">Header Abu/Putih</button>
+        <button type="button" class="btn-block-tool" data-block-action="add-para-below" title="Tambah paragraf di bawah tabel">+ Teks Bawah</button>
+        <button type="button" class="btn-block-tool btn-block-del" data-block-action="delete-block" title="Hapus tabel ini">✕ Hapus</button>
+      </div>
+      <table class="word-custom-grid-table ${borderStyle === 'sppd' ? 'grid-border-sppd' : borderStyle === 'none' ? 'grid-border-none' : ''} ${headerShading ? '' : 'grid-no-header-bg'}"
+        data-border-style="${borderStyle}"
+        data-header-shading="${headerShading ? 'true' : 'false'}"
+        data-header-row="${headerRow ? 'true' : 'false'}"
+        ${colWidths ? `data-col-widths="${colWidths}"` : ''}
+        ${widthAttr}>
+        ${colgroupHtml}
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+/**
+ * Merender blok pemisah halaman manual (Page Break) di Lembar Kerja
+ */
+function buildPageBreakBlockHtml() {
+  return `
+    <div class="canvas-block-item sheet-pagebreak-wrapper" data-block-type="pagebreak">
+      <div class="word-pagebreak-divider no-print">
+        <span>✂ Pindah Halaman Baru (Page Break)</span>
+        <button type="button" class="btn-block-tool btn-block-del" data-block-action="delete-block" title="Hapus pemisah halaman ini">✕ Hapus</button>
+      </div>
     </div>
   `;
 }
@@ -2281,11 +2642,14 @@ function buildParagraphBlockHtml({
 /**
  * Merender blok Tabel Rincian Identitas / Jadwal beserta tombol aksi baris & blok
  */
-function buildIdentityTableBlockHtml(rows = []) {
+function buildIdentityTableBlockHtml(rows = [], colWidthsPct = null) {
   const safeRows = (Array.isArray(rows) && rows.length > 0) ? rows : [
     { label: 'Nama / Hari', value: ': ...........................' },
     { label: 'Keterangan / Tempat', value: ': ...........................' }
   ];
+  const hasCustomW = Array.isArray(colWidthsPct) && colWidthsPct.length >= 2;
+  const w0 = hasCustomW ? Number(colWidthsPct[0]) || 28 : 28;
+  const w1 = hasCustomW ? Number(colWidthsPct[1]) || 72 : 72;
 
   return `
     <div class="canvas-block-item sheet-identity-wrapper" id="sheet-identity-wrapper">
@@ -2295,23 +2659,24 @@ function buildIdentityTableBlockHtml(rows = []) {
         <button type="button" class="btn-block-tool" data-block-action="add-para-below" title="Tambah area teks di bawah tabel">+ Teks Bawah</button>
         <button type="button" class="btn-block-tool btn-block-del" data-block-action="delete-block" title="Hapus tabel rincian ini">✕ Hapus Tabel</button>
       </div>
-      <table class="identity-table-word">
+      <table class="identity-table-word"${hasCustomW ? ` data-col-widths="${w0},${w1}"` : ''}>
         <tbody>
-          ${safeRows.map(r => buildIdentityRowHtml(r)).join('')}
+          ${safeRows.map(r => buildIdentityRowHtml(r, hasCustomW ? [w0, w1] : null)).join('')}
         </tbody>
       </table>
     </div>
   `;
 }
 
-function buildIdentityRowHtml(r = {}) {
+function buildIdentityRowHtml(r = {}, colWidthsPct = null) {
   const rawVal = String(r.value || '').trim();
   const formattedVal = rawVal ? (rawVal.startsWith(':') ? rawVal : `: ${rawVal}`) : ': ';
   const anchorAttr = (r.index !== undefined && r.index !== -1) ? `data-anchor-index="${r.index}"` : '';
+  const hasCustomW = Array.isArray(colWidthsPct) && colWidthsPct.length >= 2;
   return `
     <tr ${anchorAttr}>
-      <td class="id-label" contenteditable="true" spellcheck="false">${escapeHtml(r.label || '')}</td>
-      <td class="id-val" contenteditable="true" spellcheck="false">${escapeHtml(formattedVal)}</td>
+      <td class="id-label" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[0]}%;"` : ''}>${escapeHtml(r.label || '')}</td>
+      <td class="id-val" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[1]}%;"` : ''}>${escapeHtml(formattedVal)}</td>
       <td class="id-row-action-cell no-print">
         <button type="button" class="btn-row-mini" data-row-action="add-row-below" title="Tambah baris di bawah">+</button>
         <button type="button" class="btn-row-mini btn-row-del" data-row-action="delete-row" title="Hapus baris ini">✕</button>
@@ -2326,20 +2691,27 @@ function buildIdentityRowHtml(r = {}) {
  */
 function renderDynamicStandardBlocksHtml(doc) {
   const rawBlocks = Array.isArray(doc?.blocks) ? doc.blocks : [];
-  const bodyItems = rawBlocks.filter(b => b.type === 'paragraph' || b.type === 'identityTable');
+  const bodyItems = rawBlocks.filter(b =>
+    b.type === 'paragraph' || b.type === 'identityTable' || b.type === 'table' || b.type === 'pageBreak'
+  );
 
   const htmlParts = [];
   for (const b of bodyItems) {
-    if (b.type === 'paragraph') {
+    if (b.type === 'pageBreak') {
+      htmlParts.push(buildPageBreakBlockHtml());
+    } else if (b.type === 'paragraph') {
       const text = (b.runs ? b.runs.map(r => r.text).join('') : (b.text || '')).trim();
       if (!text) continue; // Abaikan kotak kosong bawaan supaya tidak ada celah jauh
       htmlParts.push(buildParagraphBlockHtml({
         text,
+        runs: b.runs || null,
         alignment: b.alignment || 'justify',
         isBold: Boolean(b.isBold)
       }));
     } else if (b.type === 'identityTable' && Array.isArray(b.rows) && b.rows.length > 0) {
-      htmlParts.push(buildIdentityTableBlockHtml(b.rows));
+      htmlParts.push(buildIdentityTableBlockHtml(b.rows, b.colWidthsPct || null));
+    } else if (b.type === 'table' && Array.isArray(b.rows) && b.rows.length > 0) {
+      htmlParts.push(buildCustomGridTableBlockHtml(b));
     }
   }
 
@@ -2393,12 +2765,672 @@ function renderDynamicImportedBlocksHtml(docxBodyList = [], docxIdentityRows = [
 }
 
 /**
+ * Mengumpulkan seluruh blok dinamis (.paragraph-box-wrapper & .sheet-identity-wrapper)
+ * di seluruh halaman Lembar Kerja secara berurutan, sekaligus menggabungkan kembali
+ * tabel/paragraf yang terbelah lintas halaman.
+ */
+function collectAllDynamicBlockNodes(container) {
+  return [...container.querySelectorAll('.sheet-dynamic-blocks > .canvas-block-item')];
+}
+
+function collectMergedDynamicItems(container) {
+  const nodes = collectAllDynamicBlockNodes(container);
+  const items = [];
+  for (const wrapper of nodes) {
+    if (wrapper.classList.contains('sheet-pagebreak-wrapper')) {
+      items.push({ type: 'pageBreak' });
+      continue;
+    }
+    if (wrapper.classList.contains('paragraph-box-wrapper')) {
+      const pBox = wrapper.querySelector('.paragraph-box');
+      const text = pBox ? pBox.innerText.trim() : '';
+      const runs = pBox ? extractWordInlineRuns(pBox) : [];
+      const alignCss = (pBox?.style?.textAlign || '').toLowerCase();
+      const alignment = alignCss === 'justify' ? 'both' : (alignCss || 'both');
+      const groupId = wrapper.dataset.splitParaGroup || '';
+      if (text) {
+        const prev = items[items.length - 1];
+        if (groupId && prev && prev.type === 'paragraph' && prev._splitParaGroup === groupId) {
+          prev.text = `${prev.text} ${text}`;
+          prev.runs = [...(prev.runs || [{ text: prev.text }]), { text: ' ' }, ...runs];
+        } else {
+          items.push({ type: 'paragraph', text, runs, alignment, _splitParaGroup: groupId });
+        }
+      }
+    } else if (wrapper.classList.contains('sheet-identity-wrapper')) {
+      const idTbl = wrapper.querySelector('.identity-table-word');
+      const idColRaw = (idTbl?.dataset?.colWidths || '').trim();
+      const idColWidths = idColRaw
+        ? idColRaw.split(',').map(n => parseFloat(n)).filter(n => !Number.isNaN(n) && n > 0)
+        : [];
+      const rows = [];
+      wrapper.querySelectorAll('.identity-table-word tr').forEach(tr => {
+        const label = tr.querySelector('.id-label')?.innerText.trim() || '';
+        const val = tr.querySelector('.id-val')?.innerText.trim() || '';
+        if (label || val.replace(/^:\s*/, '')) {
+          rows.push({ label, value: val });
+        }
+      });
+      const groupId = wrapper.dataset.splitGroup || '';
+      if (rows.length > 0) {
+        const prev = items[items.length - 1];
+        if (groupId && prev && prev.type === 'identityTable' && prev._splitGroup === groupId) {
+          prev.rows.push(...rows);
+        } else {
+          items.push({
+            type: 'identityTable',
+            ...(idColWidths.length >= 2 ? { colWidthsPct: idColWidths } : {}),
+            rows,
+            _splitGroup: groupId
+          });
+        }
+      }
+    } else if (wrapper.classList.contains('sheet-custom-table-wrapper')) {
+      const tbl = wrapper.querySelector('table.word-custom-grid-table');
+      if (!tbl) continue;
+      const borderStyle = tbl.dataset.borderStyle || 'grid';
+      const headerShading = tbl.dataset.headerShading !== 'false';
+      const headerRow = tbl.dataset.headerRow !== 'false';
+      const tableWidthPct = parseFloat(tbl.dataset.tableWidthPct || '0') || 0;
+      const colWidthsRaw = (tbl.dataset.colWidths || '').trim();
+      const colWidthsPct = colWidthsRaw
+        ? colWidthsRaw.split(',').map(n => parseFloat(n)).filter(n => !Number.isNaN(n) && n > 0)
+        : [];
+      const rows = [];
+      let hasAnyMinH = false;
+      tbl.querySelectorAll('tr').forEach((tr) => {
+        const isHead = tr.dataset.header === 'true' || Boolean(tr.closest('thead'));
+        const minH = parseFloat(tr.dataset.minHeight || '0') || 0;
+        if (minH > 0) hasAnyMinH = true;
+        const cells = [...tr.children].filter(el => el.tagName === 'TD' || el.tagName === 'TH').map((td) => {
+          const cs = Math.max(1, parseInt(td.getAttribute('colspan') || '1', 10) || 1);
+          const rs = Math.max(1, parseInt(td.getAttribute('rowspan') || '1', 10) || 1);
+          const al = (td.style?.textAlign || '').toLowerCase();
+          const alignVal = al === 'justify' ? 'both' : al;
+          const bold = /700|bold/i.test(td.style?.fontWeight || '');
+          const cellText = td.innerText.replace(/\u00a0/g, ' ').trim();
+          if (cs > 1 || rs > 1 || alignVal || bold || cellText.includes('\n')) {
+            return {
+              text: cellText,
+              ...(cs > 1 ? { colspan: cs } : {}),
+              ...(rs > 1 ? { rowspan: rs } : {}),
+              ...(alignVal ? { align: alignVal } : {}),
+              ...(bold ? { bold: true } : {})
+            };
+          }
+          return cellText;
+        });
+        rows.push((isHead || minH > 0) ? { isHeader: isHead, ...(minH > 0 ? { minHeightCm: minH } : {}), cells } : cells);
+      });
+      const groupId = wrapper.dataset.splitGroup || '';
+      if (rows.length > 0) {
+        const prev = items[items.length - 1];
+        if (groupId && prev && prev.type === 'table' && prev._splitGroup === groupId) {
+          prev.rows.push(...rows);
+        } else {
+          items.push({
+            type: 'table',
+            borderStyle,
+            headerRow,
+            headerShading,
+            ...(colWidthsPct.length > 0 ? { colWidthsPct } : {}),
+            ...(tableWidthPct >= 30 && tableWidthPct < 100 ? { tableWidthPct } : {}),
+            rows,
+            _splitGroup: groupId
+          });
+        }
+      }
+    }
+  }
+  return items.map(({ _splitGroup, _splitParaGroup, ...clean }) => clean);
+}
+
+function getActiveWordPageIndex(container) {
+  const active = document.activeElement?.closest('.word-paper-sheet');
+  if (active && container.contains(active)) {
+    return Math.max(0, Number(active.dataset.wordPage || 0));
+  }
+  return 0;
+}
+
+function updateWordPageIndicators(container) {
+  const wrapperEl = container?.querySelector('#word-sheet-wrapper');
+  if (!wrapperEl) return;
+  const pageWrappers = [...wrapperEl.querySelectorAll('.word-page-wrapper')];
+  const totalPages = Math.max(1, pageWrappers.length);
+  pageWrappers.forEach((pw, idx) => {
+    pw.dataset.wordPage = String(idx);
+    const sheet = pw.querySelector('.word-paper-sheet');
+    if (sheet) sheet.dataset.wordPage = String(idx);
+    const blocks = pw.querySelector('.sheet-dynamic-blocks');
+    if (blocks) blocks.dataset.pageBlocks = String(idx);
+    const headerBar = pw.querySelector('.word-page-header-bar');
+    const pill = pw.querySelector('.word-page-pill');
+    if (pill) pill.textContent = `Halaman ${idx + 1} dari ${totalPages}`;
+    if (headerBar) headerBar.classList.toggle('hidden', totalPages <= 1);
+  });
+
+  const activeIdx = Math.min(getActiveWordPageIndex(container), totalPages - 1);
+  const statusPagesEl = container.querySelector('#word-status-pages');
+  if (statusPagesEl) {
+    statusPagesEl.innerHTML = `${ICON_DOC} <span>Halaman ${activeIdx + 1} dari ${totalPages}</span>`;
+  }
+}
+
+function createContinuationWordPage(container, pageIdx) {
+  const baseSheet = container.querySelector('#word-sheet');
+  const opts = store.getLetterOptions();
+  const paperSize = opts.paperSize || 'a4';
+  const orientation = opts.orientation || 'portrait';
+  const margins = opts.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
+  const fontFamily = opts.fontFamily || 'Times New Roman';
+  const fontSize = opts.fontSize || '12';
+  const lineSpacing = opts.lineSpacing || '1.15';
+  const cssLine = lineSpacing === '1.0' ? '1.15' : (lineSpacing === '1.5' ? '1.6' : (lineSpacing === '2.0' ? '2.0' : '1.35'));
+  const hasPilcrow = Boolean(baseSheet?.classList.contains('show-pilcrow-marks'));
+
+  const dims = computePrintableDimsMm({ paperSize, orientation, margins });
+  const pw = document.createElement('div');
+  pw.className = 'word-page-wrapper';
+  pw.dataset.wordPage = String(pageIdx);
+  pw.innerHTML = `
+    <div class="word-page-header-bar no-print">
+      <span class="word-page-pill">Halaman ${pageIdx + 1}</span>
+    </div>
+    <div class="word-paper-sheet paper-${paperSize} ${orientation === 'landscape' ? 'landscape' : ''} ${hasPilcrow ? 'show-pilcrow-marks' : ''}"
+      data-word-page="${pageIdx}"
+      style="
+        --margin-top: ${margins.top}cm;
+        --margin-bottom: ${margins.bottom}cm;
+        --margin-left: ${margins.left}cm;
+        --margin-right: ${margins.right}cm;
+        --printable-h-mm: ${dims.printableHeightMm}mm;
+        font-family: ${fontFamily};
+        font-size: ${fontSize}pt;
+      ">
+      <div class="sheet-content-editable" style="line-height: ${cssLine};">
+        <div class="sheet-dynamic-blocks word-continuation-blocks" data-page-blocks="${pageIdx}"></div>
+      </div>
+      <div class="floating-qr-stage" data-qr-page="${pageIdx}"></div>
+    </div>
+  `;
+  return pw;
+}
+
+function captureCanvasCaretState(rootEl) {
+  const sel = window.getSelection();
+  const activeEl = document.activeElement?.closest('[contenteditable="true"]');
+  if (!activeEl || !rootEl.contains(activeEl)) return null;
+  if (!sel || sel.rangeCount === 0 || !activeEl.contains(sel.anchorNode)) {
+    return { el: activeEl, offset: (activeEl.textContent || '').length };
+  }
+  const range = sel.getRangeAt(0);
+  const pre = document.createRange();
+  pre.selectNodeContents(activeEl);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return { el: activeEl, offset: pre.toString().length };
+}
+
+function restoreCanvasCaretState(rootEl, saved) {
+  if (!saved || !saved.el || !saved.el.isConnected || !rootEl.contains(saved.el)) return;
+  if (document.activeElement === saved.el) {
+    const curSel = window.getSelection();
+    if (curSel && curSel.rangeCount > 0 && saved.el.contains(curSel.anchorNode)) return;
+  }
+  const target = saved.el;
+  let remaining = saved.offset;
+  const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, null);
+  let node;
+  while ((node = walker.nextNode())) {
+    const len = node.nodeValue.length;
+    if (remaining <= len) {
+      const sel = window.getSelection();
+      const r = document.createRange();
+      r.setStart(node, Math.max(0, remaining));
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      target.focus();
+      target.closest('tr, .paragraph-box-wrapper')?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    remaining -= len;
+  }
+  const sel = window.getSelection();
+  const r = document.createRange();
+  if (!(target.textContent || '').trim()) {
+    r.setStart(target, 0);
+    r.collapse(true);
+  } else {
+    r.selectNodeContents(target);
+    r.collapse(false);
+  }
+  sel.removeAllRanges();
+  sel.addRange(r);
+  target.focus();
+  target.closest('tr, .paragraph-box-wrapper')?.scrollIntoView({ block: 'nearest' });
+}
+
+function collapseToSingleWordPage(container) {
+  const sheetWrapper = container?.querySelector('#word-sheet-wrapper');
+  if (!sheetWrapper) return;
+  const firstBody = sheetWrapper.querySelector('.word-page-wrapper[data-word-page="0"] .sheet-content-editable');
+  const firstBlocks = sheetWrapper.querySelector('#sheet-dynamic-blocks');
+  if (!firstBody || !firstBlocks) return;
+
+  const extraPages = [...sheetWrapper.querySelectorAll('.word-page-wrapper:not([data-word-page="0"])')];
+  extraPages.forEach(pw => {
+    const blocksEl = pw.querySelector('.sheet-dynamic-blocks');
+    if (blocksEl) {
+      while (blocksEl.firstElementChild) {
+        const node = blocksEl.firstElementChild;
+        const prev = firstBlocks.lastElementChild;
+        if (node.classList.contains('sheet-identity-wrapper') && node.dataset.splitGroup &&
+            prev?.classList.contains('sheet-identity-wrapper') && prev.dataset.splitGroup === node.dataset.splitGroup) {
+          const prevTbody = prev.querySelector('tbody');
+          const curTbody = node.querySelector('tbody');
+          if (prevTbody && curTbody) {
+            while (curTbody.firstElementChild) prevTbody.appendChild(curTbody.firstElementChild);
+            node.remove();
+            continue;
+          }
+        }
+        if (node.classList.contains('sheet-custom-table-wrapper') && node.dataset.splitGroup &&
+            prev?.classList.contains('sheet-custom-table-wrapper') && prev.dataset.splitGroup === node.dataset.splitGroup) {
+          const prevTbody = prev.querySelector('tbody');
+          const curTbody = node.querySelector('tbody');
+          if (prevTbody && curTbody) {
+            while (curTbody.firstElementChild) prevTbody.appendChild(curTbody.firstElementChild);
+            node.remove();
+            continue;
+          }
+        }
+        if (node.classList.contains('paragraph-box-wrapper') && node.dataset.splitParaGroup &&
+            prev?.classList.contains('paragraph-box-wrapper') && prev.dataset.splitParaGroup === node.dataset.splitParaGroup) {
+          const prevBox = prev.querySelector('.paragraph-box');
+          const curBox = node.querySelector('.paragraph-box');
+          if (prevBox && curBox) {
+            prevBox.innerText = `${prevBox.innerText.trimEnd()} ${curBox.innerText.trimStart()}`.trim();
+            node.remove();
+            continue;
+          }
+        }
+        firstBlocks.appendChild(node);
+      }
+    }
+    const addBar = pw.querySelector('.canvas-add-block-bar');
+    const sigWrap = pw.querySelector('.sheet-signature-wrapper');
+    if (addBar) firstBody.appendChild(addBar);
+    if (sigWrap) firstBody.appendChild(sigWrap);
+    pw.remove();
+  });
+  updateWordPageIndicators(container);
+}
+
+function scheduleWordPagination(container) {
+  if (!container) return;
+  clearTimeout(wordPaginateTimer);
+  wordPaginateTimer = setTimeout(() => {
+    reflowWordCanvasPagination(container);
+  }, 40);
+}
+
+/**
+ * Mesin Paginasi Multi-Halaman ala Microsoft Word untuk Lembar Kerja:
+ * - Menjamin setiap lembar kertas menghormati margin atas/bawah kertas (A4, F4, Letter, Legal).
+ * - Ketika teks/tabel melebihi batas margin bawah Halaman i, otomatis membuat Halaman i+1
+ *   dan memindahkan baris/blok yang meluap dengan posisi kursor tetap terjaga.
+ */
+function reflowWordCanvasPagination(container) {
+  if (isWordPaginating || !container) return;
+  const sheetWrapper = container.querySelector('#word-sheet-wrapper');
+  if (!sheetWrapper || sheetWrapper.querySelector('#docx-native-preview-card')) return;
+  const basePage = sheetWrapper.querySelector('.word-page-wrapper[data-word-page="0"]');
+  if (!basePage) return;
+
+  isWordPaginating = true;
+  const savedCaret = captureCanvasCaretState(sheetWrapper);
+
+  try {
+    const addBar = sheetWrapper.querySelector('.canvas-add-block-bar');
+    const sigWrapper = sheetWrapper.querySelector('.sheet-signature-wrapper');
+
+    const getBottomInSheet = (el, sheetRect, scale) => {
+      if (!el || !scale) return 0;
+      return (el.getBoundingClientRect().bottom - sheetRect.top) / scale;
+    };
+
+    const getTopInSheet = (el, sheetRect, scale) => {
+      if (!el || !scale) return 0;
+      return (el.getBoundingClientRect().top - sheetRect.top) / scale;
+    };
+
+    const ensureNextPage = (curPageIdx, pagesArr) => {
+      if (pagesArr[curPageIdx + 1]) return pagesArr[curPageIdx + 1];
+      const nextPw = createContinuationWordPage(container, curPageIdx + 1);
+      pagesArr[curPageIdx].insertAdjacentElement('afterend', nextPw);
+      return nextPw;
+    };
+
+    let guard = 0;
+    while (guard < 80) {
+      guard++;
+      let moved = false;
+      const pages = [...sheetWrapper.querySelectorAll('.word-page-wrapper')];
+
+      for (let i = 0; i < pages.length; i++) {
+        const curPw = pages[i];
+        const sheet = curPw.querySelector('.word-paper-sheet');
+        const curBody = sheet?.querySelector('.sheet-content-editable');
+        const curBlocksEl = curBody?.querySelector('.sheet-dynamic-blocks');
+        if (!sheet || !curBody || !curBlocksEl) continue;
+
+        const cs = getComputedStyle(sheet);
+        const minH = parseFloat(cs.minHeight) || 0;
+        const padBottom = parseFloat(cs.paddingBottom) || 0;
+        if (!minH || minH < 100) continue;
+
+        const sheetRect = sheet.getBoundingClientRect();
+        const scale = sheet.offsetWidth > 0 ? sheetRect.width / sheet.offsetWidth : 1;
+        if (scale <= 0) continue;
+        const maxBottomPx = minH - padBottom - 4;
+
+        // 1A-0. Cek apakah ada pemisah halaman manual (.sheet-pagebreak-wrapper) sebelum blok paling akhir
+        const manualBreakNode = curBlocksEl.querySelector('.sheet-pagebreak-wrapper');
+        if (manualBreakNode && manualBreakNode.nextElementSibling) {
+          const nextPw = ensureNextPage(i, pages);
+          const nextBody = nextPw.querySelector('.sheet-content-editable');
+          const nextBlocksEl = nextBody.querySelector('.sheet-dynamic-blocks');
+          if (addBar && addBar.parentNode === curBody) nextBody.appendChild(addBar);
+          if (sigWrapper && sigWrapper.parentNode === curBody) nextBody.appendChild(sigWrapper);
+
+          const trailingNodes = [];
+          let cursor = manualBreakNode.nextElementSibling;
+          while (cursor) {
+            trailingNodes.push(cursor);
+            cursor = cursor.nextElementSibling;
+          }
+          for (let tIdx = trailingNodes.length - 1; tIdx >= 0; tIdx--) {
+            nextBlocksEl.insertBefore(trailingNodes[tIdx], nextBlocksEl.firstChild);
+          }
+          moved = true;
+          break;
+        }
+
+        // 1A. Jika blok TTD berada di halaman ini dan melewati batas margin bawah -> pindahkan ke halaman berikutnya
+        if (sigWrapper && sigWrapper.parentNode === curBody && !sigWrapper.classList.contains('hidden')) {
+          if (getBottomInSheet(sigWrapper, sheetRect, scale) > maxBottomPx || manualBreakNode) {
+            const nextPw = ensureNextPage(i, pages);
+            const nextBody = nextPw.querySelector('.sheet-content-editable');
+            if (addBar && addBar.parentNode === curBody) nextBody.appendChild(addBar);
+            nextBody.appendChild(sigWrapper);
+            moved = true;
+            break;
+          }
+        }
+
+        // 1B. Cek blok konten paling bawah di .sheet-dynamic-blocks
+        const lastBlock = curBlocksEl.lastElementChild;
+        if (lastBlock && getBottomInSheet(lastBlock, sheetRect, scale) > maxBottomPx) {
+          const nextPw = ensureNextPage(i, pages);
+          const nextBody = nextPw.querySelector('.sheet-content-editable');
+          const nextBlocksEl = nextBody.querySelector('.sheet-dynamic-blocks');
+
+          // Jaga urutan dokumen: pastikan addBar & sigWrapper berada setelah seluruh blok
+          if (addBar && addBar.parentNode === curBody) nextBody.appendChild(addBar);
+          if (sigWrapper && sigWrapper.parentNode === curBody) nextBody.appendChild(sigWrapper);
+
+          if (lastBlock.classList.contains('sheet-identity-wrapper')) {
+            const tbody = lastBlock.querySelector('tbody');
+            const rows = tbody ? [...tbody.querySelectorAll('tr')] : [];
+            const firstRowFits = rows.length > 0 && getBottomInSheet(rows[0], sheetRect, scale) <= maxBottomPx;
+
+            if (rows.length > 1 && (firstRowFits || curBlocksEl.children.length === 1)) {
+              const groupId = lastBlock.dataset.splitGroup || `wtbl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              lastBlock.dataset.splitGroup = groupId;
+              let destWrapper = nextBlocksEl.firstElementChild;
+              if (!destWrapper || !destWrapper.classList.contains('sheet-identity-wrapper') || destWrapper.dataset.splitGroup !== groupId) {
+                const shell = document.createElement('div');
+                shell.innerHTML = buildIdentityTableBlockHtml([{ label: '', value: '' }]).trim();
+                destWrapper = shell.firstElementChild;
+                destWrapper.removeAttribute('id');
+                destWrapper.dataset.splitGroup = groupId;
+                const destBody = destWrapper.querySelector('tbody');
+                if (destBody) destBody.innerHTML = '';
+                nextBlocksEl.insertBefore(destWrapper, nextBlocksEl.firstChild);
+              }
+              const destTbody = destWrapper.querySelector('tbody');
+              destTbody?.insertBefore(rows[rows.length - 1], destTbody.firstChild);
+              moved = true;
+              break;
+            }
+          }
+
+          if (lastBlock.classList.contains('paragraph-box-wrapper')) {
+            const pBox = lastBlock.querySelector('.paragraph-box');
+            const fullText = pBox ? pBox.innerText : '';
+            const words = fullText.split(/\s+/).filter(Boolean);
+            const blockTopPx = getTopInSheet(lastBlock, sheetRect, scale);
+            const blockBottomPx = getBottomInSheet(lastBlock, sheetRect, scale);
+            const blockHeightPx = blockBottomPx - blockTopPx;
+
+            // Jika 1 paragraf sangat panjang menyilang jauh dari bagian tengah kertas -> pecah rapi per kata
+            if (words.length >= 18 && blockHeightPx > 110 && blockTopPx < maxBottomPx - 80) {
+              const availH = Math.max(40, maxBottomPx - blockTopPx - 8);
+              const splitIdx = Math.max(4, Math.min(words.length - 4, Math.floor(words.length * (availH / blockHeightPx) * 0.92)));
+              const keepText = words.slice(0, splitIdx).join(' ');
+              const tailText = words.slice(splitIdx).join(' ');
+              const groupId = lastBlock.dataset.splitParaGroup || `wpara-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              lastBlock.dataset.splitParaGroup = groupId;
+              pBox.innerText = keepText;
+
+              let destParaWrapper = nextBlocksEl.firstElementChild;
+              if (destParaWrapper && destParaWrapper.classList.contains('paragraph-box-wrapper') && destParaWrapper.dataset.splitParaGroup === groupId) {
+                const destBox = destParaWrapper.querySelector('.paragraph-box');
+                if (destBox) destBox.innerText = `${tailText} ${destBox.innerText}`.trim();
+              } else {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = buildParagraphBlockHtml({ text: tailText }).trim();
+                destParaWrapper = tmp.firstElementChild;
+                destParaWrapper.dataset.splitParaGroup = groupId;
+                nextBlocksEl.insertBefore(destParaWrapper, nextBlocksEl.firstChild);
+              }
+              moved = true;
+              break;
+            }
+          }
+
+          // Pindahkan seluruh blok ke halaman berikutnya selama bukan satu-satunya blok yang buntu
+          if (curBlocksEl.children.length > 1 || i === 0) {
+            nextBlocksEl.insertBefore(lastBlock, nextBlocksEl.firstChild);
+            moved = true;
+            break;
+          }
+        }
+
+        // 2. UNDERFLOW CHECK: Tarik kembali elemen dari halaman i+1 bila kini cukup ruang pada halaman i
+        const nextPw = pages[i + 1];
+        if (!nextPw) continue;
+        if (curBlocksEl.querySelector('.sheet-pagebreak-wrapper')) continue;
+        const nextBody = nextPw.querySelector('.sheet-content-editable');
+        const nextBlocksEl = nextBody?.querySelector('.sheet-dynamic-blocks');
+        if (!nextBlocksEl) continue;
+
+        const firstNextBlock = nextBlocksEl.firstElementChild;
+        if (firstNextBlock) {
+          const curLastBlock = curBlocksEl.lastElementChild;
+
+          // 2A. Gabung kembali baris tabel terbelah
+          if (firstNextBlock.classList.contains('sheet-identity-wrapper') &&
+              firstNextBlock.dataset.splitGroup &&
+              curLastBlock?.classList.contains('sheet-identity-wrapper') &&
+              curLastBlock.dataset.splitGroup === firstNextBlock.dataset.splitGroup) {
+            const nextTbody = firstNextBlock.querySelector('tbody');
+            const curTbody = curLastBlock.querySelector('tbody');
+            const candidateRow = nextTbody?.firstElementChild;
+            if (curTbody && candidateRow) {
+              curTbody.appendChild(candidateRow);
+              if (getBottomInSheet(candidateRow, sheetRect, scale) <= maxBottomPx) {
+                if (nextTbody.children.length === 0) firstNextBlock.remove();
+                moved = true;
+                break;
+              } else {
+                nextTbody.insertBefore(candidateRow, nextTbody.firstChild);
+              }
+            }
+          }
+
+          // 2B. Gabung kembali paragraf terbelah
+          if (firstNextBlock.classList.contains('paragraph-box-wrapper') &&
+              firstNextBlock.dataset.splitParaGroup &&
+              curLastBlock?.classList.contains('paragraph-box-wrapper') &&
+              curLastBlock.dataset.splitParaGroup === firstNextBlock.dataset.splitParaGroup) {
+            const curBox = curLastBlock.querySelector('.paragraph-box');
+            const nextBox = firstNextBlock.querySelector('.paragraph-box');
+            if (curBox && nextBox) {
+              const prevText = curBox.innerText;
+              curBox.innerText = `${prevText.trimEnd()} ${nextBox.innerText.trimStart()}`.trim();
+              if (getBottomInSheet(curLastBlock, sheetRect, scale) <= maxBottomPx) {
+                firstNextBlock.remove();
+                moved = true;
+                break;
+              } else {
+                curBox.innerText = prevText;
+              }
+            }
+          }
+
+          // 2C. Tarik kembali satu blok utuh dari halaman i+1
+          const hasTrailingSigOnCur = Boolean(sigWrapper && sigWrapper.parentNode === curBody && !sigWrapper.classList.contains('hidden'));
+          if (!hasTrailingSigOnCur) {
+            curBlocksEl.appendChild(firstNextBlock);
+            if (getBottomInSheet(firstNextBlock, sheetRect, scale) <= maxBottomPx) {
+              moved = true;
+              break;
+            } else {
+              nextBlocksEl.insertBefore(firstNextBlock, nextBlocksEl.firstChild);
+            }
+          }
+        } else if (i + 1 === pages.length - 1) {
+          // Halaman i+1 tidak punya blok lagi -> cek apakah addBar / TTD muat kembali ke halaman i
+          const hasVisibleSig = Boolean(sigWrapper && sigWrapper.parentNode === nextBody && !sigWrapper.classList.contains('hidden'));
+          const hasAddBar = Boolean(addBar && addBar.parentNode === nextBody);
+          if (hasVisibleSig) {
+            if (hasAddBar) curBody.appendChild(addBar);
+            curBody.appendChild(sigWrapper);
+            if (getBottomInSheet(sigWrapper, sheetRect, scale) <= maxBottomPx) {
+              nextPw.remove();
+              moved = true;
+              break;
+            } else {
+              if (hasAddBar) nextBody.appendChild(addBar);
+              nextBody.appendChild(sigWrapper);
+            }
+          } else if (hasAddBar) {
+            curBody.appendChild(addBar);
+            if (sigWrapper && sigWrapper.parentNode === nextBody) curBody.appendChild(sigWrapper);
+            nextPw.remove();
+            moved = true;
+            break;
+          }
+        }
+      }
+
+      if (!moved) break;
+    }
+
+    // Bersihkan halaman lanjutan kosong yang tidak memiliki isi maupun TTD aktif
+    const remainingPages = [...sheetWrapper.querySelectorAll('.word-page-wrapper')];
+    for (let i = remainingPages.length - 1; i >= 1; i--) {
+      const pw = remainingPages[i];
+      const blocksEl = pw.querySelector('.sheet-dynamic-blocks');
+      const hasBlocks = Boolean(blocksEl && blocksEl.children.length > 0);
+      const hasSig = Boolean(pw.querySelector('.sheet-signature-wrapper:not(.hidden)'));
+      const prevHasBreak = Boolean(i > 0 && remainingPages[i - 1]?.querySelector('.sheet-pagebreak-wrapper'));
+      if (!hasBlocks && !hasSig && !prevHasBreak) {
+        const firstBody = sheetWrapper.querySelector('.word-page-wrapper[data-word-page="0"] .sheet-content-editable');
+        const addBarNode = pw.querySelector('.canvas-add-block-bar');
+        const sigNode = pw.querySelector('.sheet-signature-wrapper');
+        if (firstBody && addBarNode) firstBody.appendChild(addBarNode);
+        if (firstBody && sigNode) firstBody.appendChild(sigNode);
+        pw.remove();
+      }
+    }
+
+    updateWordPageIndicators(container);
+    refreshWordFloatingQrOverlay(container);
+  } finally {
+    isWordPaginating = false;
+    restoreCanvasCaretState(sheetWrapper, savedCaret);
+  }
+}
+
+function refreshWordFloatingQrOverlay(container) {
+  if (!container || !document.body.contains(container)) return;
+  const st = store.getState();
+  const doc = st.document || {};
+  const verification = doc.verification || null;
+  const opts = store.getLetterOptions();
+  const dims = computePrintableDimsMm(opts);
+
+  const sheets = [...container.querySelectorAll('.word-paper-sheet')];
+  sheets.forEach((sh, idx) => {
+    sh.style.setProperty('--printable-h-mm', `${dims.printableHeightMm}mm`);
+    let stage = sh.querySelector(':scope > .floating-qr-stage');
+    if (!stage) {
+      stage = document.createElement('div');
+      stage.className = 'floating-qr-stage';
+      stage.dataset.qrPage = String(idx);
+      sh.appendChild(stage);
+    }
+    stage.dataset.qrPage = String(idx);
+  });
+
+  const stages = sheets.map(sh => sh.querySelector(':scope > .floating-qr-stage')).filter(Boolean);
+  const toggleBtn = container.querySelector('#btn-toggle-word-qr-canvas');
+
+  const mounted = mountInteractiveFloatingQr({
+    stages,
+    verification,
+    rawPlacement: doc.qrPlacement || null,
+    docModel: doc,
+    school: st.schoolProfile || {},
+    getZoomScale: () => {
+      const zPct = Number(container.querySelector('#input-zoom-slider')?.value || store.getState().zoomLevel || 100);
+      return Math.max(0.4, zPct / 100);
+    },
+    onPlacementChange: (nextPlacement) => {
+      store.setActiveQrPlacement(nextPlacement, 'standard');
+      updateCanvasQrToggleButton(toggleBtn, {
+        verification: store.getState().document?.verification,
+        placement: nextPlacement
+      });
+    }
+  });
+
+  if (mounted && !doc.qrPlacement && verification?.isVerifiedSah) {
+    store.setActiveQrPlacement(mounted, 'standard');
+  }
+  updateCanvasQrToggleButton(toggleBtn, {
+    verification,
+    placement: store.getState().document?.qrPlacement || mounted
+  });
+}
+
+/**
  * Mengatur interaksi keyboard (Backspace/Delete untuk hapus kotak kosong, Enter untuk tambah kotak baru)
- * serta tombol aksi cepat (+ Teks Atas, + Teks Bawah, + Tabel, ✕ Hapus) di dalam #sheet-dynamic-blocks
+ * serta tombol aksi cepat (+ Teks Atas, + Teks Bawah, + Tabel, ✕ Hapus) lintas seluruh halaman kanvas
  */
 function bindDynamicBlockControls(container) {
-  const blocksContainer = container.querySelector('#sheet-dynamic-blocks');
-  if (!blocksContainer) return;
+  const sheetWrapper = container.querySelector('#word-sheet-wrapper');
+  const firstBlocksContainer = container.querySelector('#sheet-dynamic-blocks');
+  if (!sheetWrapper || !firstBlocksContainer) return;
+
+  const getAllBlockNodes = () => collectAllDynamicBlockNodes(container);
+  const getLastBlocksContainer = () => {
+    const all = [...sheetWrapper.querySelectorAll('.sheet-dynamic-blocks')];
+    return all[all.length - 1] || firstBlocksContainer;
+  };
 
   const isCaretAtStart = (el) => {
     const sel = window.getSelection();
@@ -2472,48 +3504,52 @@ function bindDynamicBlockControls(container) {
 
   const removeBlockWrapper = (wrapper, focusDirection = 'prev') => {
     if (!wrapper) return;
-    const prevBlock = wrapper.previousElementSibling;
-    const nextBlock = wrapper.nextElementSibling;
+    const allNodesBefore = getAllBlockNodes();
+    const idx = allNodesBefore.indexOf(wrapper);
+    const prevBlock = idx > 0 ? allNodesBefore[idx - 1] : null;
+    const nextBlock = (idx >= 0 && idx < allNodesBefore.length - 1) ? allNodesBefore[idx + 1] : null;
 
     clearImportedAnchorIfRemoved(wrapper);
     wrapper.remove();
 
-    // Jika semua blok di #sheet-dynamic-blocks habis dihapus, sisakan 1 kotak kosong yang siap diketik
-    if (blocksContainer.children.length === 0) {
+    // Jika semua blok di seluruh halaman habis dihapus, sisakan 1 kotak kosong di Halaman 1
+    if (getAllBlockNodes().length === 0) {
       const temp = document.createElement('div');
       temp.innerHTML = buildParagraphBlockHtml({ text: '' }).trim();
       const freshWrapper = temp.firstElementChild;
-      blocksContainer.appendChild(freshWrapper);
+      firstBlocksContainer.appendChild(freshWrapper);
       const freshPara = freshWrapper.querySelector('.paragraph-box');
       focusAtEdge(freshPara, false);
     } else if (focusDirection === 'prev' && prevBlock) {
-      const target = prevBlock.querySelector('.paragraph-box') || prevBlock.querySelector('[contenteditable="true"]');
+      const target = prevBlock.querySelector('.paragraph-box') || prevBlock.querySelector('.id-val, [contenteditable="true"]');
       focusAtEdge(target, true);
     } else if (nextBlock) {
-      const target = nextBlock.querySelector('.paragraph-box') || nextBlock.querySelector('[contenteditable="true"]');
+      const target = nextBlock.querySelector('.paragraph-box') || nextBlock.querySelector('.id-label, [contenteditable="true"]');
       focusAtEdge(target, false);
     } else if (prevBlock) {
-      const target = prevBlock.querySelector('.paragraph-box') || prevBlock.querySelector('[contenteditable="true"]');
+      const target = prevBlock.querySelector('.paragraph-box') || prevBlock.querySelector('.id-val, [contenteditable="true"]');
       focusAtEdge(target, true);
     }
 
     scheduleSync(container);
     updateWordCount(container);
+    scheduleWordPagination(container);
   };
 
   const insertParagraphBlock = (refWrapper, position = 'after', initialText = '') => {
     const temp = document.createElement('div');
     temp.innerHTML = buildParagraphBlockHtml({ text: initialText }).trim();
     const newWrapper = temp.firstElementChild;
+    const hostContainer = refWrapper?.closest('.sheet-dynamic-blocks') || getLastBlocksContainer();
 
-    if (refWrapper && refWrapper.parentNode === blocksContainer) {
+    if (refWrapper && refWrapper.parentNode === hostContainer) {
       if (position === 'before') {
-        blocksContainer.insertBefore(newWrapper, refWrapper);
+        hostContainer.insertBefore(newWrapper, refWrapper);
       } else {
         refWrapper.insertAdjacentElement('afterend', newWrapper);
       }
     } else {
-      blocksContainer.appendChild(newWrapper);
+      hostContainer.appendChild(newWrapper);
     }
 
     const newPara = newWrapper.querySelector('.paragraph-box');
@@ -2521,6 +3557,7 @@ function bindDynamicBlockControls(container) {
     focusAtEdge(newPara, false);
     scheduleSync(container);
     updateWordCount(container);
+    reflowWordCanvasPagination(container);
     return newWrapper;
   };
 
@@ -2532,29 +3569,86 @@ function bindDynamicBlockControls(container) {
       { label: 'Tempat', value: ': SMK IT Al-Hawari' }
     ]).trim();
     const newWrapper = temp.firstElementChild;
+    const hostContainer = refWrapper?.closest('.sheet-dynamic-blocks') || getLastBlocksContainer();
 
-    if (refWrapper && refWrapper.parentNode === blocksContainer) {
+    if (refWrapper && refWrapper.parentNode === hostContainer) {
       if (position === 'before') {
-        blocksContainer.insertBefore(newWrapper, refWrapper);
+        hostContainer.insertBefore(newWrapper, refWrapper);
       } else {
         refWrapper.insertAdjacentElement('afterend', newWrapper);
       }
     } else {
-      blocksContainer.appendChild(newWrapper);
+      hostContainer.appendChild(newWrapper);
     }
 
     const firstCell = newWrapper.querySelector('.id-label');
     focusAtEdge(firstCell, true);
     scheduleSync(container);
     updateWordCount(container);
+    reflowWordCanvasPagination(container);
+    return newWrapper;
+  };
+
+  const insertGridTableBlock = (refWrapper, position = 'after') => {
+    const temp = document.createElement('div');
+    temp.innerHTML = buildCustomGridTableBlockHtml({
+      borderStyle: 'grid',
+      headerRow: true,
+      headerShading: false,
+      rows: [
+        [{ text: 'No', align: 'center' }, { text: 'Nama', align: 'center' }, { text: 'Jabatan / Keterangan', align: 'center' }],
+        [{ text: '1', align: 'left' }, { text: 'Nama Pegawai / Peserta', align: 'left' }, { text: 'Guru', align: 'center' }],
+        [{ text: '2', align: 'left' }, { text: 'Nama Pegawai / Peserta', align: 'left' }, { text: 'Guru', align: 'center' }]
+      ]
+    }).trim();
+    const newWrapper = temp.firstElementChild;
+    const hostContainer = refWrapper?.closest('.sheet-dynamic-blocks') || getLastBlocksContainer();
+
+    if (refWrapper && refWrapper.parentNode === hostContainer) {
+      if (position === 'before') hostContainer.insertBefore(newWrapper, refWrapper);
+      else refWrapper.insertAdjacentElement('afterend', newWrapper);
+    } else {
+      hostContainer.appendChild(newWrapper);
+    }
+
+    const firstCell = newWrapper.querySelector('th, td');
+    if (firstCell) focusAtEdge(firstCell, true);
+    scheduleSync(container);
+    updateWordCount(container);
+    reflowWordCanvasPagination(container);
+    return newWrapper;
+  };
+
+  const insertPageBreakBlock = (refWrapper, position = 'after') => {
+    const temp = document.createElement('div');
+    temp.innerHTML = buildPageBreakBlockHtml().trim();
+    const newWrapper = temp.firstElementChild;
+    const hostContainer = refWrapper?.closest('.sheet-dynamic-blocks') || getLastBlocksContainer();
+
+    if (refWrapper && refWrapper.parentNode === hostContainer) {
+      if (position === 'before') hostContainer.insertBefore(newWrapper, refWrapper);
+      else refWrapper.insertAdjacentElement('afterend', newWrapper);
+    } else {
+      hostContainer.appendChild(newWrapper);
+    }
+
+    insertParagraphBlock(newWrapper, 'after', '');
+    scheduleSync(container);
+    updateWordCount(container);
+    reflowWordCanvasPagination(container);
     return newWrapper;
   };
 
   // Sinkronisasi status kosong awal pada semua paragraf
-  blocksContainer.querySelectorAll('.paragraph-box').forEach(p => syncParaEmptyAttr(p));
+  sheetWrapper.querySelectorAll('.sheet-dynamic-blocks .paragraph-box').forEach(p => syncParaEmptyAttr(p));
 
-  // Event Delegation: Input di dalam #sheet-dynamic-blocks
-  blocksContainer.addEventListener('input', (e) => {
+  sheetWrapper.addEventListener('focusin', () => {
+    updateWordPageIndicators(container);
+  });
+
+  // Event Delegation: Input di dalam seluruh .sheet-dynamic-blocks lintas halaman
+  sheetWrapper.addEventListener('input', (e) => {
+    if (!e.target.closest('.sheet-dynamic-blocks')) return;
     const paraEl = e.target.closest('.paragraph-box');
     if (paraEl) {
       syncParaEmptyAttr(paraEl);
@@ -2572,10 +3666,12 @@ function bindDynamicBlockControls(container) {
     }
     scheduleSync(container);
     updateWordCount(container);
+    scheduleWordPagination(container);
   });
 
-  // Event Delegation: Keydown (Backspace, Delete, Enter) pada Paragraf & Baris Tabel
-  blocksContainer.addEventListener('keydown', (e) => {
+  // Event Delegation: Keydown (Backspace, Delete, Enter) pada Paragraf & Baris Tabel lintas halaman
+  sheetWrapper.addEventListener('keydown', (e) => {
+    if (!e.target.closest('.sheet-dynamic-blocks')) return;
     const paraEl = e.target.closest('.paragraph-box');
     if (paraEl) {
       const wrapper = paraEl.closest('.paragraph-box-wrapper');
@@ -2588,11 +3684,11 @@ function bindDynamicBlockControls(container) {
         return;
       }
 
-      // 2. Jika menekan Backspace tepat di ujung awal paragraf:
-      //    - Jika blok sebelumnya adalah area teks kosong -> hapus area kosong di atasnya
-      //    - Jika blok sebelumnya adalah paragraf berisi teks -> gabungkan seperti di Microsoft Word
+      // 2. Jika menekan Backspace tepat di ujung awal paragraf (termasuk lintas batas halaman)
       if (e.key === 'Backspace' && isCaretAtStart(paraEl)) {
-        const prevWrapper = wrapper?.previousElementSibling;
+        const allNodes = getAllBlockNodes();
+        const curIdx = allNodes.indexOf(wrapper);
+        const prevWrapper = curIdx > 0 ? allNodes[curIdx - 1] : null;
         if (prevWrapper && prevWrapper.classList.contains('paragraph-box-wrapper')) {
           const prevPara = prevWrapper.querySelector('.paragraph-box');
           const prevPlain = prevPara ? prevPara.innerText.replace(/[\s\u00a0\u200b]/g, '') : '';
@@ -2610,11 +3706,11 @@ function bindDynamicBlockControls(container) {
         }
       }
 
-      // 3. Jika menekan Delete tepat di ujung akhir paragraf:
-      //    - Jika blok berikutnya kosong -> hapus blok kosong di bawahnya
-      //    - Jika blok berikutnya berisi teks -> gabungkan ke paragraf ini
+      // 3. Jika menekan Delete tepat di ujung akhir paragraf (termasuk lintas batas halaman)
       if (e.key === 'Delete' && isCaretAtEnd(paraEl)) {
-        const nextWrapper = wrapper?.nextElementSibling;
+        const allNodes = getAllBlockNodes();
+        const curIdx = allNodes.indexOf(wrapper);
+        const nextWrapper = (curIdx >= 0 && curIdx < allNodes.length - 1) ? allNodes[curIdx + 1] : null;
         if (nextWrapper && nextWrapper.classList.contains('paragraph-box-wrapper')) {
           const nextPara = nextWrapper.querySelector('.paragraph-box');
           const nextPlain = nextPara ? nextPara.innerText.replace(/[\s\u00a0\u200b]/g, '') : '';
@@ -2632,7 +3728,7 @@ function bindDynamicBlockControls(container) {
         }
       }
 
-      // 4. Tekan Enter (tanpa Shift) -> Buat area teks / paragraf baru tepat di bawahnya (atau pecah paragraf di posisi kursor)
+      // 4. Tekan Enter (tanpa Shift) -> Buat area teks / paragraf baru tepat di bawahnya
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         let textAfterCursor = '';
@@ -2668,6 +3764,7 @@ function bindDynamicBlockControls(container) {
           tr.insertAdjacentElement('afterend', newRow);
           focusAtEdge(newRow.querySelector('.id-label'), true);
           scheduleSync(container);
+          reflowWordCanvasPagination(container);
           return;
         }
         if ((e.key === 'Backspace' || e.key === 'Delete')) {
@@ -2679,10 +3776,11 @@ function bindDynamicBlockControls(container) {
               const prevRow = tr.previousElementSibling || tr.nextElementSibling;
               tr.remove();
               if (prevRow) focusAtEdge(prevRow.querySelector('.id-val'), true);
+              scheduleSync(container);
+              scheduleWordPagination(container);
             } else {
               removeBlockWrapper(tr.closest('.sheet-identity-wrapper'), 'prev');
             }
-            scheduleSync(container);
             return;
           }
         }
@@ -2690,8 +3788,9 @@ function bindDynamicBlockControls(container) {
     }
   });
 
-  // Event Delegation: Klik Tombol Floating pada Blok & Tabel
-  blocksContainer.addEventListener('click', (e) => {
+  // Event Delegation: Klik Tombol Floating pada Blok & Tabel lintas halaman
+  sheetWrapper.addEventListener('click', (e) => {
+    if (!e.target.closest('.sheet-dynamic-blocks')) return;
     const blockBtn = e.target.closest('[data-block-action]');
     if (blockBtn) {
       e.preventDefault();
@@ -2717,8 +3816,77 @@ function bindDynamicBlockControls(container) {
           tbody.appendChild(newRow);
           focusAtEdge(newRow.querySelector('.id-label'), true);
           scheduleSync(container);
+          reflowWordCanvasPagination(container);
         }
       }
+      return;
+    }
+
+    const gridBtn = e.target.closest('[data-grid-act]');
+    if (gridBtn) {
+      e.preventDefault();
+      const gAct = gridBtn.dataset.gridAct;
+      const wrap = gridBtn.closest('.sheet-custom-table-wrapper');
+      const tbl = wrap?.querySelector('table.word-custom-grid-table');
+      const tbody = tbl?.querySelector('tbody') || tbl;
+      if (!wrap || !tbl || !tbody) return;
+
+      const allTrs = [...tbody.querySelectorAll('tr')];
+      const maxCols = Math.max(1, ...(allTrs.map(tr =>
+        [...tr.children].reduce((sum, el) => sum + (parseInt(el.getAttribute('colspan') || '1', 10) || 1), 0)
+      )));
+
+      if (gAct === 'add-row') {
+        const tr = document.createElement('tr');
+        for (let c = 0; c < maxCols; c++) {
+          const td = document.createElement('td');
+          td.contentEditable = 'true';
+          td.spellcheck = false;
+          td.innerText = c === 0 ? String(allTrs.length) : '...';
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+        focusAtEdge(tr.querySelector('td'), true);
+      } else if (gAct === 'del-row') {
+        if (allTrs.length > 1) {
+          allTrs[allTrs.length - 1].remove();
+        } else {
+          removeBlockWrapper(wrap, 'prev');
+          return;
+        }
+      } else if (gAct === 'add-col') {
+        allTrs.forEach((tr, rIdx) => {
+          const isHead = tr.dataset.header === 'true' || Boolean(tr.querySelector('th'));
+          const cell = document.createElement(isHead ? 'th' : 'td');
+          cell.contentEditable = 'true';
+          cell.spellcheck = false;
+          cell.innerText = isHead ? `Kolom ${maxCols + 1}` : '...';
+          tr.appendChild(cell);
+        });
+      } else if (gAct === 'del-col') {
+        if (maxCols <= 1) {
+          removeBlockWrapper(wrap, 'prev');
+          return;
+        }
+        allTrs.forEach(tr => {
+          const last = tr.lastElementChild;
+          if (last) last.remove();
+        });
+      } else if (gAct === 'cycle-border') {
+        const cur = tbl.dataset.borderStyle || 'grid';
+        const next = cur === 'grid' ? 'sppd' : (cur === 'sppd' ? 'none' : 'grid');
+        tbl.dataset.borderStyle = next;
+        tbl.classList.remove('grid-border-sppd', 'grid-border-none');
+        if (next === 'sppd') tbl.classList.add('grid-border-sppd');
+        if (next === 'none') tbl.classList.add('grid-border-none');
+        showToast(`Gaya garis tabel: ${next === 'grid' ? 'Garis Penuh' : next === 'sppd' ? 'SPPD (Tanpa Garis Samping)' : 'Tanpa Garis'}`, 'info');
+      } else if (gAct === 'toggle-header-bg') {
+        const noBg = tbl.classList.toggle('grid-no-header-bg');
+        tbl.dataset.headerShading = noBg ? 'false' : 'true';
+      }
+      scheduleSync(container);
+      updateWordCount(container);
+      reflowWordCanvasPagination(container);
       return;
     }
 
@@ -2737,10 +3905,12 @@ function bindDynamicBlockControls(container) {
         tr.insertAdjacentElement('afterend', newRow);
         focusAtEdge(newRow.querySelector('.id-label'), true);
         scheduleSync(container);
+        reflowWordCanvasPagination(container);
       } else if (action === 'delete-row') {
         if (tbody.querySelectorAll('tr').length > 1) {
           tr.remove();
           scheduleSync(container);
+          scheduleWordPagination(container);
         } else {
           removeBlockWrapper(tr.closest('.sheet-identity-wrapper'), 'prev');
         }
@@ -2756,6 +3926,12 @@ function bindDynamicBlockControls(container) {
       if (type === 'table') {
         insertTableBlock(null, 'after');
         showToast('Tabel rincian baru ditambahkan.', 'info');
+      } else if (type === 'grid-table') {
+        insertGridTableBlock(null, 'after');
+        showToast('Tabel grid multi-kolom berhasil ditambahkan.', 'info');
+      } else if (type === 'pagebreak') {
+        insertPageBreakBlock(null, 'after');
+        showToast('Pemisah halaman baru (Page Break) ditambahkan.', 'info');
       } else if (type === 'title') {
         const titleSec = container.querySelector('.sheet-section-title');
         const titleEl = container.querySelector('#editable-doc-title');
@@ -2770,6 +3946,7 @@ function bindDynamicBlockControls(container) {
         if (titleEl) focusAtEdge(titleEl, true);
         scheduleSync(container);
         updateWordCount(container);
+        scheduleWordPagination(container);
       } else if (type === 'meta') {
         const metaWrap = container.querySelector('#sheet-meta-recipient-wrapper');
         if (metaWrap) metaWrap.classList.remove('hidden');
@@ -2795,21 +3972,52 @@ function bindDynamicBlockControls(container) {
         container.querySelector('[data-canvas-insert="sig"]')?.classList.add('hidden');
         scheduleSync(container);
         updateWordCount(container);
+        scheduleWordPagination(container);
       } else {
         insertParagraphBlock(null, 'after', '');
       }
     });
   });
+
+  // Hubungkan Move Handle (panah 4-arah pojok kiri atas), Resize Cursor (col/row), & Drag Boundary MS Word
+  const wordDeskEl = container.querySelector('#word-desk-container');
+  attachInteractiveTables({
+    deskEl: wordDeskEl,
+    tableSelector: '.sheet-dynamic-blocks table',
+    excludeTableSelector: '.meta-perihal-table',
+    getMoveUnitEl: (tbl) => tbl.closest('.canvas-block-item') || tbl,
+    getDropTargets: (draggedUnit) =>
+      [...sheetWrapper.querySelectorAll('.sheet-dynamic-blocks > .canvas-block-item')].filter(
+        el => el !== draggedUnit
+      ),
+    performMove: (unitEl, targetEl, position) => {
+      unitEl.removeAttribute('data-split-group');
+      targetEl.insertAdjacentElement(position === 'before' ? 'beforebegin' : 'afterend', unitEl);
+    },
+    onSelectWholeTable: () => {
+      showToast('Seluruh isi tabel dipilih — klik & seret ikon panah 4-arah untuk memindahkan posisi tabel, atau Delete untuk menghapus.', 'info');
+    },
+    onMutate: (kind) => {
+      if (kind === 'delete-table' && getAllBlockNodes().length === 0) {
+        insertParagraphBlock(null, 'after', '');
+      }
+      scheduleSync(container);
+      updateWordCount(container);
+      reflowWordCanvasPagination(container);
+    }
+  });
 }
 
 function updateWordCount(container) {
-  const bodyText = container.querySelector('#sheet-body-content')?.innerText || '';
+  const allBodies = [...container.querySelectorAll('.sheet-content-editable')];
+  const bodyText = allBodies.map(el => el.innerText || '').join(' ');
   const words = bodyText.trim().split(/\s+/).filter(w => w.length > 0).length;
   const countEl = container.querySelector('#status-word-count');
   if (countEl) countEl.textContent = `${words} kata`;
 }
 
 function scheduleSync(container) {
+  scheduleWordPagination(container);
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     if (container) {
@@ -2982,38 +4190,41 @@ function buildModelFromCanvas(container) {
     });
   }
 
-  // 3. Blok Isi Dinamis sesuai urutan DOM di #sheet-dynamic-blocks (mengabaikan area teks kosong)
+  // 3. Blok Isi Dinamis lintas seluruh halaman (tabel/paragraf terbelah digabung utuh)
+  const dynamicItems = collectMergedDynamicItems(container);
   let bodyBlocksAdded = 0;
-  const dynamicContainer = container.querySelector('#sheet-dynamic-blocks');
-  if (dynamicContainer) {
-    Array.from(dynamicContainer.children).forEach(wrapper => {
-      if (wrapper.classList.contains('paragraph-box-wrapper')) {
-        const pBox = wrapper.querySelector('.paragraph-box');
-        const text = pBox ? pBox.innerText.trim() : '';
-        if (text) {
-          bodyBlocksAdded += 1;
-          blocks.push({
-            type: 'paragraph',
-            style: 'letterBody',
-            text,
-            runs: [{ text }]
-          });
-        }
-      } else if (wrapper.classList.contains('sheet-identity-wrapper')) {
-        const rows = [];
-        wrapper.querySelectorAll('.identity-table-word tr').forEach(tr => {
-          const label = tr.querySelector('.id-label')?.innerText.trim() || '';
-          const val = tr.querySelector('.id-val')?.innerText.trim() || '';
-          if (label || val.replace(/^:\s*/, '')) {
-            rows.push({ label, value: val });
-          }
-        });
-        if (rows.length > 0) {
-          bodyBlocksAdded += 1;
-          blocks.push({ type: 'identityTable', rows });
-        }
-      }
-    });
+  for (const item of dynamicItems) {
+    if (item.type === 'paragraph') {
+      bodyBlocksAdded += 1;
+      blocks.push({
+        type: 'paragraph',
+        style: 'letterBody',
+        ...(item.alignment ? { alignment: item.alignment } : {}),
+        text: item.text,
+        runs: Array.isArray(item.runs) && item.runs.length > 0 ? item.runs : [{ text: item.text }]
+      });
+    } else if (item.type === 'identityTable') {
+      bodyBlocksAdded += 1;
+      blocks.push({
+        type: 'identityTable',
+        ...(Array.isArray(item.colWidthsPct) && item.colWidthsPct.length >= 2 ? { colWidthsPct: item.colWidthsPct } : {}),
+        rows: item.rows
+      });
+    } else if (item.type === 'table') {
+      bodyBlocksAdded += 1;
+      blocks.push({
+        type: 'table',
+        borderStyle: item.borderStyle || 'grid',
+        headerRow: item.headerRow !== false,
+        headerShading: item.headerShading !== false,
+        ...(Array.isArray(item.colWidthsPct) ? { colWidthsPct: item.colWidthsPct } : {}),
+        ...(item.tableWidthPct ? { tableWidthPct: item.tableWidthPct } : {}),
+        rows: item.rows
+      });
+    } else if (item.type === 'pageBreak') {
+      bodyBlocksAdded += 1;
+      blocks.push({ type: 'pageBreak' });
+    }
   }
 
   // 4. Signature Block (bila aktif)
@@ -3101,6 +4312,26 @@ function buildMetaRecipientInnerHtml(metaRows = [], recipientLines = []) {
  * Memasukkan hasil AI Copilot langsung ke lembar kerja Word secara dinamis (tanpa meninggalkan kotak kosong)
  */
 function applyAiResultToCanvas(container, aiResult) {
+  if (aiResult?.templatePreset === 'surat_tugas_sppd') {
+    const stNow = store.getState();
+    const optsNow = store.getLetterOptions();
+    const sppdDoc = buildSuratTugasSppdDocModel(
+      aiResult.formData || aiResult,
+      stNow.schoolProfile,
+      { ...optsNow, paperSize: aiResult.paperSize || 'f4' }
+    );
+    store.setState({
+      smartDocument: {
+        pages: [],
+        pendingDocModel: sppdDoc,
+        meta: sppdDoc.meta || { title: 'SURAT TUGAS & SPPD' }
+      }
+    }, false);
+    showToast('Paket Surat Tugas & SPPD (3 Halaman 1:1 Word) dibuka otomatis di Editor Word Pro!', 'success');
+    document.querySelector('.nav-tab[data-tab="smart-canvas"]')?.click();
+    return;
+  }
+
   const titleSectionEl = container.querySelector('.sheet-section-title');
   const sigWrapperEl = container.querySelector('.sheet-signature-wrapper');
   const titleEl = container.querySelector('#editable-doc-title');
@@ -3121,46 +4352,78 @@ function applyAiResultToCanvas(container, aiResult) {
   const metaEl = container.querySelector('#editable-meta-recipient');
   const metaWrapper = container.querySelector('#sheet-meta-recipient-wrapper');
   if (metaEl) {
-    const sifatVal = aiResult.sifat || 'Penting';
-    const perihalVal = aiResult.hal || aiResult.perihal || aiResult.title || 'Undangan Rapat';
-    const tujuanVal = aiResult.tujuan
-      ? (aiResult.tujuan.toLowerCase().startsWith('yth') ? aiResult.tujuan : `Yth. ${aiResult.tujuan}`)
-      : 'Yth. ...............';
-    metaEl.innerHTML = buildMetaRecipientInnerHtml(
-      [
-        { label: 'Sifat', value: sifatVal },
-        { label: 'Perihal', value: perihalVal }
-      ],
-      [
-        'Kepada',
-        tujuanVal,
-        '__________________',
-        'Di',
-        'Tempat'
-      ]
-    );
-    if (metaWrapper) {
-      metaWrapper.classList.remove('is-empty');
-      metaWrapper.classList.remove('hidden');
-    }
     const btnClear = container.querySelector('#btn-clear-meta-recipient');
     const btnRestore = container.querySelector('#btn-restore-meta-recipient');
-    if (btnClear) btnClear.classList.remove('hidden');
-    if (btnRestore) btnRestore.classList.add('hidden');
+    if (aiResult.hideMetaRecipient === true) {
+      metaEl.innerHTML = '';
+      if (metaWrapper) {
+        metaWrapper.classList.add('is-empty', 'hidden');
+      }
+      if (btnClear) btnClear.classList.add('hidden');
+      if (btnRestore) btnRestore.classList.remove('hidden');
+    } else {
+      const sifatVal = aiResult.sifat || 'Penting';
+      const perihalVal = aiResult.hal || aiResult.perihal || aiResult.title || 'Undangan Rapat';
+      const tujuanVal = aiResult.tujuan
+        ? (aiResult.tujuan.toLowerCase().startsWith('yth') ? aiResult.tujuan : `Yth. ${aiResult.tujuan}`)
+        : 'Yth. ...............';
+      metaEl.innerHTML = buildMetaRecipientInnerHtml(
+        [
+          { label: 'Sifat', value: sifatVal },
+          { label: 'Perihal', value: perihalVal }
+        ],
+        [
+          'Kepada',
+          tujuanVal,
+          '__________________',
+          'Di',
+          'Tempat'
+        ]
+      );
+      if (metaWrapper) {
+        metaWrapper.classList.remove('is-empty');
+        metaWrapper.classList.remove('hidden');
+      }
+      if (btnClear) btnClear.classList.remove('hidden');
+      if (btnRestore) btnRestore.classList.add('hidden');
+    }
   }
 
-  // Render blok isi (paragraf & tabel) sesuai urutan asli dari AI tanpa kotak kosong
+  // Render blok isi (paragraf, tabel rincian, tabel grid, & page break) sesuai urutan asli dari AI
+  collapseToSingleWordPage(container);
   const dynamicContainer = container.querySelector('#sheet-dynamic-blocks');
   if (dynamicContainer && Array.isArray(aiResult.blocks)) {
     const htmlParts = [];
     for (const b of aiResult.blocks) {
-      if (b.type === 'paragraph') {
+      if (!b || !b.type) continue;
+      if (b.type === 'pageBreak') {
+        htmlParts.push(buildPageBreakBlockHtml());
+      } else if (b.type === 'heading' && b.text) {
+        htmlParts.push(buildParagraphBlockHtml({
+          text: String(b.text).trim(),
+          alignment: b.alignment || 'left',
+          isBold: true
+        }));
+      } else if (b.type === 'list' && Array.isArray(b.items)) {
+        b.items.forEach((it, idx) => {
+          htmlParts.push(buildParagraphBlockHtml({
+            text: `${b.ordered !== false ? `${idx + 1}. ` : '• '}${String(it)}`,
+            alignment: 'left'
+          }));
+        });
+      } else if (b.type === 'paragraph') {
         const text = (b.text || '').trim();
         if (text) {
-          htmlParts.push(buildParagraphBlockHtml({ text }));
+          htmlParts.push(buildParagraphBlockHtml({
+            text,
+            alignment: b.alignment || 'justify',
+            isBold: Boolean(b.bold)
+          }));
         }
       } else if (b.type === 'identityTable' && Array.isArray(b.rows) && b.rows.length > 0) {
         htmlParts.push(buildIdentityTableBlockHtml(b.rows));
+      } else if (b.type === 'table' && Array.isArray(b.rows) && b.rows.length > 0) {
+        htmlParts.push(buildCustomGridTableBlockHtml(b));
       }
     }
     if (htmlParts.length > 0) {
@@ -3192,6 +4455,7 @@ function applyAiResultToCanvas(container, aiResult) {
 
   scheduleSync(container);
   updateWordCount(container);
+  reflowWordCanvasPagination(container);
 }
 
 /**
@@ -3224,24 +4488,7 @@ function extractCanvasSnapshot(container) {
     }
   }
 
-  const blocks = [];
-  const dynamicContainer = container.querySelector('#sheet-dynamic-blocks');
-  if (dynamicContainer) {
-    Array.from(dynamicContainer.children).forEach(wrapper => {
-      if (wrapper.classList.contains('paragraph-box-wrapper')) {
-        const text = wrapper.querySelector('.paragraph-box')?.innerText.trim() || '';
-        if (text) blocks.push({ type: 'paragraph', text });
-      } else if (wrapper.classList.contains('sheet-identity-wrapper')) {
-        const rows = [];
-        wrapper.querySelectorAll('.identity-table-word tr').forEach(tr => {
-          const label = tr.querySelector('.id-label')?.innerText.trim() || '';
-          const value = tr.querySelector('.id-val')?.innerText.trim() || '';
-          if (label || value.replace(/^:\s*/, '')) rows.push({ label, value });
-        });
-        if (rows.length > 0) blocks.push({ type: 'identityTable', rows });
-      }
-    });
-  }
+  const blocks = collectMergedDynamicItems(container);
 
   const school = store.getSchoolProfile();
   const todayId = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -3320,27 +4567,9 @@ function applyEditedResultToCanvas(container, edited, prevSnapshot) {
     metaRecipient: hideMeta ? null : metaRecipientObj
   });
 
-  // Pertahankan urutan asli setiap blok (paragraf & tabel) tanpa memaksa urutan kaku
+  // Pertahankan urutan asli setiap blok (paragraf, tabel rincian, tabel grid/SPPD, list, & pageBreak)
   const sourceBlocks = Array.isArray(edited.blocks) && edited.blocks.length > 0 ? edited.blocks : prevSnapshot.blocks;
-  for (const b of sourceBlocks) {
-    if (b.type === 'paragraph' && b.text && String(b.text).trim()) {
-      const clean = String(b.text).trim();
-      newBlocks.push({
-        type: 'paragraph',
-        style: 'letterBody',
-        text: clean,
-        runs: [{ text: clean }]
-      });
-    } else if (b.type === 'identityTable' && Array.isArray(b.rows) && b.rows.length > 0) {
-      newBlocks.push({
-        type: 'identityTable',
-        rows: b.rows.map(r => ({
-          label: (r.label || '').trim(),
-          value: (r.value || '').trim().startsWith(':') ? (r.value || '').trim() : `: ${(r.value || '').trim()}`
-        }))
-      });
-    }
-  }
+  newBlocks.push(...convertAiBlocksToDocumentBlocks(sourceBlocks));
 
   const sig = edited.signer || prevSnapshot.signer || {};
   newBlocks.push({
@@ -3362,6 +4591,8 @@ function applyEditedResultToCanvas(container, edited, prevSnapshot) {
     paperSize: opts.paperSize || 'a4',
     orientation: opts.orientation || 'portrait',
     customMargins: opts.margins,
+    ...(state.document?.verification ? { verification: state.document.verification } : {}),
+    ...(state.document?.qrPlacement ? { qrPlacement: state.document.qrPlacement } : {}),
     letterData: {
       kopImage: state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL,
       metaRecipientDeleted: hideMeta
@@ -3561,6 +4792,10 @@ function bindRecordOutgoingModal(container) {
     const activeDocx = store.getState().activeUploadedDocx;
     const school = store.getState().schoolProfile || {};
     const docSnapshot = getActiveSnapshotOrDomModel();
+    const curQrPlacement = store.getState().document?.qrPlacement;
+    if (curQrPlacement && docSnapshot && !docSnapshot.qrPlacement) {
+      docSnapshot.qrPlacement = JSON.parse(JSON.stringify(curQrPlacement));
+    }
     const titleBlockInSnap = docSnapshot.blocks?.find(b => b.type === 'letterTitle');
     if (titleBlockInSnap && officialNomor) {
       titleBlockInSnap.nomor = `Nomor: ${officialNomor}`;
@@ -3746,19 +4981,29 @@ export function triggerWordCanvasPrintWithChoice(container) {
 
   const runPrint = (mode, qrDataUrl = '', overrideRole = null, overrideVerif = null) => {
     const holder = container.querySelector('.sheet-signature-wrapper .sig-space-holder');
+    const sheetEls = [...container.querySelectorAll('.word-paper-sheet')];
     const postPrintBar = container.querySelector('#post-print-outgoing-bar');
     const school = store.getState().schoolProfile || {};
     const v = overrideVerif || verification;
     const effectiveRole = overrideRole || v?.signerRole || 'kepala_sekolah';
+    const latestDoc = store.getState().document;
+    const printOpts = store.getLetterOptions();
     printWithTemporaryQrOverlay({
       mode,
+      pageSheetEls: sheetEls,
+      qrPlacement: latestDoc?.qrPlacement || null,
+      docModel: latestDoc,
       standardHolderEl: holder,
       qrDataUrl,
       signerRole: effectiveRole,
       principalName: school.principalName || '',
       signerName: v?.signerName || '',
       school,
+      paperSize: printOpts.paperSize,
+      orientation: printOpts.orientation,
+      margins: printOpts.margins,
       onAfterPrint: () => {
+        refreshWordFloatingQrOverlay(container);
         if (!isVerifiedSah && mode === 'manual' && postPrintBar) {
           postPrintBar.classList.remove('hidden');
         }
@@ -3887,33 +5132,53 @@ export function triggerWordCanvasDownloadWithChoice(container) {
   });
 }
 
-/**
- * Menyimpan isi lembar kerja aktif (DOM atau file impor .docx) ke Gudang Surat
- */
-function saveCurrentCanvasToVault(container) {
+function updateWordVaultBadge(container) {
+  renderCanvasVaultBadge(
+    container?.querySelector('#word-status-vault-badge'),
+    store.getActiveVaultEntry('standard')
+  );
+}
+
+async function buildWordCanvasVaultPayload(container) {
   const activeDocx = store.getState().activeUploadedDocx;
   if (activeDocx) {
-    store.addLetterVaultEntry({
-      title: activeDocx.parsedMeta?.title || activeDocx.fileName?.replace(/\.docx$/i, '') || 'Dokumen Word Impor',
-      nomorSurat: activeDocx.parsedMeta?.nomor || '-',
-      tanggalSurat: activeDocx.parsedMeta?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+    let nextUploaded = activeDocx;
+    if (activeDocx.rawBytes) {
+      try {
+        const patchedBytes = await applyCanvasEditsToDocx(
+          activeDocx.rawBytes,
+          activeDocx.paragraphs || [],
+          { outputType: 'uint8array' }
+        );
+        nextUploaded = {
+          ...activeDocx,
+          rawBytes: patchedBytes instanceof Uint8Array ? patchedBytes : new Uint8Array(patchedBytes)
+        };
+        store.setActiveUploadedDocx(nextUploaded);
+      } catch {}
+    }
+    return {
+      isImported: true,
+      title: nextUploaded.parsedMeta?.title || nextUploaded.fileName?.replace(/\.docx$/i, '') || 'Dokumen Word Impor',
+      nomorSurat: nextUploaded.parsedMeta?.nomor || '-',
+      tanggalSurat: nextUploaded.parsedMeta?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
       category: 'Dokumen Impor',
-      targetPerson: activeDocx.parsedMeta?.signer || '-',
-      perihal: activeDocx.parsedMeta?.title,
-      summary: `Dokumen .docx resmi diunggah: "${activeDocx.fileName}". Preservasi format 100%.`,
+      targetPerson: nextUploaded.parsedMeta?.signer || '-',
+      perihal: nextUploaded.parsedMeta?.title || 'Dokumen Word Impor',
+      summary: `Dokumen .docx resmi diunggah: "${nextUploaded.fileName}". Preservasi format 100%.`,
       isAiReference: true,
       source: 'upload',
-      uploadedDocx: activeDocx
-    });
-    return { isImported: true, title: activeDocx.parsedMeta?.title || activeDocx.fileName || 'Dokumen Impor' };
+      uploadedDocx: nextUploaded
+    };
   }
 
   const docModel = buildModelFromCanvas(container);
   const titleEl = container.querySelector('#editable-doc-title');
   const nomorEl = container.querySelector('#editable-doc-nomor');
   const sigDateEl = container.querySelector('#editable-sig-date');
-  const allParas = Array.from(container.querySelectorAll('#sheet-dynamic-blocks .paragraph-box'))
-    .map(el => el.innerText.trim())
+  const allParas = collectMergedDynamicItems(container)
+    .filter(item => item.type === 'paragraph')
+    .map(item => item.text)
     .filter(Boolean);
   const firstTableVal = container.querySelector('.identity-table-word .id-val')?.innerText.replace(/^:\s*/, '').trim() || '-';
 
@@ -3924,19 +5189,190 @@ function saveCurrentCanvasToVault(container) {
   const dateText = sigDateEl?.innerText.trim() || new Date().toLocaleDateString('id-ID');
   const summary = (allParas[1] || allParas[0] || 'Dokumen persuratan sekolah.').slice(0, 160);
 
-  store.addLetterVaultEntry({
+  return {
+    isImported: false,
     title,
     nomorSurat: nomor,
     tanggalSurat: dateText,
-    category: 'Surat Keterangan',
+    category: 'Surat Dinas',
     targetPerson: firstTableVal,
     perihal: title,
     summary,
     isAiReference: true,
     source: 'created',
     document: docModel
+  };
+}
+
+/**
+ * Menyimpan perubahan (Ctrl+S): jika sedang mengedit file dari Gudang Surat, langsung perbarui file aslinya;
+ * jika masih Draf Baru, tampilkan dialog pemberian nama untuk disimpan pertama kali ke Gudang Surat.
+ */
+async function performWordSave(container, { clearAfterSave = false } = {}) {
+  const activeEntry = store.getActiveVaultEntry('standard');
+  if (!activeEntry) {
+    await openWordSaveVaultModal(container, { mode: 'save', clearAfterSave });
+    return;
+  }
+
+  const writeUpdateToEntry = async ({ unlock = false } = {}) => {
+    const payload = await buildWordCanvasVaultPayload(container);
+    const updates = payload.isImported
+      ? {
+          nomorSurat: payload.nomorSurat || activeEntry.nomorSurat,
+          tanggalSurat: payload.tanggalSurat || activeEntry.tanggalSurat,
+          targetPerson: payload.targetPerson || activeEntry.targetPerson,
+          perihal: payload.perihal || activeEntry.perihal,
+          summary: payload.summary || activeEntry.summary,
+          uploadedDocx: payload.uploadedDocx,
+          ...(unlock ? { isLockedTemplate: false, isMasterTemplate: false } : {})
+        }
+      : {
+          nomorSurat: payload.nomorSurat || activeEntry.nomorSurat,
+          tanggalSurat: payload.tanggalSurat || activeEntry.tanggalSurat,
+          targetPerson: payload.targetPerson || activeEntry.targetPerson,
+          perihal: payload.perihal || activeEntry.perihal,
+          summary: payload.summary || activeEntry.summary,
+          document: payload.document,
+          ...(unlock ? { isLockedTemplate: false, isMasterTemplate: false } : {})
+        };
+
+    store.updateLetterVaultEntry(activeEntry.id, updates);
+    updateWordVaultBadge(container);
+    if (clearAfterSave) {
+      resetWordCanvasToBlank(container);
+      showToast(`✓ Perubahan disimpan ke "${activeEntry.title}" & kanvas telah dikosongkan!`, 'success');
+    } else if (unlock) {
+      showToast(`🔓 Kunci dibuka & perubahan disimpan ke "${activeEntry.title}". Anda dapat mengunci Master ⭐ kembali di Gudang Surat.`, 'success');
+    } else {
+      showToast(`✓ Tersimpan ke "${activeEntry.title}" (Ctrl+S) — file Gudang diperbarui tanpa duplikat.`, 'success');
+    }
+  };
+
+  if (activeEntry.isLockedTemplate || activeEntry.isMasterTemplate) {
+    openLockedMasterSaveChoiceModal(container.querySelector('#word-save-modal-root'), activeEntry, {
+      clearAfterSave,
+      onSaveAsCopy: () => openWordSaveVaultModal(container, { mode: 'save-as', clearAfterSave }),
+      onUnlockAndSave: () => writeUpdateToEntry({ unlock: true })
+    });
+    return;
+  }
+
+  await writeUpdateToEntry();
+}
+
+/**
+ * Dialog Save (draf baru) atau Save As (duplikat ke file Gudang Surat baru - Ctrl+Shift+S / F12)
+ */
+async function openWordSaveVaultModal(container, { mode = 'save', clearAfterSave = false } = {}) {
+  const modalRoot = container.querySelector('#word-save-modal-root');
+  if (!modalRoot) return;
+  const isSaveAs = mode === 'save-as';
+  const activeEntry = store.getActiveVaultEntry('standard');
+  const payload = await buildWordCanvasVaultPayload(container);
+  const defaultTitle = isSaveAs
+    ? `Salinan - ${activeEntry?.title || payload.title}`
+    : payload.title;
+
+  modalRoot.innerHTML = `
+    <div class="modal-overlay">
+      <div class="modal-box" style="max-width: 480px; width: 92%;">
+        <div class="modal-header">
+          <h3>${isSaveAs ? ICON_COPY_DOC : ICON_SAVE} ${clearAfterSave ? 'Simpan ke Gudang Sebelum Mengosongkan' : (isSaveAs ? 'Save As / Duplikat ke Gudang Surat' : 'Simpan Dokumen Baru ke Gudang Surat')}</h3>
+          <button type="button" class="btn-icon" id="w-save-modal-close">&times;</button>
+        </div>
+        <div class="modal-body" style="display: grid; gap: 10px;">
+          ${isSaveAs && activeEntry ? `<div class="auth-alert" style="background:#eff6ff; border-color:#bfdbfe; color:#1e3a8a; font-size:12px;">Membuat salinan independen baru dari <strong>${escapeHtml(activeEntry.title)}</strong> agar file acuan asli tetap terjaga.</div>` : ''}
+          <div>
+            <label class="form-label">Judul Arsip</label>
+            <input id="w-v-title" class="form-input" value="${escapeHtml(defaultTitle)}" />
+            <div id="w-v-dup-warn" class="hidden" style="margin-top:6px; padding:7px 10px; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; font-size:11.5px; color:#92400e;"></div>
+          </div>
+          <div><label class="form-label">Kategori</label><input id="w-v-cat" class="form-input" value="${escapeHtml(activeEntry?.category || payload.category)}" /></div>
+          <div><label class="form-label">Nomor Surat</label><input id="w-v-nomor" class="form-input" value="${escapeHtml(payload.nomorSurat)}" /></div>
+          <div><label class="form-label">Perihal</label><input id="w-v-hal" class="form-input" value="${escapeHtml(payload.perihal)}" /></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="w-save-modal-cancel">Batal</button>
+          <button type="button" class="btn btn-secondary hidden" id="w-save-overwrite-btn">Timpa File Sama</button>
+          <button type="button" class="btn btn-primary" id="w-save-modal-ok">${clearAfterSave ? 'Simpan &amp; Kosongkan Kertas' : (isSaveAs ? 'Save As (Simpan Duplikat)' : 'Simpan ke Gudang')}</button>
+        </div>
+      </div>
+    </div>`;
+
+  const closeModal = () => { modalRoot.innerHTML = ''; };
+  const titleInput = modalRoot.querySelector('#w-v-title');
+  const dupWarnEl = modalRoot.querySelector('#w-v-dup-warn');
+  const overwriteBtn = modalRoot.querySelector('#w-save-overwrite-btn');
+  let matchedDup = null;
+
+  const checkDup = () => {
+    const val = titleInput?.value.trim() || '';
+    matchedDup = store.findLetterVaultByTitle(val);
+    if (matchedDup) {
+      if (matchedDup.isLockedTemplate || matchedDup.isMasterTemplate) {
+        dupWarnEl.textContent = `🔒 "${matchedDup.title}" berstatus ⭐ Master Terkunci dan dilindungi agar tidak tertimpa. Ubah judul untuk menyimpan Salinan Baru.`;
+        dupWarnEl.classList.remove('hidden');
+        overwriteBtn?.classList.add('hidden');
+      } else {
+        dupWarnEl.textContent = `⚠️ Judul "${matchedDup.title}" sudah ada di Gudang Surat. Ubah judul untuk duplikat terpisah, atau klik "Timpa File Sama".`;
+        dupWarnEl.classList.remove('hidden');
+        overwriteBtn?.classList.remove('hidden');
+      }
+    } else {
+      dupWarnEl.classList.add('hidden');
+      overwriteBtn?.classList.add('hidden');
+    }
+  };
+  titleInput?.addEventListener('input', checkDup);
+  checkDup();
+
+  modalRoot.querySelector('#w-save-modal-close').onclick = closeModal;
+  modalRoot.querySelector('#w-save-modal-cancel').onclick = closeModal;
+
+  const finalPayload = (titleVal) => ({
+    ...payload,
+    title: titleVal,
+    category: modalRoot.querySelector('#w-v-cat').value.trim() || payload.category,
+    nomorSurat: modalRoot.querySelector('#w-v-nomor').value.trim() || '-',
+    perihal: modalRoot.querySelector('#w-v-hal').value.trim() || titleVal
   });
-  return { isImported: false, title };
+
+  if (overwriteBtn) {
+    overwriteBtn.onclick = () => {
+      if (!matchedDup) return;
+      const titleVal = titleInput.value.trim() || matchedDup.title;
+      store.updateLetterVaultEntry(matchedDup.id, finalPayload(titleVal));
+      store.setActiveVaultId(matchedDup.id, 'standard');
+      closeModal();
+      if (clearAfterSave) {
+        resetWordCanvasToBlank(container);
+        showToast(`✓ "${titleVal}" diperbarui di Gudang Surat & kanvas dikosongkan!`, 'success');
+      } else {
+        updateWordVaultBadge(container);
+        showToast(`✓ File "${titleVal}" di Gudang Surat berhasil diperbarui!`, 'success');
+      }
+    };
+  }
+
+  modalRoot.querySelector('#w-save-modal-ok').onclick = () => {
+    const titleVal = titleInput.value.trim() || defaultTitle;
+    const created = store.addLetterVaultEntry(finalPayload(titleVal));
+    store.setActiveVaultId(created.id, 'standard');
+    closeModal();
+    if (clearAfterSave) {
+      resetWordCanvasToBlank(container);
+      showToast(`✓ "${titleVal}" tersimpan di Gudang Surat & kanvas dikosongkan!`, 'success');
+    } else {
+      updateWordVaultBadge(container);
+      showToast(
+        isSaveAs
+          ? `✓ Save As berhasil! Salinan "${titleVal}" dibuat & kini aktif diedit (Ctrl+S).`
+          : `✓ "${titleVal}" disimpan ke Gudang Surat! Edit berikutnya cukup tekan Ctrl+S.`,
+        'success'
+      );
+    }
+  };
 }
 
 /**
@@ -3958,9 +5394,9 @@ function hasWordCanvasContent(container) {
     if ((metaEl?.innerText || '').replace(/\u00a0/g, ' ').trim()) return true;
   }
 
-  if (container.querySelector('#sheet-dynamic-blocks .identity-table-word')) return true;
+  if (container.querySelector('.sheet-dynamic-blocks .identity-table-word, .sheet-dynamic-blocks .word-custom-grid-table, .sheet-dynamic-blocks .sheet-pagebreak-wrapper')) return true;
 
-  const hasParaText = Array.from(container.querySelectorAll('#sheet-dynamic-blocks .paragraph-box'))
+  const hasParaText = Array.from(container.querySelectorAll('.sheet-dynamic-blocks .paragraph-box'))
     .some(el => el.innerText.replace(/[\s\u00a0\u200b]/g, '').length > 0);
   if (hasParaText) return true;
 
@@ -3980,6 +5416,7 @@ function resetWordCanvasToBlank(container) {
   clearTimeout(syncTimer);
   container.__clearCanvasAfterOutgoing = false;
   store.clearActiveUploadedDocx();
+  store.setActiveVaultId(null, 'standard');
   const emptyDoc = createEmptyDocumentModel(store.getSchoolProfile(), store.getLetterOptions());
   store.setState({ document: emptyDoc, docxViewMode: 'canvas' }, true);
   renderWordCanvas(container);
@@ -4024,10 +5461,8 @@ function bindRefreshCanvasModal(container) {
 
   if (btnSaveVault) {
     btnSaveVault.addEventListener('click', () => {
-      const result = saveCurrentCanvasToVault(container);
       closeRefreshModal();
-      resetWordCanvasToBlank(container);
-      showToast(`✓ "${result.title}" tersimpan di Gudang Surat & kanvas telah dikosongkan!`, 'success');
+      performWordSave(container, { clearAfterSave: true });
     });
   }
 

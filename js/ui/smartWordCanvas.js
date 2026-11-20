@@ -15,7 +15,7 @@
  * Catatan: Modul ini terpisah 100% dari js/ui/wordCanvas.js agar kanvas lama tetap stabil tanpa perubahan.
  */
 
-import { store } from '../state.js';
+import { store, computeDefaultDesktopZoom } from '../state.js';
 import { showToast } from './notification.js';
 import {
   ICON_GALLERY, ICON_EYE, ICON_EYE_OFF, ICON_UPLOAD,
@@ -34,8 +34,10 @@ import {
 import { parseDocxForEditing, convertDocxToDocumentModel } from '../docx/patch.js';
 import { DEFAULT_KOP_DATA_URL } from '../letters/defaultKop.js';
 import { generateLetterNumber, formatSmartNomorSurat, detectLetterTypeCode } from '../letters/numbering.js';
-import { callAiWithValidation, polishMessyDocumentWithAi, editDocumentWithAi } from '../ai/client.js';
+import { callAiWithValidation, polishMessyDocumentWithAi, editDocumentWithAi, convertAiBlocksToDocumentBlocks } from '../ai/client.js';
 import { COPILOT_SYSTEM_PROMPT, buildCopilotUserPrompt } from '../ai/prompts.js';
+import { summarizeKnowledgeBaseStats, describeAiMatchFeedback } from '../ai/knowledgeBase.js';
+import { renderCanvasVaultBadge, openLockedMasterSaveChoiceModal } from './vaultSaveHelper.js';
 import { renderDocx } from '../docx/render.js';
 import { downloadFile } from '../utils/download.js';
 import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
@@ -45,103 +47,35 @@ import {
   buildSignerRoleSelectorHtml,
   authorizeAndRecordOutgoing,
   requestAccForOutgoing,
-  printWithTemporaryQrOverlay
+  printWithTemporaryQrOverlay,
+  syncGlobalPrintPageStyle
 } from './printChoiceModal.js';
+import { buildSuratTugasSppdDocModel } from '../letters/templates/suratTugasSppd.js';
+import { attachInteractiveTables } from './tableInteraction.js';
+import {
+  computePrintableDimsMm,
+  mountInteractiveFloatingQr,
+  updateCanvasQrToggleButton,
+  normalizeQrPlacement,
+  findPreferredSignatureQrPlacement
+} from './qrFloatingHelper.js';
+import {
+  escapeHtmlText,
+  decodeHtmlEntities,
+  parseHtmlNodes,
+  getNodePlainText
+} from '../utils/htmlAst.js';
+import {
+  shouldAllowLayoutRestructure,
+  buildSurgicalIndexFromSmartPages,
+  applySurgicalPatchesToSmartPages
+} from '../ai/surgicalEdit.js';
+
+export { escapeHtmlText, decodeHtmlEntities, parseHtmlNodes };
 
 // =========================================================================
 // BAGIAN 1: PARSER HTML RINGAN & KONVERTER HTML <-> DOCUMENT MODEL (PURE JS)
 // =========================================================================
-
-const VOID_TAGS = new Set(['br', 'hr', 'img', 'input', 'meta', 'link']);
-
-export function escapeHtmlText(str = '') {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-export function decodeHtmlEntities(str = '') {
-  return String(str)
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-}
-
-function parseAttributes(attrStr = '') {
-  const attrs = {};
-  const re = /([a-zA-Z0-9_:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
-  let m;
-  while ((m = re.exec(attrStr)) !== null) {
-    const key = m[1].toLowerCase();
-    const val = m[2] ?? m[3] ?? m[4] ?? '';
-    attrs[key] = decodeHtmlEntities(val);
-  }
-  return attrs;
-}
-
-/**
- * Parser HTML zero-dependency (berjalan identik di Browser maupun Node.js unit test).
- * Menghasilkan daftar node AST: { type: 'element'|'text', tag, attrs, children, text }.
- */
-export function parseHtmlNodes(html = '') {
-  const root = { type: 'element', tag: 'root', attrs: {}, children: [] };
-  const stack = [root];
-  const tokenRe = /<!--[\s\S]*?-->|<\/?([a-zA-Z][a-zA-Z0-9]*)([^>]*)>|([^<]+)/g;
-  let match;
-
-  while ((match = tokenRe.exec(String(html))) !== null) {
-    if (match[3] !== undefined) {
-      const txt = decodeHtmlEntities(match[3]);
-      if (txt) {
-        stack[stack.length - 1].children.push({ type: 'text', text: txt });
-      }
-      continue;
-    }
-    if (!match[1]) continue;
-
-    const fullTag = match[0];
-    const tag = match[1].toLowerCase();
-    const rawAttrs = match[2] || '';
-    const isClosing = fullTag.startsWith('</');
-    const isSelfClosing = fullTag.endsWith('/>') || VOID_TAGS.has(tag);
-
-    if (isClosing) {
-      for (let i = stack.length - 1; i >= 1; i--) {
-        if (stack[i].tag === tag) {
-          stack.length = i;
-          break;
-        }
-      }
-    } else {
-      const node = {
-        type: 'element',
-        tag,
-        attrs: parseAttributes(rawAttrs),
-        children: []
-      };
-      stack[stack.length - 1].children.push(node);
-      if (!isSelfClosing) {
-        stack.push(node);
-      }
-    }
-  }
-
-  return root.children;
-}
-
-function getNodePlainText(node) {
-  if (!node) return '';
-  if (node.type === 'text') return node.text;
-  if (node.tag === 'br') return '\n';
-  return (node.children || []).map(getNodePlainText).join('');
-}
 
 function detectCssAlignment(node) {
   const style = (node?.attrs?.style || '').toLowerCase();
@@ -155,12 +89,50 @@ function detectCssAlignment(node) {
   return '';
 }
 
-function extractInlineRuns(nodes, inherited = {}) {
+function detectCssVerticalAlignment(node) {
+  const style = (node?.attrs?.style || '').toLowerCase();
+  const valignAttr = (node?.attrs?.valign || '').toLowerCase();
+  const m = style.match(/vertical-align\s*:\s*(top|middle|bottom|center)/);
+  const val = m ? m[1] : valignAttr;
+  if (val === 'middle' || val === 'center') return 'center';
+  if (val === 'bottom') return 'bottom';
+  if (val === 'top') return 'top';
+  return '';
+}
+
+function parseSpacingTwips(node, side = 'after') {
+  const dataKey = side === 'before' ? 'data-space-before' : 'data-space-after';
+  const rawAttr = node?.attrs?.[dataKey];
+  if (rawAttr !== undefined && rawAttr !== '') {
+    const n = Number(rawAttr);
+    if (!Number.isNaN(n) && n >= 0) return Math.round(n);
+  }
+  const style = (node?.attrs?.style || '').toLowerCase();
+  const prop = side === 'before' ? 'margin-top' : 'margin-bottom';
+  const m = style.match(new RegExp(`${prop}\\s*:\\s*([\\d.]+)\\s*(pt|px)`));
+  if (!m) return undefined;
+  const val = parseFloat(m[1]);
+  if (Number.isNaN(val) || val < 0) return undefined;
+  return m[2] === 'pt' ? Math.round(val * 20) : Math.round(val * 15);
+}
+
+function parseCssFontSizeHalfPt(node) {
+  const style = (node?.attrs?.style || '').toLowerCase();
+  const m = style.match(/font-size\s*:\s*([\d.]+)\s*pt/);
+  if (!m) return undefined;
+  const pt = parseFloat(m[1]);
+  return Number.isNaN(pt) ? undefined : Math.round(pt * 2);
+}
+
+function extractInlineRuns(nodes, inherited = {}, opts = {}) {
   const runs = [];
+  const preserveNewlines = Boolean(opts?.preserveNewlines);
 
   for (const node of nodes || []) {
     if (node.type === 'text') {
-      const clean = node.text.replace(/\s+/g, ' ');
+      const clean = preserveNewlines
+        ? node.text.replace(/[ \t\r\n]+/g, ' ')
+        : node.text.replace(/\s+/g, ' ');
       if (clean) {
         runs.push({
           text: clean,
@@ -168,7 +140,9 @@ function extractInlineRuns(nodes, inherited = {}) {
           ...(inherited.italic ? { italic: true } : {}),
           ...(inherited.underline ? { underline: true } : {}),
           ...(inherited.sup ? { sup: true } : {}),
-          ...(inherited.sub ? { sub: true } : {})
+          ...(inherited.sub ? { sub: true } : {}),
+          ...(inherited.fontSizeHalfPt ? { fontSizeHalfPt: inherited.fontSizeHalfPt } : {}),
+          ...(inherited.color ? { color: inherited.color } : {})
         });
       }
       continue;
@@ -176,24 +150,35 @@ function extractInlineRuns(nodes, inherited = {}) {
 
     if (node.type !== 'element') continue;
     if (node.tag === 'br') {
-      runs.push({ text: ' ', ...inherited });
+      runs.push({
+        text: preserveNewlines ? '\n' : ' ',
+        ...(inherited.bold ? { bold: true } : {}),
+        ...(inherited.italic ? { italic: true } : {}),
+        ...(inherited.underline ? { underline: true } : {}),
+        ...(inherited.fontSizeHalfPt ? { fontSizeHalfPt: inherited.fontSizeHalfPt } : {}),
+        ...(inherited.color ? { color: inherited.color } : {})
+      });
       continue;
     }
 
     const style = (node.attrs?.style || '').toLowerCase();
+    const fontHalf = parseCssFontSizeHalfPt(node);
+    const colorMatch = style.match(/(?:^|;)\s*color\s*:\s*#([0-9a-f]{3,8})/i);
     const nextFmt = {
       bold: inherited.bold || node.tag === 'b' || node.tag === 'strong' || /font-weight\s*:\s*(bold|700|800|900)/.test(style),
       italic: inherited.italic || node.tag === 'i' || node.tag === 'em' || /font-style\s*:\s*italic/.test(style),
       underline: inherited.underline || node.tag === 'u' || /text-decoration[^;]*underline/.test(style),
       sup: inherited.sup || node.tag === 'sup',
-      sub: inherited.sub || node.tag === 'sub'
+      sub: inherited.sub || node.tag === 'sub',
+      fontSizeHalfPt: fontHalf || inherited.fontSizeHalfPt,
+      color: colorMatch ? colorMatch[1].toUpperCase() : inherited.color
     };
 
-    const inner = extractInlineRuns(node.children, nextFmt);
+    const inner = extractInlineRuns(node.children, nextFmt, opts);
     runs.push(...inner);
   }
 
-  // Merge adjacent runs with identical formatting and trim leading/trailing overall whitespace cleanly
+  // Merge adjacent runs with identical formatting cleanly
   const merged = [];
   for (const r of runs) {
     const prev = merged[merged.length - 1];
@@ -203,7 +188,9 @@ function extractInlineRuns(nodes, inherited = {}) {
       Boolean(prev.italic) === Boolean(r.italic) &&
       Boolean(prev.underline) === Boolean(r.underline) &&
       Boolean(prev.sup) === Boolean(r.sup) &&
-      Boolean(prev.sub) === Boolean(r.sub)
+      Boolean(prev.sub) === Boolean(r.sub) &&
+      (prev.fontSizeHalfPt || 0) === (r.fontSizeHalfPt || 0) &&
+      (prev.color || '') === (r.color || '')
     ) {
       prev.text += r.text;
     } else {
@@ -213,21 +200,142 @@ function extractInlineRuns(nodes, inherited = {}) {
   return merged;
 }
 
+function parseCellParagraphChild(pNode) {
+  const align = detectCssAlignment(pNode);
+  const spacingBefore = parseSpacingTwips(pNode, 'before');
+  const spacingAfter = parseSpacingTwips(pNode, 'after');
+  if (pNode?.attrs?.['data-qr-slot'] === 'true') {
+    return {
+      text: '',
+      align: align || 'center',
+      qrSlot: true,
+      qrCaption: pNode.attrs?.['data-qr-caption'] || 'Disahkan secara elektronik',
+      ...(spacingBefore !== undefined ? { spacingBefore } : {}),
+      ...(spacingAfter !== undefined ? { spacingAfter } : {})
+    };
+  }
+  const runs = extractInlineRuns(pNode.children, {}, { preserveNewlines: true });
+  const rawText = getNodePlainText(pNode).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim();
+  const nonEmptyRuns = runs.filter(r => (r.text || '').trim());
+  const allBold = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.bold);
+  const allItalic = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.italic);
+  const allUnderline = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.underline);
+  const firstFont = nonEmptyRuns[0]?.fontSizeHalfPt;
+  const uniformFont = firstFont && nonEmptyRuns.every(r => r.fontSizeHalfPt === firstFont) ? firstFont : undefined;
+
+  const res = {
+    text: rawText,
+    ...(align ? { align } : {}),
+    ...(allBold ? { bold: true } : {}),
+    ...(allItalic ? { italic: true } : {}),
+    ...(allUnderline ? { underline: true } : {}),
+    ...(uniformFont ? { fontSizeHalfPt: uniformFont } : {}),
+    ...(spacingBefore !== undefined ? { spacingBefore } : {}),
+    ...(spacingAfter !== undefined ? { spacingAfter } : {})
+  };
+  if (nonEmptyRuns.length > 1 && !(allBold && allItalic === Boolean(nonEmptyRuns[0]?.italic) && allUnderline === Boolean(nonEmptyRuns[0]?.underline))) {
+    res.runs = runs;
+  }
+  return res;
+}
+
+function extractRichCellData(cellNode) {
+  const plainText = getNodePlainText(cellNode).replace(/\s+/g, ' ').trim();
+  const multilineText = getNodePlainText(cellNode).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n+$/, '').trim();
+  const colspan = Math.max(1, parseInt(cellNode.attrs?.colspan || '1', 10) || 1);
+  const rowspan = Math.max(1, parseInt(cellNode.attrs?.rowspan || '1', 10) || 1);
+  const align = detectCssAlignment(cellNode);
+  const vAlign = detectCssVerticalAlignment(cellNode);
+  const qrSlot = cellNode.attrs?.['data-qr-slot'] === 'true';
+
+  const blockChildren = (cellNode.children || []).filter(ch => ch.type === 'element' && (ch.tag === 'p' || ch.tag === 'div'));
+  if (blockChildren.length > 0) {
+    const paragraphs = blockChildren.map(parseCellParagraphChild);
+    const modelObj = {
+      paragraphs,
+      ...(colspan > 1 ? { colspan } : {}),
+      ...(rowspan > 1 ? { rowspan } : {}),
+      ...(vAlign ? { vAlign } : {}),
+      ...(qrSlot ? { qrSlot: true } : {})
+    };
+    return { plainText, isRich: true, modelObj };
+  }
+
+  const runs = extractInlineRuns(cellNode.children, {}, { preserveNewlines: true });
+  const nonEmptyRuns = runs.filter(r => (r.text || '').trim());
+  const hasInlineFmt = nonEmptyRuns.some(r => r.bold || r.italic || r.underline || r.fontSizeHalfPt || r.color);
+  const hasMultiline = multilineText.includes('\n');
+  const isRich = colspan > 1 || rowspan > 1 || Boolean(align) || Boolean(vAlign) || qrSlot || hasInlineFmt || hasMultiline;
+
+  if (!isRich) {
+    return { plainText, isRich: false, modelObj: plainText };
+  }
+
+  const allBold = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.bold);
+  const allItalic = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.italic);
+  const allUnderline = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.underline);
+  const modelObj = {
+    text: multilineText || plainText,
+    ...(colspan > 1 ? { colspan } : {}),
+    ...(rowspan > 1 ? { rowspan } : {}),
+    ...(align ? { align } : {}),
+    ...(vAlign ? { vAlign } : {}),
+    ...(allBold ? { bold: true } : {}),
+    ...(allItalic ? { italic: true } : {}),
+    ...(allUnderline ? { underline: true } : {}),
+    ...(qrSlot ? { qrSlot: true } : {})
+  };
+  if (hasInlineFmt && nonEmptyRuns.length > 1) {
+    modelObj.paragraphs = multilineText.split(/\r?\n/).map(line => ({ text: line, ...(align ? { align } : {}), ...(allBold ? { bold: true } : {}) }));
+  }
+  return { plainText, isRich: true, modelObj };
+}
+
+function parseTableColWidthsPct(tableNode) {
+  const attr = (tableNode?.attrs?.['data-col-widths'] || '').trim();
+  if (attr) {
+    const parsed = attr.split(',').map(v => parseFloat(v.trim())).filter(n => !Number.isNaN(n) && n > 0);
+    if (parsed.length > 0) return parsed;
+  }
+  const colgroup = (tableNode?.children || []).find(c => c.type === 'element' && c.tag === 'colgroup');
+  if (colgroup) {
+    const cols = (colgroup.children || []).filter(c => c.type === 'element' && c.tag === 'col');
+    const widths = cols.map(c => {
+      const m = (c.attrs?.style || '').match(/width\s*:\s*([\d.]+)\s*%/i);
+      return m ? parseFloat(m[1]) : 0;
+    });
+    if (widths.length > 0 && widths.every(w => w > 0)) return widths;
+  }
+  return [];
+}
+
 function collectTableRows(tableNode) {
   const rows = [];
-  const walk = (n) => {
+  const walk = (n, inThead = false) => {
     if (!n || n.type !== 'element') return;
     if (n.tag === 'tr') {
-      const cells = (n.children || []).filter(c => c.type === 'element' && (c.tag === 'td' || c.tag === 'th'));
+      const cellNodes = (n.children || []).filter(c => c.type === 'element' && (c.tag === 'td' || c.tag === 'th'));
+      const style = (n.attrs?.style || '').toLowerCase();
+      let minHeightCm = parseFloat(n.attrs?.['data-min-height'] || '0') || 0;
+      if (!minHeightCm) {
+        const mh = style.match(/(?:min-)?height\s*:\s*([\d.]+)\s*(cm|px)/i);
+        if (mh) {
+          minHeightCm = mh[2] === 'cm' ? parseFloat(mh[1]) : Math.round((parseFloat(mh[1]) / 37.795) * 100) / 100;
+        }
+      }
+      const parsedCells = cellNodes.map(extractRichCellData);
       rows.push({
-        isHeader: cells.length > 0 && cells.every(c => c.tag === 'th'),
-        cells: cells.map(c => getNodePlainText(c).replace(/\s+/g, ' ').trim())
+        isHeader: n.attrs?.['data-header'] === 'true' || inThead || (cellNodes.length > 0 && cellNodes.every(c => c.tag === 'th')),
+        minHeightCm,
+        cells: parsedCells.map(pc => pc.plainText),
+        richCells: parsedCells
       });
       return;
     }
-    (n.children || []).forEach(walk);
+    const nextInThead = inThead || n.tag === 'thead';
+    (n.children || []).forEach(child => walk(child, nextInThead));
   };
-  walk(tableNode);
+  walk(tableNode, false);
   return rows;
 }
 
@@ -281,161 +389,226 @@ function collectLinesFromCell(cellNode) {
   return lines;
 }
 
+const CONTAINER_BLOCK_TAGS = new Set(['table', 'p', 'div', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'blockquote']);
+
+function hasNestedBlockChild(node) {
+  return (node?.children || []).some(ch => ch?.type === 'element' && (CONTAINER_BLOCK_TAGS.has(ch.tag) || hasNestedBlockChild(ch)));
+}
+
 /**
  * Mengonversi HTML satu halaman Smart Canvas menjadi daftar blok DocumentModel terstruktur.
  */
 export function parseSmartPageHtmlToBlocks(html = '', schoolProfile = {}) {
-  const nodes = parseHtmlNodes(html).filter(n => !(n.type === 'text' && !n.text.trim()));
   const blocks = [];
 
-  for (let idx = 0; idx < nodes.length; idx++) {
-    const node = nodes[idx];
+  const processBlockNodes = (rawNodes = []) => {
+    const nodes = (rawNodes || []).filter(n => !(n.type === 'text' && !n.text.trim()));
+    for (let idx = 0; idx < nodes.length; idx++) {
+      const node = nodes[idx];
 
-    if (node.type === 'text') {
-      const txt = node.text.trim();
-      if (txt) {
-        blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: txt }] });
-      }
-      continue;
-    }
-
-    if (node.type !== 'element') continue;
-    const role = node.attrs?.['data-smart-role'] || '';
-
-    // 1. Judul + Nomor (+ opsional Meta Recipient bila tepat mengikuti)
-    if (role === 'title') {
-      const titleText = getNodePlainText(node).replace(/\s+/g, ' ').trim();
-      let nomorText = '';
-      let metaRecipient = null;
-
-      const nextNode = nodes[idx + 1];
-      if (nextNode?.type === 'element' && nextNode.attrs?.['data-smart-role'] === 'nomor') {
-        nomorText = getNodePlainText(nextNode).replace(/\s+/g, ' ').trim();
-        idx++;
+      if (node.type === 'text') {
+        const txt = node.text.trim();
+        if (txt) {
+          blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: txt }] });
+        }
+        continue;
       }
 
-      const afterNomorNode = nodes[idx + 1];
-      if (afterNomorNode?.type === 'element' && afterNomorNode.attrs?.['data-smart-role'] === 'meta-recipient') {
-        metaRecipient = parseMetaRecipientTable(afterNomorNode);
-        idx++;
+      if (node.type !== 'element') continue;
+      const role = node.attrs?.['data-smart-role'] || '';
+
+      // 1. Judul + Nomor (+ opsional Meta Recipient bila tepat mengikuti)
+      if (role === 'title') {
+        const titleText = getNodePlainText(node).replace(/\s+/g, ' ').trim();
+        let nomorText = '';
+        let metaRecipient = null;
+
+        const nextNode = nodes[idx + 1];
+        if (nextNode?.type === 'element' && nextNode.attrs?.['data-smart-role'] === 'nomor') {
+          nomorText = getNodePlainText(nextNode).replace(/\s+/g, ' ').trim();
+          idx++;
+        }
+
+        const afterNomorNode = nodes[idx + 1];
+        if (afterNomorNode?.type === 'element' && afterNomorNode.attrs?.['data-smart-role'] === 'meta-recipient') {
+          metaRecipient = parseMetaRecipientTable(afterNomorNode);
+          idx++;
+        }
+
+        blocks.push({
+          type: 'letterTitle',
+          title: titleText,
+          nomor: nomorText,
+          ...(metaRecipient ? { metaRecipient } : {})
+        });
+        continue;
       }
 
-      blocks.push({
-        type: 'letterTitle',
-        title: titleText,
-        nomor: nomorText,
-        ...(metaRecipient ? { metaRecipient } : {})
-      });
-      continue;
-    }
+      if (role === 'nomor') {
+        const nomorText = getNodePlainText(node).replace(/\s+/g, ' ').trim();
+        if (nomorText) {
+          blocks.push({
+            type: 'paragraph',
+            style: 'letterBody',
+            alignment: 'center',
+            runs: [{ text: nomorText }]
+          });
+        }
+        continue;
+      }
 
-    if (role === 'nomor') {
-      const nomorText = getNodePlainText(node).replace(/\s+/g, ' ').trim();
-      if (nomorText) {
+      if (role === 'meta-recipient') {
+        blocks.push({
+          type: 'letterMetaRecipient',
+          ...parseMetaRecipientTable(node)
+        });
+        continue;
+      }
+
+      // 2. Tabel (Identity Table / Signature Table / Bordered Word Grid Table)
+      if (node.tag === 'table') {
+        if (role === 'signature') {
+          const lines = parseSignatureCellLines(node);
+          const sigBlock = parseSignatureLinesToBlock(lines, schoolProfile);
+          blocks.push(sigBlock);
+          continue;
+        }
+
+        const rows = collectTableRows(node);
+        if (rows.length === 0) continue;
+
+        if (role === 'identity-table') {
+          const idColWidths = parseTableColWidthsPct(node);
+          blocks.push({
+            type: 'identityTable',
+            ...(idColWidths.length >= 2 ? { colWidthsPct: idColWidths } : {}),
+            rows: rows.map(r => ({
+              label: r.cells[0] || '',
+              value: r.cells[1] !== undefined ? r.cells[1] : ''
+            }))
+          });
+          continue;
+        }
+
+        const classAttr = (node.attrs?.class || '').toLowerCase();
+        const borderStyle = node.attrs?.['data-border-style']
+          || (classAttr.includes('smart-table-sppd') ? 'sppd' : classAttr.includes('smart-table-none') ? 'none' : 'grid');
+        const headerShading = node.attrs?.['data-header-shading'] === 'false' || classAttr.includes('no-header-bg')
+          ? false
+          : (node.attrs?.['data-header-shading'] === 'true' ? true : undefined);
+        const headerBold = node.attrs?.['data-header-bold'] === 'false' || classAttr.includes('no-header-bold')
+          ? false
+          : (node.attrs?.['data-header-bold'] === 'true' ? true : undefined);
+        const colWidthsPct = parseTableColWidthsPct(node);
+        const tableWidthPct = parseFloat(node.attrs?.['data-table-width-pct'] || '0') || 0;
+
+        const hasRichRowMeta = rows.some((r, rIdx) => r.minHeightCm > 0 || (r.isHeader && rIdx > 0));
+        const hasRichCells = rows.some(r => r.richCells.some(c => c.isRich));
+        const isRichTable = borderStyle !== 'grid' || headerShading !== undefined || headerBold !== undefined || colWidthsPct.length > 0 || (tableWidthPct > 0 && tableWidthPct < 100) || hasRichRowMeta || hasRichCells;
+
+        if (!isRichTable) {
+          blocks.push({
+            type: 'table',
+            headerRow: rows[0]?.isHeader || false,
+            rows: rows.map(r => r.cells)
+          });
+        } else {
+          const formattedRows = rows.map(r => {
+            const cellList = r.richCells.map(c => c.modelObj);
+            if (hasRichRowMeta || r.minHeightCm > 0) {
+              return {
+                isHeader: Boolean(r.isHeader),
+                ...(r.minHeightCm > 0 ? { minHeightCm: r.minHeightCm } : {}),
+                cells: cellList
+              };
+            }
+            return cellList;
+          });
+          blocks.push({
+            type: 'table',
+            borderStyle,
+            headerRow: rows.some(r => r.isHeader),
+            ...(headerShading !== undefined ? { headerShading } : {}),
+            ...(headerBold !== undefined ? { headerBold } : {}),
+            ...(colWidthsPct.length > 0 ? { colWidthsPct } : {}),
+            ...(tableWidthPct > 0 && tableWidthPct < 100 ? { tableWidthPct } : {}),
+            rows: formattedRows
+          });
+        }
+        continue;
+      }
+
+      // 3. List (<ul> / <ol>)
+      if (node.tag === 'ul' || node.tag === 'ol') {
+        const items = (node.children || [])
+          .filter(c => c.type === 'element' && c.tag === 'li')
+          .map(li => {
+            const runs = extractInlineRuns(li.children);
+            return runs.length > 0 ? runs : [{ text: getNodePlainText(li).trim() }];
+          })
+          .filter(item => item.some(r => r.text.trim()));
+
+        if (items.length > 0) {
+          blocks.push({
+            type: 'list',
+            ordered: node.tag === 'ol',
+            items
+          });
+        }
+        continue;
+      }
+
+      // 4. Headings (<h1>, <h2>, <h3>)
+      if (['h1', 'h2', 'h3', 'h4'].includes(node.tag)) {
+        const txt = getNodePlainText(node).replace(/\s+/g, ' ').trim();
+        if (!txt) continue;
+        const align = detectCssAlignment(node) || 'left';
         blocks.push({
           type: 'paragraph',
           style: 'letterBody',
-          alignment: 'center',
-          runs: [{ text: nomorText }]
+          alignment: align,
+          runs: [{ text: txt, bold: true }]
         });
-      }
-      continue;
-    }
-
-    if (role === 'meta-recipient') {
-      blocks.push({
-        type: 'letterMetaRecipient',
-        ...parseMetaRecipientTable(node)
-      });
-      continue;
-    }
-
-    // 2. Tabel (Identity Table / Signature Table / Bordered Word Grid Table)
-    if (node.tag === 'table') {
-      if (role === 'signature') {
-        const lines = parseSignatureCellLines(node);
-        const sigBlock = parseSignatureLinesToBlock(lines, schoolProfile);
-        blocks.push(sigBlock);
         continue;
       }
 
-      const rows = collectTableRows(node);
-      if (rows.length === 0) continue;
+      // 4B. Container div pembungkus blok (<div ...><table>...</table></div>): buka isinya secara rekursif agar tabel tidak rata jadi teks
+      if ((node.tag === 'div' || node.tag === 'blockquote' || node.tag === 'section') && hasNestedBlockChild(node)) {
+        processBlockNodes(node.children || []);
+        continue;
+      }
 
-      if (role === 'identity-table') {
+      // 5. Paragraph / Leaf Div standar MS Word
+      if (node.tag === 'p' || node.tag === 'div' || node.tag === 'blockquote') {
+        const spacingBefore = parseSpacingTwips(node, 'before');
+        const spacingAfter = parseSpacingTwips(node, 'after');
+        const pFontHalf = parseCssFontSizeHalfPt(node);
+        const rawTxt = getNodePlainText(node).replace(/\u00a0/g, ' ').trim();
+        if (!rawTxt) {
+          blocks.push({
+            type: 'paragraph',
+            style: 'letterBody',
+            ...(spacingBefore !== undefined ? { spacingBefore } : {}),
+            ...(spacingAfter !== undefined ? { spacingAfter } : {}),
+            runs: [{ text: '' }]
+          });
+          continue;
+        }
+        const runs = extractInlineRuns(node.children, pFontHalf ? { fontSizeHalfPt: pFontHalf } : {});
+        const alignment = detectCssAlignment(node);
         blocks.push({
-          type: 'identityTable',
-          rows: rows.map(r => ({
-            label: r.cells[0] || '',
-            value: r.cells[1] !== undefined ? r.cells[1] : ''
-          }))
-        });
-        continue;
-      }
-
-      // Word custom grid table
-      blocks.push({
-        type: 'table',
-        headerRow: rows[0]?.isHeader || false,
-        rows: rows.map(r => r.cells)
-      });
-      continue;
-    }
-
-    // 3. List (<ul> / <ol>)
-    if (node.tag === 'ul' || node.tag === 'ol') {
-      const items = (node.children || [])
-        .filter(c => c.type === 'element' && c.tag === 'li')
-        .map(li => {
-          const runs = extractInlineRuns(li.children);
-          return runs.length > 0 ? runs : [{ text: getNodePlainText(li).trim() }];
-        })
-        .filter(item => item.some(r => r.text.trim()));
-
-      if (items.length > 0) {
-        blocks.push({
-          type: 'list',
-          ordered: node.tag === 'ol',
-          items
+          type: 'paragraph',
+          style: 'letterBody',
+          ...(alignment ? { alignment } : {}),
+          ...(spacingBefore !== undefined ? { spacingBefore } : {}),
+          ...(spacingAfter !== undefined ? { spacingAfter } : {}),
+          runs: runs.length > 0 ? runs : [{ text: rawTxt, ...(pFontHalf ? { fontSizeHalfPt: pFontHalf } : {}) }]
         });
       }
-      continue;
     }
+  };
 
-    // 4. Headings (<h1>, <h2>, <h3>)
-    if (['h1', 'h2', 'h3', 'h4'].includes(node.tag)) {
-      const txt = getNodePlainText(node).replace(/\s+/g, ' ').trim();
-      if (!txt) continue;
-      // Render heading sebagai paragraf tebal rapi untuk surat dinas agar tidak memicu penomoran BAB otomatis di Word
-      const align = detectCssAlignment(node) || 'left';
-      blocks.push({
-        type: 'paragraph',
-        style: 'letterBody',
-        alignment: align,
-        runs: [{ text: txt, bold: true }]
-      });
-      continue;
-    }
-
-    // 5. Paragraph / Div standar MS Word
-    if (node.tag === 'p' || node.tag === 'div') {
-      const rawTxt = getNodePlainText(node).replace(/\u00a0/g, ' ').trim();
-      if (!rawTxt) {
-        // Baris kosong tetap dipertahankan sebagai spasi paragraf
-        blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: '' }] });
-        continue;
-      }
-      const runs = extractInlineRuns(node.children);
-      const alignment = detectCssAlignment(node);
-      blocks.push({
-        type: 'paragraph',
-        style: 'letterBody',
-        ...(alignment ? { alignment } : {}),
-        runs: runs.length > 0 ? runs : [{ text: rawTxt }]
-      });
-    }
-  }
-
+  processBlockNodes(parseHtmlNodes(html));
   return blocks;
 }
 
@@ -600,14 +773,157 @@ export function buildDocModelFromSmartPagesData({
 function runsToHtml(runs = []) {
   if (!Array.isArray(runs) || runs.length === 0) return '';
   return runs.map((r) => {
-    let html = escapeHtmlText(r.text || '');
+    let html = escapeHtmlText(r.text || '').replace(/\r?\n/g, '<br>');
     if (r.bold) html = `<strong>${html}</strong>`;
     if (r.italic) html = `<em>${html}</em>`;
     if (r.underline) html = `<u>${html}</u>`;
     if (r.sup) html = `<sup>${html}</sup>`;
     if (r.sub) html = `<sub>${html}</sub>`;
+    const styleParts = [];
+    if (r.fontSizeHalfPt && r.fontSizeHalfPt !== 24) {
+      styleParts.push(`font-size: ${Math.round((r.fontSizeHalfPt / 2) * 10) / 10}pt`);
+    }
+    if (r.color) {
+      styleParts.push(`color: #${String(r.color).replace(/^#/, '')}`);
+    }
+    if (styleParts.length > 0) {
+      html = `<span style="${styleParts.join('; ')}">${html}</span>`;
+    }
     return html;
   }).join('');
+}
+
+function renderTableCellParagraphHtml(p = {}) {
+  const spParts = [];
+  if (p.align) spParts.push(`text-align: ${p.align === 'both' ? 'justify' : p.align};`);
+  if (p.spacingBefore !== undefined && p.spacingBefore > 0) {
+    spParts.push(`margin-top: ${(p.spacingBefore / 20).toFixed(1)}pt;`);
+  }
+  if (p.spacingAfter !== undefined && p.spacingAfter > 0) {
+    spParts.push(`margin-bottom: ${(p.spacingAfter / 20).toFixed(1)}pt;`);
+  }
+  const dataAttrs = `${p.spacingBefore !== undefined ? ` data-space-before="${p.spacingBefore}"` : ''}${p.spacingAfter !== undefined ? ` data-space-after="${p.spacingAfter}"` : ''}`;
+
+  if (p.qrSlot) {
+    return `<p class="smart-qr-slot" data-qr-slot="true"${p.qrCaption ? ` data-qr-caption="${escapeHtmlText(p.qrCaption)}"` : ''}${dataAttrs} style="${spParts.join(' ') || 'text-align: center;'}"></p>`;
+  }
+
+  const inner = Array.isArray(p.runs) && p.runs.length > 0
+    ? runsToHtml(p.runs)
+    : runsToHtml([{
+        text: p.text ?? '',
+        bold: p.bold,
+        italic: p.italic,
+        underline: p.underline,
+        fontSizeHalfPt: p.fontSizeHalfPt,
+        color: p.color
+      }]);
+  const styleAttr = spParts.length > 0 ? ` style="${spParts.join(' ')}"` : '';
+  return `<p${dataAttrs}${styleAttr}>${inner || '<br>'}</p>`;
+}
+
+function renderRichTableCellHtml(cell, tag = 'td') {
+  if (cell && typeof cell === 'object' && !Array.isArray(cell)) {
+    const attrs = [];
+    if (cell.colspan > 1) attrs.push(`colspan="${cell.colspan}"`);
+    if (cell.rowspan > 1) attrs.push(`rowspan="${cell.rowspan}"`);
+    if (cell.qrSlot) attrs.push(`data-qr-slot="true"`);
+    if (cell.qrCaption) attrs.push(`data-qr-caption="${escapeHtmlText(cell.qrCaption)}"`);
+
+    const styles = [];
+    if (cell.align) styles.push(`text-align: ${cell.align === 'both' ? 'justify' : cell.align};`);
+    if (cell.vAlign) styles.push(`vertical-align: ${cell.vAlign === 'center' ? 'middle' : cell.vAlign};`);
+    if (styles.length > 0) attrs.push(`style="${styles.join(' ')}"`);
+    const attrStr = attrs.length > 0 ? ` ${attrs.join(' ')}` : '';
+
+    if (Array.isArray(cell.paragraphs) && cell.paragraphs.length > 0) {
+      return `<${tag}${attrStr}>${cell.paragraphs.map(renderTableCellParagraphHtml).join('')}</${tag}>`;
+    }
+
+    const inner = Array.isArray(cell.runs) && cell.runs.length > 0
+      ? runsToHtml(cell.runs)
+      : runsToHtml([{
+          text: cell.text ?? '',
+          bold: cell.bold,
+          italic: cell.italic,
+          underline: cell.underline,
+          fontSizeHalfPt: cell.fontSizeHalfPt,
+          color: cell.color
+        }]);
+    return `<${tag}${attrStr}>${inner}</${tag}>`;
+  }
+  return `<${tag}>${escapeHtmlText(cell ?? '').replace(/\r?\n/g, '<br>')}</${tag}>`;
+}
+
+function renderTableBlockToHtml(b = {}) {
+  const rows = b.rows || [];
+  const borderStyle = b.borderStyle || 'grid';
+  const classes = ['smart-word-table'];
+  if (borderStyle === 'sppd') classes.push('smart-table-sppd');
+  if (borderStyle === 'none') classes.push('smart-table-none');
+  if (b.headerShading === false) classes.push('no-header-bg');
+  if (b.headerBold === false) classes.push('no-header-bold');
+
+  const attrs = [`class="${classes.join(' ')}"`];
+  if (borderStyle !== 'grid') attrs.push(`data-border-style="${borderStyle}"`);
+  if (b.headerShading === false) attrs.push('data-header-shading="false"');
+  if (b.headerBold === false) attrs.push('data-header-bold="false"');
+  if (Array.isArray(b.colWidthsPct) && b.colWidthsPct.length > 0) {
+    attrs.push(`data-col-widths="${b.colWidthsPct.join(',')}"`);
+  }
+  if (b.tableWidthPct && Number(b.tableWidthPct) >= 30 && Number(b.tableWidthPct) < 100) {
+    attrs.push(`data-table-width-pct="${b.tableWidthPct}"`);
+    attrs.push(`style="width: ${b.tableWidthPct}%;"`);
+  }
+
+  const colgroupHtml = Array.isArray(b.colWidthsPct) && b.colWidthsPct.length > 0
+    ? `<colgroup>${b.colWidthsPct.map(w => `<col style="width: ${w}%;">`).join('')}</colgroup>`
+    : '';
+
+  const headRows = [];
+  const bodyRows = [];
+  let reachedBody = false;
+
+  rows.forEach((rowEntry, idx) => {
+    const rowObj = (rowEntry && typeof rowEntry === 'object' && !Array.isArray(rowEntry))
+      ? {
+          cells: rowEntry.cells || [],
+          isHeader: 'isHeader' in rowEntry ? Boolean(rowEntry.isHeader) : (b.headerRow !== false && idx === 0),
+          minHeightCm: Number(rowEntry.minHeightCm) || 0
+        }
+      : {
+          cells: Array.isArray(rowEntry) ? rowEntry : [],
+          isHeader: b.headerRow !== false && idx === 0,
+          minHeightCm: 0
+        };
+
+    if (!reachedBody && rowObj.isHeader) {
+      headRows.push(rowObj);
+    } else {
+      reachedBody = true;
+      bodyRows.push(rowObj);
+    }
+  });
+
+  const renderRowHtml = (rowObj, tag) => {
+    const rAttrs = [];
+    if (rowObj.isHeader) rAttrs.push('data-header="true"');
+    if (rowObj.minHeightCm > 0) {
+      rAttrs.push(`data-min-height="${rowObj.minHeightCm}"`);
+      rAttrs.push(`style="height: ${rowObj.minHeightCm}cm;"`);
+    }
+    const rAttrStr = rAttrs.length > 0 ? ` ${rAttrs.join(' ')}` : '';
+    return `<tr${rAttrStr}>${(rowObj.cells || []).map(c => renderRichTableCellHtml(c, tag)).join('')}</tr>`;
+  };
+
+  const headHtml = headRows.length > 0
+    ? `<thead>${headRows.map(r => renderRowHtml(r, 'th')).join('')}</thead>`
+    : '';
+  const bodyHtml = bodyRows.length > 0
+    ? `<tbody>${bodyRows.map(r => renderRowHtml(r, 'td')).join('')}</tbody>`
+    : '';
+
+  return `<table ${attrs.join(' ')}>${colgroupHtml}${headHtml}${bodyHtml}</table>`;
 }
 
 /**
@@ -650,24 +966,22 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
     }
 
     if (b.type === 'identityTable') {
+      const hasCustomW = Array.isArray(b.colWidthsPct) && b.colWidthsPct.length >= 2;
+      const w0 = hasCustomW ? b.colWidthsPct[0] : 30;
+      const w1 = hasCustomW ? b.colWidthsPct[1] : 70;
+      const colAttr = hasCustomW ? ` data-col-widths="${w0},${w1}"` : '';
+      const colGroup = hasCustomW ? `<colgroup><col style="width: ${w0}%;"><col style="width: ${w1}%;"></colgroup>` : '';
       const rowsHtml = (b.rows || []).map(r => {
         const val = (r.value || '').trim();
         const normVal = val.startsWith(':') ? val : (val ? `: ${val}` : ': ');
-        return `<tr><td style="width: 30%;">${escapeHtmlText(r.label || '')}</td><td>${escapeHtmlText(normVal)}</td></tr>`;
+        return `<tr><td style="width: ${w0}%;">${escapeHtmlText(r.label || '')}</td><td>${escapeHtmlText(normVal)}</td></tr>`;
       }).join('');
-      currentParts.push(`<table class="smart-identity-table" data-smart-role="identity-table"><tbody>${rowsHtml}</tbody></table>`);
+      currentParts.push(`<table class="smart-identity-table" data-smart-role="identity-table"${colAttr}>${colGroup}<tbody>${rowsHtml}</tbody></table>`);
       continue;
     }
 
     if (b.type === 'table') {
-      const rows = b.rows || [];
-      const hasHeader = b.headerRow !== false && rows.length > 0;
-      const headHtml = hasHeader
-        ? `<thead><tr>${(rows[0] || []).map(c => `<th>${escapeHtmlText(typeof c === 'object' ? c.text : c)}</th>`).join('')}</tr></thead>`
-        : '';
-      const bodyRows = hasHeader ? rows.slice(1) : rows;
-      const bodyHtml = `<tbody>${bodyRows.map(row => `<tr>${(row || []).map(c => `<td>${escapeHtmlText(typeof c === 'object' ? c.text : c)}</td>`).join('')}</tr>`).join('')}</tbody>`;
-      currentParts.push(`<table class="smart-word-table">${headHtml}${bodyHtml}</table>`);
+      currentParts.push(renderTableBlockToHtml(b));
       continue;
     }
 
@@ -696,10 +1010,19 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
 
     if (b.type === 'paragraph') {
       const inner = b.runs ? runsToHtml(b.runs) : escapeHtmlText(b.text || '');
-      const alignCss = b.alignment
-        ? ` style="text-align: ${b.alignment === 'both' ? 'justify' : b.alignment};"`
-        : '';
-      currentParts.push(`<p${alignCss}>${inner || '<br>'}</p>`);
+      const styleParts = [];
+      if (b.alignment) {
+        styleParts.push(`text-align: ${b.alignment === 'both' ? 'justify' : b.alignment};`);
+      }
+      if (b.spacingBefore !== undefined && b.spacingBefore > 0) {
+        styleParts.push(`margin-top: ${(b.spacingBefore / 20).toFixed(1)}pt;`);
+      }
+      if (b.spacingAfter !== undefined && b.spacingAfter > 0) {
+        styleParts.push(`margin-bottom: ${(b.spacingAfter / 20).toFixed(1)}pt;`);
+      }
+      const dataAttrs = `${b.spacingBefore !== undefined ? ` data-space-before="${b.spacingBefore}"` : ''}${b.spacingAfter !== undefined ? ` data-space-after="${b.spacingAfter}"` : ''}`;
+      const styleAttr = styleParts.length > 0 ? ` style="${styleParts.join(' ')}"` : '';
+      currentParts.push(`<p${dataAttrs}${styleAttr}>${inner || '<br>'}</p>`);
     }
   }
 
@@ -797,9 +1120,27 @@ export function extractSmartSnapshotFromPages(pages = [], schoolProfile = {}) {
       tujuan = (b.recipientLines || []).join(' ');
     } else if (b.type === 'identityTable') {
       bodyBlocks.push({ type: 'identityTable', rows: b.rows || [] });
+    } else if (b.type === 'table') {
+      bodyBlocks.push({
+        type: 'table',
+        borderStyle: b.borderStyle || 'grid',
+        headerRow: b.headerRow !== false,
+        ...(b.headerShading !== undefined ? { headerShading: b.headerShading } : {}),
+        ...(b.headerBold !== undefined ? { headerBold: b.headerBold } : {}),
+        ...(Array.isArray(b.colWidthsPct) ? { colWidthsPct: b.colWidthsPct } : {}),
+        rows: b.rows || []
+      });
+    } else if (b.type === 'pageBreak') {
+      bodyBlocks.push({ type: 'pageBreak' });
     } else if (b.type === 'paragraph') {
       const txt = (b.runs || []).map(r => r.text).join('').trim();
-      if (txt) bodyBlocks.push({ type: 'paragraph', text: txt });
+      if (txt) {
+        bodyBlocks.push({
+          type: 'paragraph',
+          text: txt,
+          ...(b.alignment ? { alignment: b.alignment } : {})
+        });
+      }
     } else if (b.type === 'list') {
       const itemsText = (b.items || []).map(it => (Array.isArray(it) ? it.map(r => r.text).join('') : String(it)));
       itemsText.forEach((it, idx) => bodyBlocks.push({ type: 'paragraph', text: `${idx + 1}. ${it}` }));
@@ -831,6 +1172,17 @@ export function extractSmartSnapshotFromPages(pages = [], schoolProfile = {}) {
  * menjadi DocumentModel lengkap siap ditampilkan di Smart Word Canvas.
  */
 export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, letterOptions = {}) {
+  if (parsedJson.templatePreset === 'surat_tugas_sppd') {
+    return buildSuratTugasSppdDocModel(
+      parsedJson.formData || parsedJson,
+      schoolProfile,
+      {
+        ...letterOptions,
+        paperSize: parsedJson.paperSize || letterOptions.paperSize || 'f4'
+      }
+    );
+  }
+
   const title = (parsedJson.letterTitle || parsedJson.title || 'SURAT DINAS SEKOLAH').trim();
   const contextText = `${title} ${parsedJson.hal || parsedJson.perihal || ''}`;
   const rawNomor = (parsedJson.nomorSurat || '').trim();
@@ -865,42 +1217,27 @@ export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, lette
         ]
       };
 
-  blocks.push({
-    type: 'letterTitle',
-    title: title.toUpperCase(),
-    nomor: `Nomor: ${nomorFinal}`,
-    ...(metaRecipient ? { metaRecipient } : {})
-  });
+  blocks.push(
+    {
+      type: 'letterTitle',
+      title: title.toUpperCase(),
+      nomor: `Nomor: ${nomorFinal}`,
+      ...(metaRecipient ? { metaRecipient } : {})
+    },
+    ...convertAiBlocksToDocumentBlocks(parsedJson.blocks)
+  );
 
-  if (Array.isArray(parsedJson.blocks)) {
-    for (const b of parsedJson.blocks) {
-      if (b.type === 'paragraph' && b.text) {
-        blocks.push({
-          type: 'paragraph',
-          style: 'letterBody',
-          runs: [{ text: b.text.trim() }]
-        });
-      } else if (b.type === 'identityTable' && Array.isArray(b.rows)) {
-        blocks.push({
-          type: 'identityTable',
-          rows: b.rows.map(r => ({
-            label: r.label || '',
-            value: (r.value || '').startsWith(':') ? r.value : `: ${r.value || ''}`
-          }))
-        });
-      }
-    }
+  if (parsedJson.hideSignature !== true) {
+    const sig = parsedJson.signer || {};
+    blocks.push({
+      type: 'letterSignature',
+      city: sig.city || schoolProfile.city || 'Garut',
+      date: sig.date || parsedJson.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+      title: sig.title || schoolProfile.principalTitle || 'Kepala Sekolah',
+      name: sig.name || schoolProfile.principalName || 'Dian Nurhadian, S.Pd.',
+      nip: sig.nip && sig.nip !== '-' ? sig.nip : (schoolProfile.principalNip || '-')
+    });
   }
-
-  const sig = parsedJson.signer || {};
-  blocks.push({
-    type: 'letterSignature',
-    city: sig.city || schoolProfile.city || 'Garut',
-    date: sig.date || parsedJson.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-    title: sig.title || schoolProfile.principalTitle || 'Kepala Sekolah',
-    name: sig.name || schoolProfile.principalName || 'Dian Nurhadian, S.Pd.',
-    nip: sig.nip && sig.nip !== '-' ? sig.nip : (schoolProfile.principalNip || '-')
-  });
 
   if (Array.isArray(parsedJson.tembusan) && parsedJson.tembusan.length > 0) {
     blocks.push({
@@ -919,14 +1256,18 @@ export function aiJsonToSmartDocModel(parsedJson = {}, schoolProfile = {}, lette
     });
   }
 
+  const resolvedPaper = ['a4', 'f4', 'letter'].includes(String(parsedJson.paperSize || '').toLowerCase())
+    ? String(parsedJson.paperSize).toLowerCase()
+    : (letterOptions.paperSize || 'a4');
+
   return {
     meta: {
       title,
       author: schoolProfile.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
-    profile: letterOptions.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
-    paperSize: letterOptions.paperSize || 'a4',
+    profile: resolvedPaper === 'f4' ? 'suratDinasF4' : 'suratDinas',
+    paperSize: resolvedPaper,
     orientation: letterOptions.orientation || 'portrait',
     customMargins: letterOptions.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 },
     letterData: {
@@ -960,7 +1301,11 @@ export function getActiveSmartDocModel() {
   const opts = state.letterOptions || {};
   const pages = activeLivePagesExtractor
     ? activeLivePagesExtractor()
-    : (state.smartDocument?.pages || docModelToSmartPages(state.document, school).pages);
+    : (state.smartDocument?.pages?.length
+        ? state.smartDocument.pages
+        : state.smartDocument?.pendingDocModel
+        ? docModelToSmartPages(state.smartDocument.pendingDocModel, school).pages
+        : docModelToSmartPages(state.document, school).pages);
 
   const model = buildDocModelFromSmartPagesData({
     pages,
@@ -970,6 +1315,9 @@ export function getActiveSmartDocModel() {
   });
   if (state.smartDocument?.verification) {
     model.verification = state.smartDocument.verification;
+  }
+  if (state.smartDocument?.qrPlacement) {
+    model.qrPlacement = state.smartDocument.qrPlacement;
   }
   return model;
 }
@@ -990,23 +1338,26 @@ export function triggerSmartCanvasPrintWithChoice() {
 
   const runSmartPrint = (mode, qrDataUrl = '', overrideRole = null, overrideVerif = null) => {
     const stackEl = activeSmartPagesRoot || document.getElementById('smart-pages-stack');
-    const sigCells = stackEl ? Array.from(stackEl.querySelectorAll('.smart-sig-table .smart-sig-cell')) : [];
-    const targetSigCell = sigCells.length > 0 ? sigCells[sigCells.length - 1] : null;
-    const editables = !targetSigCell && stackEl ? stackEl.querySelectorAll('.smart-editable-page') : [];
-    const lastEditable = editables.length > 0 ? editables[editables.length - 1] : null;
+    const sheetEls = stackEl ? Array.from(stackEl.querySelectorAll('.smart-paper-sheet')) : [];
     const school = store.getState().schoolProfile || {};
     const v = overrideVerif || verification;
     const effectiveRole = overrideRole || v?.signerRole || 'kepala_sekolah';
+    const latestSmartDoc = store.getState().smartDocument;
 
+    const printOpts = store.getLetterOptions();
     printWithTemporaryQrOverlay({
       mode,
-      smartSigCellEl: targetSigCell,
-      smartFallbackEditableEl: !targetSigCell ? lastEditable : null,
+      pageSheetEls: sheetEls,
+      qrPlacement: latestSmartDoc?.qrPlacement || null,
+      docModel: model,
       qrDataUrl,
       signerRole: effectiveRole,
       principalName: school.principalName || '',
       signerName: v?.signerName || '',
-      school
+      school,
+      paperSize: printOpts.paperSize,
+      orientation: printOpts.orientation,
+      margins: printOpts.margins
     });
   };
 
@@ -1057,8 +1408,15 @@ export function triggerSmartCanvasDownloadWithChoice() {
     const school = store.getState().schoolProfile || {};
     const liveModel = getActiveSmartDocModel();
     const signerInfo = v ? buildSignerSelectionInfo(school, v.signerRole) : null;
+    const hasQrSlotInTable = liveModel.blocks.some(b =>
+      b.type === 'table' && (b.rows || []).some(r =>
+        (Array.isArray(r) ? r : r?.cells || []).some(c =>
+          c?.qrSlot || (Array.isArray(c?.paragraphs) && c.paragraphs.some(p => p?.qrSlot))
+        )
+      )
+    );
 
-    if (mode === 'qr' && v?.qrDataUrl && !liveModel.blocks.some(b => b.type === 'letterSignature')) {
+    if (mode === 'qr' && v?.qrDataUrl && !liveModel.blocks.some(b => b.type === 'letterSignature') && !hasQrSlotInTable) {
       liveModel.blocks.push({
         type: 'letterSignature',
         city: school.city || 'Garut',
@@ -1149,7 +1507,28 @@ export function createEmptySmartDocument() {
 export function renderSmartWordCanvas(container) {
   const state = store.getState();
   const school = state.schoolProfile;
-  const opts = state.letterOptions || {};
+
+  // Konsumsi pendingDocModel (misalnya dari Gudang Surat / Template SPPD) sebelum membaca paperSize
+  let smartDoc = state.smartDocument;
+  if (smartDoc?.pendingDocModel) {
+    const pendingModel = smartDoc.pendingDocModel;
+    const converted = docModelToSmartPages(pendingModel, school);
+    if (pendingModel.paperSize) {
+      store.updateLetterOptions({ paperSize: pendingModel.paperSize });
+    }
+    smartDoc = {
+      pages: converted.pages,
+      meta: converted.meta || smartDoc.meta || {},
+      ...(smartDoc.verification ? { verification: smartDoc.verification } : {}),
+      ...(pendingModel.qrPlacement || smartDoc.qrPlacement ? { qrPlacement: pendingModel.qrPlacement || smartDoc.qrPlacement } : {})
+    };
+    store.setState({ smartDocument: smartDoc }, false);
+  } else if (!smartDoc || !Array.isArray(smartDoc.pages) || smartDoc.pages.length === 0) {
+    smartDoc = createEmptySmartDocument();
+    store.setState({ smartDocument: smartDoc }, false);
+  }
+
+  const opts = store.getLetterOptions();
   const paperSize = opts.paperSize || 'a4';
   const orientation = opts.orientation || 'portrait';
   const customMargins = opts.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
@@ -1157,16 +1536,11 @@ export function renderSmartWordCanvas(container) {
   const fontSize = opts.fontSize || '12';
   const lineSpacing = opts.lineSpacing || '1.15';
   const showKop = opts.showKop !== false;
+  syncGlobalPrintPageStyle(opts);
 
-  // Default halaman Word Pro dimulai dalam keadaan KOSONG bersih (tanpa teks contoh bawaan)
-  let smartDoc = state.smartDocument;
-  if (!smartDoc || !Array.isArray(smartDoc.pages) || smartDoc.pages.length === 0) {
-    smartDoc = createEmptySmartDocument();
-    store.setState({ smartDocument: smartDoc }, false);
-  }
-
-  let currentZoom = 1.0;
-  let copilotVisible = true;
+  const initialZoomPct = state.zoomUserAdjusted ? (state.zoomLevel || 100) : computeDefaultDesktopZoom();
+  let currentZoom = Number((initialZoomPct / 100).toFixed(2));
+  let copilotVisible = typeof window !== 'undefined' ? window.innerWidth >= 1120 : true;
   let showFormattingMarks = false;
   let activePageIndex = 0;
   let lastSavedRange = null;
@@ -1175,14 +1549,16 @@ export function renderSmartWordCanvas(container) {
 
   const apiVault = state.apiVault || [];
   let selectedApiId = apiVault.find(a => a.isActive)?.id || apiVault[0]?.id || '';
-  const kbCount = (state.letterVault || []).length;
+  const kbStats = summarizeKnowledgeBaseStats(state.letterVault || []);
 
   const kopUrl = school.kopImage || DEFAULT_KOP_DATA_URL;
+  const initDims = computePrintableDimsMm({ paperSize, orientation, margins: customMargins });
   const marginStyles = `
     --margin-top: ${customMargins.top}cm;
     --margin-bottom: ${customMargins.bottom}cm;
     --margin-left: ${customMargins.left}cm;
     --margin-right: ${customMargins.right}cm;
+    --printable-h-mm: ${initDims.printableHeightMm}mm;
     --doc-font: '${fontFamily}', serif;
     --doc-font-size: ${fontSize}pt;
     --doc-line-height: ${lineSpacing};
@@ -1216,7 +1592,7 @@ export function renderSmartWordCanvas(container) {
                   ${ICON_RULER} <span>Margin</span>
                 </button>
                 <div class="smart-popover-menu hidden" id="smart-margin-popover">
-                  <button class="smart-popover-item" data-margin="2,2,2.5,2">Standar Dinas <span>2 / 2,5 cm</span></button>
+                  <button class="smart-popover-item" data-margin="2,2,2,2.5">Standar Dinas <span>2 / 2,5 cm</span></button>
                   <button class="smart-popover-item" data-margin="2.54,2.54,2.54,2.54">Normal Word <span>2,54 cm</span></button>
                   <button class="smart-popover-item" data-margin="1.27,1.27,1.27,1.27">Sempit (Narrow) <span>1,27 cm</span></button>
                   <button class="smart-popover-item" data-margin="3,3,3,3">Lebar (Wide) <span>3,0 cm</span></button>
@@ -1313,13 +1689,25 @@ export function renderSmartWordCanvas(container) {
               ${ICON_PAGE_ADD}
               <span>+ Halaman</span>
             </button>
-            <button class="ribbon-tile" id="smart-btn-insert-table" title="Sisipkan Tabel Grid / Tabel Data">
+            <button class="ribbon-tile" id="smart-btn-insert-table" title="Sisipkan Tabel Grid / SPPD / Data">
               ${ICON_TABLE}
               <span>Tabel</span>
+            </button>
+            <button class="ribbon-tile" id="smart-btn-insert-2col" title="Sisipkan Tata Letak 2 Kolom Berdampingan Tanpa Garis (Catatan + TTD)">
+              ${ICON_TABLE}
+              <span>2 Kolom</span>
+            </button>
+            <button class="ribbon-tile smart-ribbon-highlight" id="smart-btn-template-sppd" title="Terapkan Template Resmi 3 Halaman: Surat Tugas + SPPD + Keterangan (1:1 MS Word)">
+              ${ICON_TARGET}
+              <span>ST + SPPD</span>
             </button>
             <button class="ribbon-tile" id="smart-btn-insert-sig" title="Sisipkan Blok Tanda Tangan">
               ${ICON_PENCIL_NOTE}
               <span>TTD</span>
+            </button>
+            <button class="ribbon-tile hidden" id="smart-btn-toggle-qr-canvas" title="Tampilkan atau Sembunyikan Barcode QR di Kanvas (saat disembunyikan tetap tercetak &amp; muncul di Surat Keluar)">
+              ${ICON_CLIPBOARD_CHECK}
+              <span data-qr-btn-label="1">Tampil QR</span>
             </button>
             <button class="ribbon-tile" id="smart-btn-kop-gallery" title="Pilih / Kelola Kop Surat">
               ${ICON_GALLERY}
@@ -1336,9 +1724,13 @@ export function renderSmartWordCanvas(container) {
         <!-- Group 5: Dokumen -->
         <div class="ribbon-group">
           <div class="ribbon-tiles-row">
-            <button class="ribbon-tile" id="smart-btn-save-vault" title="Simpan Dokumen ke Gudang Surat">
+            <button class="ribbon-tile" id="smart-btn-save-vault" title="Simpan perubahan ke dokumen aktif di Gudang Surat (Ctrl+S)">
               ${ICON_SAVE}
               <span>Simpan</span>
+            </button>
+            <button class="ribbon-tile" id="smart-btn-save-as-vault" title="Save As / Duplikat sebagai dokumen baru di Gudang Surat (Ctrl+Shift+S / F12)">
+              ${ICON_COPY_DOC}
+              <span>Save As</span>
             </button>
             <button class="ribbon-tile" id="smart-btn-refresh" title="Refresh / Kosongkan Kertas ke Lembar Baru">
               ${ICON_REFRESH}
@@ -1354,7 +1746,7 @@ export function renderSmartWordCanvas(container) {
               ${ICON_DOC_UPLOAD}
               <span>Impor .docx</span>
             </button>
-            <button class="ribbon-tile active" id="smart-btn-toggle-copilot" title="Tampilkan / Sembunyikan AI Copilot">
+            <button class="ribbon-tile ${copilotVisible ? 'active' : ''}" id="smart-btn-toggle-copilot" title="Tampilkan / Sembunyikan AI Copilot">
               ${ICON_BOT_SPARK}
               <span>Copilot AI</span>
             </button>
@@ -1363,6 +1755,45 @@ export function renderSmartWordCanvas(container) {
         </div>
         <input type="file" id="smart-docx-upload-input" accept=".docx" style="display:none" />
         <input type="file" id="smart-kop-upload-input" accept="image/png,image/jpeg,image/webp,image/svg+xml" style="display:none" />
+      </div>
+
+      <!-- CONTEXT BAR ALAT TABEL WORD (MUNCUL OTOMATIS SAAT KURSOR DI DALAM TABEL) -->
+      <div class="smart-table-context-bar hidden no-print" id="smart-table-context-bar">
+        <span class="smart-tbl-badge">Alat Tabel</span>
+        <div class="smart-tbl-group">
+          <button type="button" class="smart-tbl-btn" data-tbl-act="row-above" title="Tambah baris di atas">+ Baris ↑</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="row-below" title="Tambah baris di bawah">+ Baris ↓</button>
+          <button type="button" class="smart-tbl-btn smart-tbl-btn-danger" data-tbl-act="row-del" title="Hapus baris aktif">− Baris</button>
+        </div>
+        <div class="smart-tbl-group">
+          <button type="button" class="smart-tbl-btn" data-tbl-act="col-right" title="Tambah kolom di kanan">+ Kolom →</button>
+          <button type="button" class="smart-tbl-btn smart-tbl-btn-danger" data-tbl-act="col-del" title="Hapus kolom aktif">− Kolom</button>
+        </div>
+        <div class="smart-tbl-group">
+          <button type="button" class="smart-tbl-btn" data-tbl-act="merge-sel" id="sm-btn-merge-sel" title="Gabung sel yang dipilih dengan Shift+Klik">⧉ Gabung Seleksi</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="merge-right" title="Gabung sel ini dengan sel sebelah kanan (Colspan)">⧉ →</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="merge-down" title="Gabung sel ini dengan sel di bawahnya (Rowspan)">⧉ ↓</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="unmerge" title="Pisah kembali sel yang digabung (Unmerge)">⊟ Pisah Sel</button>
+        </div>
+        <div class="smart-tbl-group">
+          <select id="sm-ctx-border" class="ribbon-select ribbon-select-xs" title="Model Garis Tabel">
+            <option value="grid">Garis Penuh (Grid)</option>
+            <option value="sppd">Garis SPPD (Tanpa Samping)</option>
+            <option value="none">Tanpa Garis (2-Kolom)</option>
+          </select>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="toggle-header-bg" title="Ubah warna latar Header Abu-abu vs Putih Bersih">Header Abu/Putih</button>
+          <select id="sm-ctx-row-height" class="ribbon-select ribbon-select-xs" title="Tinggi Minimum Baris (untuk Area Tanda Tangan / Stempel)">
+            <option value="0">Tinggi Otomatis</option>
+            <option value="2.5">Tinggi Stamp 2.5 cm</option>
+            <option value="4.5">Tinggi Stamp 4.5 cm</option>
+            <option value="5.5">Tinggi Stamp 5.5 cm</option>
+          </select>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="align-left" title="Rata Kiri Sel">Kiri</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="align-center" title="Rata Tengah Sel">Tengah</button>
+          <button type="button" class="smart-tbl-btn" data-tbl-act="align-right" title="Rata Kanan Sel">Kanan</button>
+          <button type="button" class="smart-tbl-btn smart-tbl-btn-danger" data-tbl-act="del-table" title="Hapus seluruh tabel">Hapus Tabel</button>
+        </div>
+        <span class="smart-tbl-hint">Tip: Shift+Klik beberapa sel lalu Gabung Seleksi, atau Tab di sel akhir untuk tambah baris.</span>
       </div>
 
       <!-- STAGE UTAMA: KANVAS KERTAS MULTI-HALAMAN (KIRI) + SIDEBAR COPILOT (KANAN) -->
@@ -1402,13 +1833,13 @@ export function renderSmartWordCanvas(container) {
               </div>
 
               <!-- TUMPUKAN HALAMAN KERTAS MS WORD BEBAS & BERKELANJUTAN -->
-              <div class="smart-pages-stack" id="smart-pages-stack" style="${marginStyles}"></div>
+              <div class="smart-pages-stack" id="smart-pages-stack" style="${marginStyles} transform: scale(${currentZoom});"></div>
             </div>
           </div>
         </div>
 
         <!-- SIDEBAR AI COPILOT KANAN (DOCKED) -->
-        <aside class="copilot-drawer no-print" id="smart-copilot-drawer">
+        <aside class="copilot-drawer ${copilotVisible ? '' : 'hidden'} no-print" id="smart-copilot-drawer">
           <div class="copilot-header">
             <div class="copilot-title">
               ${ICON_BOT_SPARK}
@@ -1433,7 +1864,7 @@ export function renderSmartWordCanvas(container) {
             <div class="copilot-kb-card">
               <div style="display:flex; align-items:flex-start; gap:7px; min-width:0;">
                 <span style="color:#15803d; display:inline-flex; margin-top:1px; flex-shrink:0;">${ICON_OPEN_BOOK}</span>
-                <span><strong>Basis Pengetahuan:</strong> ${kbCount} arsip surat aktif sebagai acuan gaya</span>
+                <span><strong>Basis Pengetahuan:</strong> ${kbStats.totalActive} arsip aktif dipelajari AI (${kbStats.masterCount} ⭐ Master Terkunci)</span>
               </div>
               <button type="button" class="copilot-kb-btn" id="smart-btn-open-vault-nav">Kelola Gudang</button>
             </div>
@@ -1447,7 +1878,7 @@ export function renderSmartWordCanvas(container) {
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Edaran Tata Usaha pemberitahuan pembagian rapor semester ganjil untuk orang tua/wali">${ICON_BUILDING} Surat Tata Usaha (TU)</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keputusan (SK) Kepala Sekolah tentang Pembagian Tugas Guru Mengajar beserta rincian lengkap pada halaman ke-2">${ICON_BRIEFCASE} SK Multi-Halaman (KEP)</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keterangan Siswa Aktif atas nama [Nama Siswa] NIS [NIS] kelas [Kelas]">${ICON_ID_CARD} Ket. Siswa Aktif (KET)</button>
-              <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Tugas Guru mengikuti Workshop Kurikulum Merdeka beserta rincian jadwal kegiatan">${ICON_TARGET} Surat Tugas (ST)</button>
+              <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Tugas Guru SMK IT Al-Hawari beserta lampiran SPPD 8 poin dan halaman Keterangan perjalanan dinas">${ICON_TARGET} Surat Tugas + SPPD</button>
               <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Panggilan Orang Tua/Wali Siswa terkait pembinaan kedisiplinan siswa">${ICON_USERS} Panggilan Ortu (PGL)</button>
             </div>
 
@@ -1498,14 +1929,16 @@ export function renderSmartWordCanvas(container) {
           <span class="status-item status-word-count" id="smart-status-words">0 kata</span>
           <span class="status-sep">|</span>
           <span class="status-item">${ICON_GLOBE} Bahasa Indonesia (PUEBI) &bull; Mode Bebas MS Word</span>
+          <span class="status-sep">|</span>
+          <span class="status-item status-vault-pill" id="smart-status-vault-badge">📄 Draf Baru</span>
         </div>
         <div class="status-right">
           <div class="zoom-slider-wrap">
             <button class="zoom-btn" id="smart-zoom-out" title="Perkecil Tampilan">-</button>
-            <input type="range" id="smart-zoom-slider" min="50" max="150" value="100" step="5" />
+            <input type="range" id="smart-zoom-slider" min="50" max="150" value="${initialZoomPct}" step="5" />
             <button class="zoom-btn" id="smart-zoom-in" title="Perbesar Tampilan">+</button>
           </div>
-          <span class="status-zoom-pill" id="smart-zoom-label">100%</span>
+          <span class="status-zoom-pill" id="smart-zoom-label">${initialZoomPct}%</span>
           <button class="status-fit-btn" id="smart-zoom-fit" title="Sesuaikan Lebar Layar">${ICON_MAXIMIZE}</button>
         </div>
       </div>
@@ -1552,15 +1985,56 @@ export function renderSmartWordCanvas(container) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       const livePages = collectLivePagesData();
-      const latestVerif = store.getState().smartDocument?.verification;
+      const latestState = store.getState().smartDocument || {};
+      const latestVerif = latestState.verification;
+      const latestQrPlacement = latestState.qrPlacement;
       smartDoc = {
         ...smartDoc,
         pages: livePages,
-        ...(latestVerif ? { verification: latestVerif } : {})
+        ...(latestVerif ? { verification: latestVerif } : {}),
+        ...(latestQrPlacement ? { qrPlacement: latestQrPlacement } : {})
       };
       store.setState({ smartDocument: smartDoc }, false);
       updateStatusCounters();
     }, 250);
+  }
+
+  function refreshSmartFloatingQrOverlay() {
+    const latestState = store.getState().smartDocument || {};
+    const verification = latestState.verification || null;
+    const stages = [...pagesStack.querySelectorAll('.floating-qr-stage')];
+    const toggleBtn = container.querySelector('#smart-btn-toggle-qr-canvas');
+    const curOpts = store.getLetterOptions();
+    const dims = computePrintableDimsMm(curOpts);
+    pagesStack.style.setProperty('--printable-h-mm', `${dims.printableHeightMm}mm`);
+    pagesStack.querySelectorAll('.smart-paper-sheet').forEach((sh) => {
+      sh.style.setProperty('--printable-h-mm', `${dims.printableHeightMm}mm`);
+    });
+
+    const activeModel = getActiveSmartDocModel();
+    const mountedPlacement = mountInteractiveFloatingQr({
+      stages,
+      verification,
+      rawPlacement: latestState.qrPlacement || null,
+      docModel: activeModel,
+      school: store.getSchoolProfile(),
+      getZoomScale: () => currentZoom,
+      onPlacementChange: (nextPlacement) => {
+        store.setActiveQrPlacement(nextPlacement, 'smart');
+        updateCanvasQrToggleButton(toggleBtn, {
+          verification: store.getState().smartDocument?.verification,
+          placement: nextPlacement
+        });
+      }
+    });
+
+    if (mountedPlacement && !latestState.qrPlacement && verification?.isVerifiedSah) {
+      store.setActiveQrPlacement(mountedPlacement, 'smart');
+    }
+    updateCanvasQrToggleButton(toggleBtn, {
+      verification,
+      placement: store.getState().smartDocument?.qrPlacement || mountedPlacement
+    });
   }
 
   function updateStatusCounters() {
@@ -1587,10 +2061,12 @@ export function renderSmartWordCanvas(container) {
     });
   }
 
-  function applyZoom() {
+  function applyZoom({ fromUser = false } = {}) {
     pagesStack.style.transform = `scale(${currentZoom})`;
-    container.querySelector('#smart-zoom-label').textContent = `${Math.round(currentZoom * 100)}%`;
-    container.querySelector('#smart-zoom-slider').value = String(Math.round(currentZoom * 100));
+    const pct = Math.round(currentZoom * 100);
+    container.querySelector('#smart-zoom-label').textContent = `${pct}%`;
+    container.querySelector('#smart-zoom-slider').value = String(pct);
+    store.setZoomLevel(pct, { fromUser });
   }
 
   function createPageDomElement(pageData, pageIdx) {
@@ -1613,6 +2089,7 @@ export function renderSmartWordCanvas(container) {
       </div>
     `;
 
+    const curDims = computePrintableDimsMm(curOpts);
     const sheet = document.createElement('div');
     sheet.className = `smart-paper-sheet paper-${pSize} ${orient === 'landscape' ? 'landscape' : ''}`;
     sheet.style.cssText = `
@@ -1620,6 +2097,7 @@ export function renderSmartWordCanvas(container) {
       --margin-bottom: ${curOpts.margins?.bottom ?? 2.0}cm;
       --margin-left: ${curOpts.margins?.left ?? 2.5}cm;
       --margin-right: ${curOpts.margins?.right ?? 2.0}cm;
+      --printable-h-mm: ${curDims.printableHeightMm}mm;
       --doc-font: '${curOpts.fontFamily || 'Times New Roman'}', serif;
       --doc-font-size: ${curOpts.fontSize || '12'}pt;
       --doc-line-height: ${curOpts.lineSpacing || '1.15'};
@@ -1664,7 +2142,12 @@ export function renderSmartWordCanvas(container) {
       schedulePersistSmartDoc();
     });
 
+    const qrStage = document.createElement('div');
+    qrStage.className = 'floating-qr-stage';
+    qrStage.dataset.qrPage = String(pageIdx);
+
     sheet.appendChild(editable);
+    sheet.appendChild(qrStage);
     wrapper.appendChild(headerBar);
     wrapper.appendChild(sheet);
     return wrapper;
@@ -1682,8 +2165,11 @@ export function renderSmartWordCanvas(container) {
 
     reindexPageHeaders();
     updateStatusCounters();
-    // Jalankan pasca-render check untuk auto-overflow bila teks panjang
-    requestAnimationFrame(() => reflowPagination());
+    // Jalankan pasca-render check untuk auto-overflow bila teks panjang lalu sinkronkan QR mengambang
+    requestAnimationFrame(() => {
+      reflowPagination();
+      refreshSmartFloatingQrOverlay();
+    });
   }
 
   function reindexPageHeaders() {
@@ -1692,6 +2178,8 @@ export function renderSmartWordCanvas(container) {
     wrappers.forEach((w, idx) => {
       const editable = w.querySelector('.smart-editable-page');
       if (editable) editable.dataset.pageIndex = String(idx);
+      const qrStage = w.querySelector('.floating-qr-stage');
+      if (qrStage) qrStage.dataset.qrPage = String(idx);
       const pill = w.querySelector('.smart-page-pill');
       if (pill) pill.textContent = `Halaman ${idx + 1} dari ${total}`;
     });
@@ -1728,16 +2216,24 @@ export function renderSmartWordCanvas(container) {
         sel.removeAllRanges();
         sel.addRange(r);
         targetNode.closest('.smart-editable-page')?.focus();
+        targetNode.scrollIntoView?.({ block: 'nearest' });
         return;
       }
       remaining -= len;
     }
     const sel = window.getSelection();
     const r = document.createRange();
-    r.selectNodeContents(targetNode);
-    r.collapse(false);
+    if (!(targetNode.textContent || '').trim()) {
+      r.setStart(targetNode, 0);
+      r.collapse(true);
+    } else {
+      r.selectNodeContents(targetNode);
+      r.collapse(false);
+    }
     sel.removeAllRanges();
     sel.addRange(r);
+    targetNode.closest('.smart-editable-page')?.focus();
+    targetNode.scrollIntoView?.({ block: 'nearest' });
   }
 
   function placeCaretAtStart(el) {
@@ -1800,6 +2296,12 @@ export function renderSmartWordCanvas(container) {
 
           if (curEl.children.length > 1) {
             const movingNode = curEl.lastElementChild;
+            if ((movingNode?.tagName === 'TABLE' || movingNode?.tagName === 'UL' || movingNode?.tagName === 'OL') &&
+                splitStructuredBlockTail(movingNode, curEl, nextEl)) {
+              changed = true;
+              passMoved = true;
+              break;
+            }
             const savedCaret = captureCaretInNode(movingNode);
             nextEl.insertBefore(movingNode, nextEl.firstChild);
             if (savedCaret) {
@@ -1861,40 +2363,67 @@ export function renderSmartWordCanvas(container) {
       reindexPageHeaders();
       updateStatusCounters();
       schedulePersistSmartDoc();
+      refreshSmartFloatingQrOverlay();
     }
+  }
+
+  function splitStructuredBlockTail(blockEl, curEl, nextEl) {
+    if (!blockEl) return false;
+    if (blockEl.tagName === 'UL' || blockEl.tagName === 'OL') {
+      if (blockEl.children.length <= 1) return false;
+      const tag = blockEl.tagName.toLowerCase();
+      let destList = nextEl.firstElementChild;
+      if (!destList || destList.tagName !== blockEl.tagName || destList.dataset.splitGroup !== (blockEl.dataset.splitGroup || '')) {
+        const groupId = blockEl.dataset.splitGroup || `slist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        blockEl.dataset.splitGroup = groupId;
+        destList = document.createElement(tag);
+        destList.dataset.splitGroup = groupId;
+        nextEl.insertBefore(destList, nextEl.firstChild);
+      }
+      const lastLi = blockEl.lastElementChild;
+      const caret = captureCaretInNode(lastLi);
+      destList.insertBefore(lastLi, destList.firstChild);
+      if (caret) restoreCaretInNode(lastLi, caret);
+      return true;
+    }
+
+    if (blockEl.tagName === 'TABLE' && !blockEl.classList.contains('smart-sig-table')) {
+      if (blockEl.querySelector('[rowspan]') || blockEl.classList.contains('smart-table-none')) {
+        return false;
+      }
+      const tbody = blockEl.querySelector('tbody') || blockEl;
+      const rows = [...tbody.querySelectorAll('tr')];
+      if (rows.length <= 1) return false;
+      const firstRowBottom = rows[0].getBoundingClientRect().top - curEl.getBoundingClientRect().top + rows[0].offsetHeight;
+      if (curEl.children.length > 1 && firstRowBottom > curEl.clientHeight) {
+        return false;
+      }
+      const groupId = blockEl.dataset.splitGroup || `stbl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      blockEl.dataset.splitGroup = groupId;
+      let destTable = nextEl.firstElementChild;
+      if (!destTable || destTable.tagName !== 'TABLE' || destTable.dataset.splitGroup !== groupId) {
+        destTable = document.createElement('table');
+        destTable.className = blockEl.className;
+        destTable.dataset.splitGroup = groupId;
+        const destBody = document.createElement('tbody');
+        destTable.appendChild(destBody);
+        nextEl.insertBefore(destTable, nextEl.firstChild);
+      }
+      const destBody = destTable.querySelector('tbody') || destTable;
+      const movingRow = rows[rows.length - 1];
+      const caret = captureCaretInNode(movingRow);
+      destBody.insertBefore(movingRow, destBody.firstChild);
+      if (caret) restoreCaretInNode(movingRow, caret);
+      return true;
+    }
+    return false;
   }
 
   function splitOversizedSingleBlock(curEl, nextEl, maxH) {
     const child = curEl.firstElementChild;
     if (!child) return false;
 
-    if (child.tagName === 'UL' || child.tagName === 'OL') {
-      if (child.children.length <= 1) return false;
-      const tag = child.tagName.toLowerCase();
-      let destList = nextEl.firstElementChild;
-      if (!destList || destList.tagName !== child.tagName) {
-        destList = document.createElement(tag);
-        nextEl.insertBefore(destList, nextEl.firstChild);
-      }
-      const lastLi = child.lastElementChild;
-      destList.insertBefore(lastLi, destList.firstChild);
-      return true;
-    }
-
-    if (child.tagName === 'TABLE') {
-      const tbody = child.querySelector('tbody') || child;
-      const rows = [...tbody.querySelectorAll('tr')];
-      if (rows.length <= 1) return false;
-      let destTable = nextEl.firstElementChild;
-      if (!destTable || destTable.tagName !== 'TABLE') {
-        destTable = document.createElement('table');
-        destTable.className = child.className;
-        const destBody = document.createElement('tbody');
-        destTable.appendChild(destBody);
-        nextEl.insertBefore(destTable, nextEl.firstChild);
-      }
-      const destBody = destTable.querySelector('tbody') || destTable;
-      destBody.insertBefore(rows[rows.length - 1], destBody.firstChild);
+    if (splitStructuredBlockTail(child, curEl, nextEl)) {
       return true;
     }
 
@@ -1952,7 +2481,13 @@ export function renderSmartWordCanvas(container) {
     editable.addEventListener('blur', () => {
       clearTimeout(saveTimer);
       const livePages = collectLivePagesData();
-      smartDoc = { ...smartDoc, pages: livePages };
+      const latestState = store.getState().smartDocument || {};
+      smartDoc = {
+        ...smartDoc,
+        pages: livePages,
+        ...(latestState.verification ? { verification: latestState.verification } : {}),
+        ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
+      };
       store.setState({ smartDocument: smartDoc }, false);
     });
 
@@ -2000,6 +2535,11 @@ export function renderSmartWordCanvas(container) {
             const targetCell = e.shiftKey ? allCells[curIdx - 1] : allCells[curIdx + 1];
             if (targetCell) {
               placeCaretAtEnd(targetCell);
+            } else if (!e.shiftKey && table && !table.classList.contains('smart-sig-table')) {
+              const lastTr = td.closest('tr');
+              const addedRow = insertRowRelative?.(table, lastTr, 'below');
+              const firstNewCell = addedRow?.querySelector('td, th');
+              if (firstNewCell) placeCaretAtStart(firstNewCell);
             }
           }
           return;
@@ -2112,7 +2652,7 @@ export function renderSmartWordCanvas(container) {
     const allowedTags = new Set([
       'p', 'div', 'br', 'h1', 'h2', 'h3', 'h4',
       'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'sub', 'sup',
-      'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span'
+      'ul', 'ol', 'li', 'table', 'colgroup', 'col', 'thead', 'tbody', 'tr', 'th', 'td', 'span'
     ]);
 
     const cleanNode = (node) => {
@@ -2132,6 +2672,19 @@ export function renderSmartWordCanvas(container) {
       if (align && ['left', 'center', 'right', 'justify'].includes(align)) {
         el.style.textAlign = align;
       }
+      if (tag === 'td' || tag === 'th') {
+        const cs = parseInt(node.getAttribute('colspan') || '1', 10);
+        const rs = parseInt(node.getAttribute('rowspan') || '1', 10);
+        if (cs > 1) el.setAttribute('colspan', String(cs));
+        if (rs > 1) el.setAttribute('rowspan', String(rs));
+        const va = node.style?.verticalAlign;
+        if (va && ['top', 'middle', 'bottom'].includes(va)) {
+          el.style.verticalAlign = va;
+        }
+      }
+      if (tag === 'col' && node.style?.width) {
+        el.style.width = node.style.width;
+      }
       if (tag === 'table') el.className = 'smart-word-table';
       [...node.childNodes].forEach(c => el.appendChild(cleanNode(c)));
       return el;
@@ -2148,6 +2701,565 @@ export function renderSmartWordCanvas(container) {
   // =========================================================================
   // TOOLBAR FORMATTING, RIBBON & MODALS HANDLERS
   // =========================================================================
+
+  const tableCtxBar = container.querySelector('#smart-table-context-bar');
+  const smCtxBorderSel = container.querySelector('#sm-ctx-border');
+  const smCtxRowHeightSel = container.querySelector('#sm-ctx-row-height');
+  const smBtnMergeSel = container.querySelector('#sm-btn-merge-sel');
+  let activeTableCell = null;
+  let tableSelAnchorCell = null;
+  let selectedTableCells = [];
+
+  function clearTableCellSelection() {
+    container.querySelectorAll('.smart-cell-selected').forEach(c => c.classList.remove('smart-cell-selected'));
+    selectedTableCells = [];
+    if (smBtnMergeSel) smBtnMergeSel.disabled = true;
+  }
+
+  function buildLogicalGrid(tableEl) {
+    const trList = [...tableEl.querySelectorAll('tr')];
+    const occ = [];
+    const cellMap = new Map();
+    let totalCols = 0;
+
+    trList.forEach((tr, r) => {
+      occ[r] = occ[r] || [];
+      let c = 0;
+      const cells = [...tr.children].filter(el => el.tagName === 'TD' || el.tagName === 'TH');
+      for (const cell of cells) {
+        while (occ[r][c]) c++;
+        const cs = Math.max(1, parseInt(cell.getAttribute('colspan') || '1', 10) || 1);
+        const rs = Math.max(1, parseInt(cell.getAttribute('rowspan') || '1', 10) || 1);
+        const info = { cell, tr, startR: r, startC: c, colspan: cs, rowspan: rs };
+        cellMap.set(cell, info);
+        for (let dr = 0; dr < rs; dr++) {
+          occ[r + dr] = occ[r + dr] || [];
+          for (let dc = 0; dc < cs; dc++) {
+            occ[r + dr][c + dc] = info;
+          }
+        }
+        c += cs;
+        totalCols = Math.max(totalCols, c);
+      }
+    });
+    return { trList, occ, totalCols, cellMap };
+  }
+
+  function syncColGroupEvenly(tableEl, colCount) {
+    if (colCount <= 0) return;
+    const widths = Array.from({ length: colCount }, () => Math.round((100 / colCount) * 10) / 10);
+    let colgroup = [...tableEl.children].find(ch => ch.tagName === 'COLGROUP');
+    if (colgroup) {
+      colgroup.innerHTML = widths.map(w => `<col style="width: ${w}%;">`).join('');
+      tableEl.setAttribute('data-col-widths', widths.join(','));
+    } else if (tableEl.getAttribute('data-col-widths')) {
+      tableEl.setAttribute('data-col-widths', widths.join(','));
+    }
+  }
+
+  function insertRowRelative(tableEl, trEl, position = 'below') {
+    if (!tableEl || !trEl) return null;
+    pushUndoSnapshot();
+    const { trList, occ, totalCols } = buildLogicalGrid(tableEl);
+    const rIdx = trList.indexOf(trEl);
+    if (rIdx < 0) return null;
+
+    const boundaryTop = position === 'above' ? rIdx - 1 : rIdx;
+    const spannedCols = new Set();
+    if (boundaryTop >= 0 && occ[boundaryTop] && occ[boundaryTop + 1]) {
+      for (let c = 0; c < totalCols; c++) {
+        const upper = occ[boundaryTop][c];
+        if (upper && upper.startR + upper.rowspan - 1 > boundaryTop) {
+          if (!spannedCols.has(c)) {
+            const newRs = upper.rowspan + 1;
+            upper.cell.setAttribute('rowspan', String(newRs));
+            for (let dc = 0; dc < upper.colspan; dc++) {
+              spannedCols.add(upper.startC + dc);
+            }
+          }
+        }
+      }
+    }
+
+    const useHeaderTag = Boolean(trEl.closest('thead')) && !(position === 'below' && !trEl.nextElementSibling && tableEl.querySelector('tbody'));
+    const cellTag = useHeaderTag ? 'th' : 'td';
+    const neededCols = Math.max(1, totalCols - spannedCols.size);
+    const newTr = document.createElement('tr');
+    if (useHeaderTag) newTr.setAttribute('data-header', 'true');
+    for (let i = 0; i < neededCols; i++) {
+      const cell = document.createElement(cellTag);
+      cell.innerHTML = '<br>';
+      newTr.appendChild(cell);
+    }
+
+    if (position === 'above') {
+      trEl.parentElement.insertBefore(newTr, trEl);
+    } else if (trEl.closest('thead') && !trEl.nextElementSibling && tableEl.querySelector('tbody')) {
+      const tbody = tableEl.querySelector('tbody');
+      tbody.insertBefore(newTr, tbody.firstChild);
+    } else {
+      trEl.parentElement.insertBefore(newTr, trEl.nextSibling);
+    }
+    updateStatusCounters();
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+    return newTr;
+  }
+
+  function deleteRowAt(tableEl, trEl) {
+    if (!tableEl || !trEl) return;
+    pushUndoSnapshot();
+    const { trList, occ, totalCols } = buildLogicalGrid(tableEl);
+    const rIdx = trList.indexOf(trEl);
+    if (rIdx < 0) return;
+
+    if (trList.length <= 1) {
+      tableEl.remove();
+      clearTableCellSelection();
+      updateTableContextBar(null);
+      scheduleReflowPagination();
+      schedulePersistSmartDoc();
+      return;
+    }
+
+    const handled = new Set();
+    for (let c = 0; c < totalCols; c++) {
+      const slot = occ[rIdx]?.[c];
+      if (!slot || handled.has(slot.cell)) continue;
+      handled.add(slot.cell);
+      if (slot.startR < rIdx) {
+        const nextRs = slot.rowspan - 1;
+        if (nextRs <= 1) slot.cell.removeAttribute('rowspan');
+        else slot.cell.setAttribute('rowspan', String(nextRs));
+      } else if (slot.startR === rIdx && slot.rowspan > 1 && trList[rIdx + 1]) {
+        const nextTr = trList[rIdx + 1];
+        const nextRs = slot.rowspan - 1;
+        if (nextRs <= 1) slot.cell.removeAttribute('rowspan');
+        else slot.cell.setAttribute('rowspan', String(nextRs));
+        let anchorAfter = null;
+        for (let k = slot.startC + slot.colspan; k < totalCols; k++) {
+          const cand = occ[rIdx + 1]?.[k];
+          if (cand && cand.startR === rIdx + 1) {
+            anchorAfter = cand.cell;
+            break;
+          }
+        }
+        nextTr.insertBefore(slot.cell, anchorAfter);
+      }
+    }
+
+    trEl.remove();
+    clearTableCellSelection();
+    updateTableContextBar(null);
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+  }
+
+  function insertColRight(tableEl, cellEl) {
+    if (!tableEl || !cellEl) return;
+    pushUndoSnapshot();
+    const { trList, occ, totalCols, cellMap } = buildLogicalGrid(tableEl);
+    const info = cellMap.get(cellEl);
+    if (!info) return;
+    const insertAfterCol = info.startC + info.colspan - 1;
+    const handledSpan = new Set();
+
+    trList.forEach((tr, r) => {
+      const slotAtCol = occ[r]?.[insertAfterCol];
+      if (slotAtCol && slotAtCol.startC + slotAtCol.colspan - 1 > insertAfterCol) {
+        if (!handledSpan.has(slotAtCol.cell)) {
+          handledSpan.add(slotAtCol.cell);
+          slotAtCol.cell.setAttribute('colspan', String(slotAtCol.colspan + 1));
+        }
+        return;
+      }
+      const tag = (tr.closest('thead') || tr.dataset.header === 'true') ? 'th' : 'td';
+      const newCell = document.createElement(tag);
+      newCell.innerHTML = '<br>';
+      let nextAnchor = null;
+      for (let k = insertAfterCol + 1; k < totalCols; k++) {
+        const cand = occ[r]?.[k];
+        if (cand && cand.startR === r) {
+          nextAnchor = cand.cell;
+          break;
+        }
+      }
+      tr.insertBefore(newCell, nextAnchor);
+    });
+
+    syncColGroupEvenly(tableEl, totalCols + 1);
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+  }
+
+  function deleteColAt(tableEl, cellEl) {
+    if (!tableEl || !cellEl) return;
+    pushUndoSnapshot();
+    const { trList, occ, totalCols, cellMap } = buildLogicalGrid(tableEl);
+    if (totalCols <= 1) {
+      tableEl.remove();
+      clearTableCellSelection();
+      updateTableContextBar(null);
+      scheduleReflowPagination();
+      schedulePersistSmartDoc();
+      return;
+    }
+    const info = cellMap.get(cellEl);
+    if (!info) return;
+    const targetCol = info.startC;
+    const handled = new Set();
+
+    trList.forEach((_, r) => {
+      const slot = occ[r]?.[targetCol];
+      if (!slot || handled.has(slot.cell)) return;
+      handled.add(slot.cell);
+      if (slot.colspan > 1) {
+        const nextCs = slot.colspan - 1;
+        if (nextCs <= 1) slot.cell.removeAttribute('colspan');
+        else slot.cell.setAttribute('colspan', String(nextCs));
+      } else {
+        slot.cell.remove();
+      }
+    });
+
+    syncColGroupEvenly(tableEl, totalCols - 1);
+    clearTableCellSelection();
+    updateTableContextBar(null);
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+  }
+
+  function mergeCellRange(tableEl, targetCells) {
+    if (!tableEl || !Array.isArray(targetCells) || targetCells.length < 2) return false;
+    const { occ, cellMap } = buildLogicalGrid(tableEl);
+    const infos = targetCells.map(c => cellMap.get(c)).filter(Boolean);
+    if (infos.length < 2) return false;
+
+    let minR = Math.min(...infos.map(i => i.startR));
+    let maxR = Math.max(...infos.map(i => i.startR + i.rowspan - 1));
+    let minC = Math.min(...infos.map(i => i.startC));
+    let maxC = Math.max(...infos.map(i => i.startC + i.colspan - 1));
+
+    let expanded = true;
+    let guard = 0;
+    while (expanded && guard < 20) {
+      expanded = false;
+      guard++;
+      for (let r = minR; r <= maxR; r++) {
+        for (let c = minC; c <= maxC; c++) {
+          const s = occ[r]?.[c];
+          if (!s) continue;
+          if (s.startR < minR) { minR = s.startR; expanded = true; }
+          if (s.startR + s.rowspan - 1 > maxR) { maxR = s.startR + s.rowspan - 1; expanded = true; }
+          if (s.startC < minC) { minC = s.startC; expanded = true; }
+          if (s.startC + s.colspan - 1 > maxC) { maxC = s.startC + s.colspan - 1; expanded = true; }
+        }
+      }
+    }
+
+    const uniqueCells = [];
+    const seen = new Set();
+    for (let r = minR; r <= maxR; r++) {
+      for (let c = minC; c <= maxC; c++) {
+        const s = occ[r]?.[c];
+        if (s && !seen.has(s.cell)) {
+          seen.add(s.cell);
+          uniqueCells.push(s.cell);
+        }
+      }
+    }
+    if (uniqueCells.length < 2) return false;
+
+    pushUndoSnapshot();
+    const anchor = uniqueCells[0];
+    const parts = [];
+    uniqueCells.forEach((cell) => {
+      const txt = (cell.innerText || cell.textContent || '').trim();
+      if (txt) {
+        parts.push(cell.innerHTML.replace(/<br>\s*$/i, ''));
+      }
+    });
+    if (parts.length > 0) {
+      anchor.innerHTML = parts.join('<br>');
+    }
+    uniqueCells.slice(1).forEach(c => c.remove());
+
+    const cs = maxC - minC + 1;
+    const rs = maxR - minR + 1;
+    if (cs > 1) anchor.setAttribute('colspan', String(cs));
+    else anchor.removeAttribute('colspan');
+    if (rs > 1) anchor.setAttribute('rowspan', String(rs));
+    else anchor.removeAttribute('rowspan');
+
+    clearTableCellSelection();
+    activeTableCell = anchor;
+    placeCaretAtEnd(anchor);
+    updateTableContextBar(anchor);
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+    return true;
+  }
+
+  function unmergeCell(tableEl, cellEl) {
+    if (!tableEl || !cellEl) return false;
+    const { trList, occ, totalCols, cellMap } = buildLogicalGrid(tableEl);
+    const info = cellMap.get(cellEl);
+    if (!info || (info.colspan <= 1 && info.rowspan <= 1)) {
+      showToast('Sel aktif tidak dalam kondisi tergabung.', 'info');
+      return false;
+    }
+
+    pushUndoSnapshot();
+    const { startR, startC, colspan, rowspan } = info;
+    cellEl.removeAttribute('colspan');
+    cellEl.removeAttribute('rowspan');
+
+    for (let r = startR; r < startR + rowspan; r++) {
+      const tr = trList[r];
+      if (!tr) continue;
+      const tag = (tr.closest('thead') || tr.dataset.header === 'true') ? 'th' : 'td';
+      const countNeeded = r === startR ? colspan - 1 : colspan;
+      let anchorAfter = null;
+      for (let k = startC + colspan; k < totalCols; k++) {
+        const cand = occ[r]?.[k];
+        if (cand && cand.startR === r) {
+          anchorAfter = cand.cell;
+          break;
+        }
+      }
+      for (let n = 0; n < countNeeded; n++) {
+        const newCell = document.createElement(tag);
+        newCell.innerHTML = '<br>';
+        tr.insertBefore(newCell, anchorAfter);
+      }
+    }
+
+    clearTableCellSelection();
+    placeCaretAtEnd(cellEl);
+    updateTableContextBar(cellEl);
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+    return true;
+  }
+
+  function updateTableContextBar(cellEl) {
+    if (!tableCtxBar) return;
+    const tableEl = cellEl?.closest('table');
+    if (!tableEl || tableEl.classList.contains('smart-sig-table')) {
+      activeTableCell = null;
+      tableCtxBar.classList.add('hidden');
+      return;
+    }
+    activeTableCell = cellEl;
+    tableCtxBar.classList.remove('hidden');
+
+    if (smCtxBorderSel) {
+      const curBorder = tableEl.getAttribute('data-border-style')
+        || (tableEl.classList.contains('smart-table-sppd') ? 'sppd' : tableEl.classList.contains('smart-table-none') ? 'none' : 'grid');
+      smCtxBorderSel.value = curBorder;
+    }
+    if (smCtxRowHeightSel) {
+      const tr = cellEl.closest('tr');
+      const curH = tr?.getAttribute('data-min-height') || '0';
+      const matchingOpt = [...smCtxRowHeightSel.options].find(o => o.value === curH);
+      smCtxRowHeightSel.value = matchingOpt ? curH : '0';
+    }
+    if (smBtnMergeSel) {
+      smBtnMergeSel.disabled = selectedTableCells.length < 2;
+      smBtnMergeSel.textContent = selectedTableCells.length >= 2
+        ? `⧉ Gabung (${selectedTableCells.length} Sel)`
+        : '⧉ Gabung Seleksi';
+    }
+  }
+
+  const onSmartSelectionChange = () => {
+    if (!container.isConnected) {
+      document.removeEventListener('selectionchange', onSmartSelectionChange);
+      return;
+    }
+    const sel = window.getSelection();
+    const anchor = sel?.anchorNode;
+    if (!anchor || !pagesStack.contains(anchor)) return;
+    const cellEl = (anchor.nodeType === 1 ? anchor : anchor.parentElement)?.closest('td, th');
+    updateTableContextBar(cellEl || null);
+  };
+  document.addEventListener('selectionchange', onSmartSelectionChange);
+
+  pagesStack.addEventListener('mousedown', (e) => {
+    if (e.target?.closest?.('.floating-qr-box, .floating-qr-toolbar, .floating-qr-resize, .floating-qr-stage, .fqr-context-menu')) {
+      return;
+    }
+    const cellEl = e.target?.closest?.('td, th');
+    const tableEl = cellEl?.closest?.('table');
+    if (!cellEl || !tableEl || tableEl.classList.contains('smart-sig-table')) {
+      if (!e.shiftKey) clearTableCellSelection();
+      return;
+    }
+    if (e.shiftKey && tableSelAnchorCell && tableSelAnchorCell.closest('table') === tableEl) {
+      e.preventDefault();
+      const { occ, cellMap } = buildLogicalGrid(tableEl);
+      const a = cellMap.get(tableSelAnchorCell);
+      const b = cellMap.get(cellEl);
+      if (a && b) {
+        clearTableCellSelection();
+        const minR = Math.min(a.startR, b.startR);
+        const maxR = Math.max(a.startR + a.rowspan - 1, b.startR + b.rowspan - 1);
+        const minC = Math.min(a.startC, b.startC);
+        const maxC = Math.max(a.startC + a.colspan - 1, b.startC + b.colspan - 1);
+        const seen = new Set();
+        for (let r = minR; r <= maxR; r++) {
+          for (let c = minC; c <= maxC; c++) {
+            const s = occ[r]?.[c];
+            if (s && !seen.has(s.cell)) {
+              seen.add(s.cell);
+              s.cell.classList.add('smart-cell-selected');
+              selectedTableCells.push(s.cell);
+            }
+          }
+        }
+      }
+      updateTableContextBar(cellEl);
+      return;
+    }
+    clearTableCellSelection();
+    tableSelAnchorCell = cellEl;
+    updateTableContextBar(cellEl);
+  });
+
+  tableCtxBar?.querySelectorAll('[data-tbl-act]').forEach((btn) => {
+    btn.addEventListener('mousedown', e => e.preventDefault());
+    btn.addEventListener('click', () => {
+      const cell = activeTableCell;
+      const table = cell?.closest('table');
+      if (!cell || !table) return;
+      const act = btn.dataset.tblAct;
+      const tr = cell.closest('tr');
+
+      if (act === 'row-above') {
+        const added = insertRowRelative(table, tr, 'above');
+        if (added?.firstElementChild) placeCaretAtStart(added.firstElementChild);
+      } else if (act === 'row-below') {
+        const added = insertRowRelative(table, tr, 'below');
+        if (added?.firstElementChild) placeCaretAtStart(added.firstElementChild);
+      } else if (act === 'row-del') {
+        deleteRowAt(table, tr);
+      } else if (act === 'col-right') {
+        insertColRight(table, cell);
+      } else if (act === 'col-del') {
+        deleteColAt(table, cell);
+      } else if (act === 'merge-sel') {
+        if (!mergeCellRange(table, selectedTableCells)) {
+          showToast('Shift+Klik minimal 2 sel bersebelahan terlebih dahulu.', 'info');
+        }
+      } else if (act === 'merge-right') {
+        const { occ, cellMap } = buildLogicalGrid(table);
+        const info = cellMap.get(cell);
+        const neighbor = info ? occ[info.startR]?.[info.startC + info.colspan] : null;
+        if (neighbor && neighbor.cell !== cell) mergeCellRange(table, [cell, neighbor.cell]);
+        else showToast('Tidak ada sel sebelah kanan yang bisa digabung.', 'info');
+      } else if (act === 'merge-down') {
+        const { occ, cellMap } = buildLogicalGrid(table);
+        const info = cellMap.get(cell);
+        const neighbor = info ? occ[info.startR + info.rowspan]?.[info.startC] : null;
+        if (neighbor && neighbor.cell !== cell) mergeCellRange(table, [cell, neighbor.cell]);
+        else showToast('Tidak ada sel di bawahnya yang bisa digabung.', 'info');
+      } else if (act === 'unmerge') {
+        unmergeCell(table, cell);
+      } else if (act === 'toggle-header-bg') {
+        pushUndoSnapshot();
+        const currentlyNoBg = table.classList.contains('no-header-bg') || table.getAttribute('data-header-shading') === 'false';
+        if (currentlyNoBg) {
+          table.classList.remove('no-header-bg');
+          table.removeAttribute('data-header-shading');
+        } else {
+          table.classList.add('no-header-bg');
+          table.setAttribute('data-header-shading', 'false');
+        }
+        schedulePersistSmartDoc();
+      } else if (act === 'align-left' || act === 'align-center' || act === 'align-right') {
+        pushUndoSnapshot();
+        const alignVal = act.replace('align-', '');
+        const targets = selectedTableCells.length > 0 ? selectedTableCells : [cell];
+        targets.forEach(c => {
+          c.style.textAlign = alignVal;
+          c.querySelectorAll('p').forEach(p => { p.style.textAlign = alignVal; });
+        });
+        schedulePersistSmartDoc();
+      } else if (act === 'del-table') {
+        pushUndoSnapshot();
+        table.remove();
+        clearTableCellSelection();
+        updateTableContextBar(null);
+        scheduleReflowPagination();
+        schedulePersistSmartDoc();
+      }
+    });
+  });
+
+  smCtxBorderSel?.addEventListener('change', (e) => {
+    const table = activeTableCell?.closest('table');
+    if (!table) return;
+    pushUndoSnapshot();
+    const mode = e.target.value;
+    table.classList.remove('smart-table-sppd', 'smart-table-none');
+    if (mode === 'sppd') {
+      table.classList.add('smart-word-table', 'smart-table-sppd');
+      table.setAttribute('data-border-style', 'sppd');
+    } else if (mode === 'none') {
+      table.classList.add('smart-word-table', 'smart-table-none');
+      table.setAttribute('data-border-style', 'none');
+    } else {
+      table.classList.add('smart-word-table');
+      table.removeAttribute('data-border-style');
+    }
+    schedulePersistSmartDoc();
+  });
+
+  smCtxRowHeightSel?.addEventListener('change', (e) => {
+    const tr = activeTableCell?.closest('tr');
+    if (!tr) return;
+    pushUndoSnapshot();
+    const cm = parseFloat(e.target.value || '0') || 0;
+    if (cm > 0) {
+      tr.setAttribute('data-min-height', String(cm));
+      tr.style.height = `${cm}cm`;
+    } else {
+      tr.removeAttribute('data-min-height');
+      tr.style.height = '';
+    }
+    scheduleReflowPagination();
+    schedulePersistSmartDoc();
+  });
+
+  // Hubungkan Move Handle (panah 4-arah pojok kiri atas), Resize Cursor (col/row), & Drag Boundary MS Word
+  const smartDeskEl = container.querySelector('#smart-word-desk');
+  const smartTableInteraction = attachInteractiveTables({
+    deskEl: smartDeskEl,
+    tableSelector: '.smart-editable-page table',
+    excludeTableSelector: '.smart-sig-table',
+    getMoveUnitEl: (tbl) => tbl,
+    getDropTargets: (draggedTbl) =>
+      [...pagesStack.querySelectorAll('.smart-editable-page > *')].filter(
+        el => el !== draggedTbl && !draggedTbl.contains(el)
+      ),
+    performMove: (unitEl, targetEl, position) => {
+      unitEl.removeAttribute('data-split-group');
+      targetEl.insertAdjacentElement(position === 'before' ? 'beforebegin' : 'afterend', unitEl);
+    },
+    onSelectWholeTable: (tbl) => {
+      const firstCell = tbl.querySelector('th, td');
+      if (firstCell) updateTableContextBar(firstCell);
+      showToast('Seluruh isi tabel dipilih — klik & seret ikon panah 4-arah untuk memindahkan, Ctrl+C salin, atau Delete hapus.', 'info');
+    },
+    onBeforeMutate: () => pushUndoSnapshot(),
+    onMutate: (kind) => {
+      if (kind === 'move' || kind === 'delete-table') clearTableCellSelection();
+      if (kind === 'delete-table') updateTableContextBar(null);
+      updateStatusCounters();
+      scheduleReflowPagination();
+      schedulePersistSmartDoc();
+    }
+  });
 
   function execSmartCommand(cmd, value = null) {
     const wrappers = [...pagesStack.querySelectorAll('.smart-page-wrapper')];
@@ -2184,12 +3296,14 @@ export function renderSmartWordCanvas(container) {
   // Font & Typography Options
   container.querySelector('#smart-paper-select')?.addEventListener('change', (e) => {
     store.updateLetterOptions({ paperSize: e.target.value });
+    syncGlobalPrintPageStyle(store.getLetterOptions());
     renderAllSmartPages(collectLivePagesData());
     showToast(`Ukuran kertas diatur ke ${PAPER_LABELS[e.target.value] || e.target.value.toUpperCase()}`, 'info');
   });
 
   container.querySelector('#smart-orientation-select')?.addEventListener('change', (e) => {
     store.updateLetterOptions({ orientation: e.target.value });
+    syncGlobalPrintPageStyle(store.getLetterOptions());
     renderAllSmartPages(collectLivePagesData());
   });
 
@@ -2275,6 +3389,7 @@ export function renderSmartWordCanvas(container) {
     item.addEventListener('click', () => {
       const [top, right, bottom, left] = item.dataset.margin.split(',').map(Number);
       store.updateLetterOptions({ margins: { top, right, bottom, left } });
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       marginPop.classList.add('hidden');
       renderAllSmartPages(collectLivePagesData());
       showToast('Margin halaman berhasil diterapkan.', 'success');
@@ -2285,6 +3400,33 @@ export function renderSmartWordCanvas(container) {
   // + Halaman (Page Break)
   container.querySelector('#smart-btn-add-page')?.addEventListener('mousedown', e => e.preventDefault());
   container.querySelector('#smart-btn-add-page')?.addEventListener('click', () => insertManualPageBreakAtSelection());
+
+  // Toggle Tampil / Sembunyi Barcode QR Mengambang di Kanvas
+  container.querySelector('#smart-btn-toggle-qr-canvas')?.addEventListener('click', () => {
+    const latestSmart = store.getState().smartDocument || {};
+    const stages = [...pagesStack.querySelectorAll('.floating-qr-stage')];
+    const current = latestSmart.qrPlacement
+      ? normalizeQrPlacement(latestSmart.qrPlacement, Math.max(1, stages.length))
+      : findPreferredSignatureQrPlacement(getActiveSmartDocModel(), Math.max(1, stages.length));
+    const next = { ...current, visibleOnCanvas: !(current.visibleOnCanvas !== false) };
+    store.setActiveQrPlacement(next, 'smart');
+    refreshSmartFloatingQrOverlay();
+    showToast(
+      next.visibleOnCanvas
+        ? '▣ Barcode QR ditampilkan di kanvas — Anda bebas menggeser posisi, mengubah ukuran, atau memilih Depan/Belakang Teks.'
+        : '👁️ Barcode QR disembunyikan di kanvas (tetap otomatis muncul saat Cetak/PDF & Surat Keluar).',
+      'info'
+    );
+  });
+
+  const onSmartVerificationSync = () => {
+    if (!pagesStack.isConnected) {
+      window.removeEventListener('docbuilder:verification-updated', onSmartVerificationSync);
+      return;
+    }
+    refreshSmartFloatingQrOverlay();
+  };
+  window.addEventListener('docbuilder:verification-updated', onSmartVerificationSync);
 
   // Toggle Kop Surat
   container.querySelector('#smart-btn-toggle-kop')?.addEventListener('click', () => {
@@ -2339,7 +3481,9 @@ export function renderSmartWordCanvas(container) {
     const converted = docModelToSmartPages(curState.document, curState.schoolProfile);
     smartDoc = { pages: converted.pages, meta: converted.meta };
     store.setState({ smartDocument: smartDoc }, false);
+    store.setActiveVaultId(null, 'smart');
     renderAllSmartPages(smartDoc.pages);
+    updateSmartVaultBadge?.();
     showToast('Surat dari Lembar Kerja berhasil disalin ke Mode Word Pro.', 'success');
   });
 
@@ -2358,7 +3502,9 @@ export function renderSmartWordCanvas(container) {
       const converted = docModelToSmartPages(model, store.getSchoolProfile());
       smartDoc = { pages: converted.pages, meta: { ...converted.meta, title: file.name.replace(/\.docx$/i, '') } };
       store.setState({ smartDocument: smartDoc }, false);
+      store.setActiveVaultId(null, 'smart');
       renderAllSmartPages(smartDoc.pages);
+      updateSmartVaultBadge?.();
       showToast(`Berkas "${file.name}" siap diedit di Kanvas Word Pro!`, 'success');
     } catch (err) {
       showToast('Gagal mengimpor .docx: ' + err.message, 'error');
@@ -2384,15 +3530,15 @@ export function renderSmartWordCanvas(container) {
   // Zoom controls
   container.querySelector('#smart-zoom-out')?.addEventListener('click', () => {
     currentZoom = Math.max(0.5, Number((currentZoom - 0.1).toFixed(2)));
-    applyZoom();
+    applyZoom({ fromUser: true });
   });
   container.querySelector('#smart-zoom-in')?.addEventListener('click', () => {
     currentZoom = Math.min(1.5, Number((currentZoom + 0.1).toFixed(2)));
-    applyZoom();
+    applyZoom({ fromUser: true });
   });
   container.querySelector('#smart-zoom-slider')?.addEventListener('input', (e) => {
     currentZoom = Number(e.target.value) / 100;
-    applyZoom();
+    applyZoom({ fromUser: true });
   });
   container.querySelector('#smart-zoom-fit')?.addEventListener('click', () => {
     const desk = container.querySelector('#smart-word-desk');
@@ -2400,9 +3546,27 @@ export function renderSmartWordCanvas(container) {
     if (desk && sheet) {
       const ratio = (desk.clientWidth - 48) / sheet.offsetWidth;
       currentZoom = Math.max(0.5, Math.min(1.2, Number(ratio.toFixed(2))));
-      applyZoom();
+      applyZoom({ fromUser: true });
     }
   });
+
+  let smartResizeRaf = null;
+  const onSmartViewportResize = () => {
+    if (!pagesStack.isConnected) {
+      window.removeEventListener('resize', onSmartViewportResize);
+      return;
+    }
+    if (store.getState().zoomUserAdjusted) return;
+    if (smartResizeRaf) cancelAnimationFrame(smartResizeRaf);
+    smartResizeRaf = requestAnimationFrame(() => {
+      const nextZoom = Number((computeDefaultDesktopZoom() / 100).toFixed(2));
+      if (Math.abs(currentZoom - nextZoom) >= 0.01) {
+        currentZoom = nextZoom;
+        applyZoom({ fromUser: false });
+      }
+    });
+  };
+  window.addEventListener('resize', onSmartViewportResize);
 
   // =========================================================================
   // LOGIKA AI EDIT & AI COPILOT WORD PRO
@@ -2432,7 +3596,7 @@ export function renderSmartWordCanvas(container) {
   async function runSmartAiEdit(instruction) {
     const qStatus = container.querySelector('#smart-quick-ai-status');
     const cStatus = container.querySelector('#smart-copilot-status');
-    const msg = 'AI sedang membaca seluruh halaman dokumen dan menerapkan revisi...';
+    const msg = 'AI sedang membaca peta dokumen & menambal bagian target tanpa mengubah tata letak...';
     [qStatus, cStatus].forEach((el) => {
       if (el) {
         el.textContent = msg;
@@ -2441,25 +3605,70 @@ export function renderSmartWordCanvas(container) {
     });
 
     try {
-      const snapshot = extractSmartSnapshotFromPages(collectLivePagesData(), store.getSchoolProfile());
+      const livePages = collectLivePagesData();
+      const schoolProfile = store.getSchoolProfile();
+      const allowLayoutRestructure = shouldAllowLayoutRestructure(instruction);
+      const hasExistingContent = livePages.some((p) => {
+        const txt = String(p?.html || '').replace(/<[^>]+>/g, '').trim();
+        return txt.length > 10 || /<table/i.test(p?.html || '');
+      });
+      const indexObj = buildSurgicalIndexFromSmartPages(livePages, schoolProfile);
       const preferredApiId = container.querySelector('#smart-copilot-model-select')?.value || selectedApiId;
-      const editedJson = await editDocumentWithAi(snapshot, instruction, {
-        schoolProfile: store.getSchoolProfile(),
-        preferredApiId
+      const editedJson = await editDocumentWithAi(indexObj.snapshot, instruction, {
+        schoolProfile,
+        preferredApiId,
+        allowLayoutRestructure
       });
 
       pushUndoSnapshot();
-      const docModel = aiJsonToSmartDocModel(editedJson, store.getSchoolProfile(), store.getLetterOptions());
-      const converted = docModelToSmartPages(docModel, store.getSchoolProfile());
-      smartDoc = { pages: converted.pages, meta: converted.meta };
+      const latestState = store.getState().smartDocument || {};
+      const shouldFullRebuild =
+        !hasExistingContent ||
+        (allowLayoutRestructure &&
+          editedJson?.editScope === 'restructure' &&
+          Array.isArray(editedJson.blocks) &&
+          editedJson.blocks.length > 0 &&
+          (!Array.isArray(editedJson.patches) || editedJson.patches.length === 0));
+
+      let summaryText = editedJson.summaryOfChanges || 'Revisi AI berhasil diterapkan ke Kanvas Word Pro.';
+
+      if (shouldFullRebuild) {
+        const docModel = aiJsonToSmartDocModel(editedJson, schoolProfile, store.getLetterOptions());
+        const converted = docModelToSmartPages(docModel, schoolProfile);
+        smartDoc = {
+          pages: converted.pages,
+          meta: converted.meta,
+          ...(latestState.verification ? { verification: latestState.verification } : {}),
+          ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
+        };
+      } else {
+        const patchResult = applySurgicalPatchesToSmartPages(livePages, editedJson, {
+          schoolProfile,
+          allowLayoutRestructure,
+          renderBlocksToPageHtml: (aiBlocks = []) => {
+            const miniDoc = { blocks: convertAiBlocksToDocumentBlocks(aiBlocks) };
+            return docModelToSmartPages(miniDoc, schoolProfile).pages.map((mp) => mp.html).filter(Boolean).join('\n');
+          }
+        });
+        smartDoc = {
+          ...smartDoc,
+          pages: patchResult.pages,
+          meta: patchResult.meta || smartDoc.meta,
+          ...(latestState.verification ? { verification: latestState.verification } : {}),
+          ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
+        };
+        if (patchResult.appliedCount > 0) {
+          summaryText = `${summaryText} (${patchResult.appliedCount} bagian diperbarui, tata letak & tabel tetap utuh)`;
+        }
+      }
+
       store.setState({ smartDocument: smartDoc }, false);
       renderAllSmartPages(smartDoc.pages);
 
-      const summary = editedJson.summaryOfChanges || 'Revisi AI berhasil diterapkan ke Kanvas Word Pro.';
       [qStatus, cStatus].forEach((el) => {
-        if (el) el.textContent = summary;
+        if (el) el.textContent = summaryText;
       });
-      showToast(summary, 'success');
+      showToast(summaryText, 'success');
     } catch (err) {
       [qStatus, cStatus].forEach((el) => {
         if (el) {
@@ -2510,14 +3719,16 @@ export function renderSmartWordCanvas(container) {
       const school = store.getSchoolProfile();
       const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
       const preferredApiId = container.querySelector('#smart-copilot-model-select')?.value || selectedApiId;
-      const references = store.getAiReferences(4);
+      const kbSelection = store.getSmartAiReferencesForPrompt(userPrompt, 3);
 
       const fullPrompt = buildCopilotUserPrompt({
         userPrompt,
         schoolName: school.schoolName,
         principalName: school.principalName,
         dateStr,
-        references
+        references: kbSelection.references,
+        matchMode: kbSelection.matchMode,
+        totalKnowledgeCount: kbSelection.totalKnowledgeCount
       });
 
       const parsedJson = await callAiWithValidation({
@@ -2540,10 +3751,13 @@ export function renderSmartWordCanvas(container) {
       const converted = docModelToSmartPages(docModel, school);
       smartDoc = { pages: converted.pages, meta: converted.meta };
       store.setState({ smartDocument: smartDoc }, false);
+      store.setActiveVaultId(null, 'smart');
       renderAllSmartPages(smartDoc.pages);
+      updateSmartVaultBadge?.();
 
-      cStatus.textContent = 'Surat baru berhasil dibuat ke dalam Kanvas Word Pro!';
-      showToast('Surat baru selesai disusun AI ke Word Pro.', 'success');
+      const kbFeedback = describeAiMatchFeedback(kbSelection);
+      cStatus.textContent = kbFeedback;
+      showToast(kbFeedback, 'success');
     } catch (err) {
       cStatus.textContent = 'Gagal membuat surat AI: ' + err.message;
       cStatus.classList.add('error');
@@ -2655,6 +3869,7 @@ export function renderSmartWordCanvas(container) {
           right: Number(modalRoot.querySelector('#sm-right').value) || 2.0
         }
       });
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       closeSmartModal();
       renderAllSmartPages(collectLivePagesData());
       showToast('Pengaturan kertas & margin disimpan.', 'success');
@@ -2696,7 +3911,8 @@ export function renderSmartWordCanvas(container) {
     modalRoot.querySelectorAll('[data-pick-kop]').forEach((btn) => {
       btn.onclick = () => {
         store.applyKopFromGallery(btn.dataset.pickKop);
-        closeSmartModal();
+        syncGlobalPrintPageStyle(store.getLetterOptions());
+      closeSmartModal();
         renderAllSmartPages(collectLivePagesData());
         showToast('Kop surat resmi berhasil diperbarui.', 'success');
       };
@@ -2715,6 +3931,7 @@ export function renderSmartWordCanvas(container) {
         category: 'Unggahan'
       });
       store.applyKopFromGallery(added.id);
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       closeSmartModal();
       renderAllSmartPages(collectLivePagesData());
       showToast('Kop surat berhasil diunggah dan diterapkan.', 'success');
@@ -2723,20 +3940,192 @@ export function renderSmartWordCanvas(container) {
     e.target.value = '';
   });
 
+  // Shortcut 1-klik Tata Letak 2 Kolom Berdampingan (Tanpa Garis)
+  container.querySelector('#smart-btn-insert-2col')?.addEventListener('click', () => {
+    const html = `
+<table class="smart-word-table smart-table-none" data-border-style="none" data-header-shading="false" data-header-bold="false" data-col-widths="50,50">
+  <colgroup><col style="width: 50%;"><col style="width: 50%;"></colgroup>
+  <tbody>
+    <tr>
+      <td><p><strong>Keterangan / Catatan Kiri:</strong></p><p>Isi teks kolom sebelah kiri...</p></td>
+      <td style="text-align: center;"><p>Garut, ${escapeHtmlText(new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }))}</p><p>${escapeHtmlText(store.getSchoolProfile().principalTitle || 'Kepala SMK IT Al-Hawari')}</p><p><br></p><p><br></p><p><strong><u>${escapeHtmlText(store.getSchoolProfile().principalName || 'Dian Nurhadian, S.Pd.')}</u></strong></p></td>
+    </tr>
+  </tbody>
+</table><p><br></p>`.trim();
+    syncGlobalPrintPageStyle(store.getLetterOptions());
+    execSmartCommand('insertHTML', html);
+    showToast('Tata letak 2 kolom berdampingan tanpa garis berhasil disisipkan.', 'success');
+  });
+
+  // Wizard Template Resmi Surat Tugas & SPPD (3 Halaman 1:1 Microsoft Word)
+  function openSuratTugasSppdModal() {
+    const school = store.getSchoolProfile();
+    const opts = store.getLetterOptions();
+    const todayStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    const nextNum = generateLetterNumber({
+      typeCode: 'ST',
+      sequence: store.getNextOutgoingSequence()
+    });
+
+    modalRoot.innerHTML = `
+      <div class="modal-overlay">
+        <div class="modal-box" style="max-width: 640px; max-height: 90vh; overflow-y: auto;">
+          <div class="modal-header" style="background: #f0fdf4; border-bottom-color: #bbf7d0;">
+            <h3 style="color: #14532d;">${ICON_TARGET} Template Resmi Surat Tugas &amp; SPPD (1:1 Word)</h3>
+            <button class="btn-icon" id="smart-modal-close">✕</button>
+          </div>
+          <div class="modal-body" style="display:grid; gap:10px;">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+              <div>
+                <label class="form-label">Paket Halaman Dokumen</label>
+                <select id="sppd-wiz-pkg" class="form-input">
+                  <option value="both" selected>Surat Tugas + SPPD Lengkap (3 Halaman)</option>
+                  <option value="st">Surat Tugas Saja (1 Halaman)</option>
+                  <option value="sppd">SPPD + Halaman Keterangan Saja (2 Halaman)</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Ukuran Kertas Cetak</label>
+                <select id="sppd-wiz-paper" class="form-input">
+                  <option value="f4" ${(opts.paperSize || 'f4') === 'f4' ? 'selected' : ''}>F4 / Folio (21,5 x 33 cm)</option>
+                  <option value="a4" ${opts.paperSize === 'a4' ? 'selected' : ''}>A4 (21 x 29,7 cm)</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="form-label">Nomor Surat Tugas</label>
+              <input id="sppd-wiz-nomor" class="form-input" value="${escapeHtmlText(nextNum)}" />
+            </div>
+            <div>
+              <label class="form-label">Daftar Pegawai / Guru yang Ditugaskan (1 baris per orang: Nama | Jabatan)</label>
+              <textarea id="sppd-wiz-assignees" class="form-input" rows="3">Taufik Dwi Setyo Ramadhan, S.Pd. | Guru
+Siti Laras Maemunah, S.Pd. | Guru</textarea>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+              <div>
+                <label class="form-label">Maksud Tugas (di Surat Tugas)</label>
+                <input id="sppd-wiz-maksud-st" class="form-input" value="Penjemputan Peserta Didik PKL" />
+              </div>
+              <div>
+                <label class="form-label">Tujuan Lokasi / Instansi</label>
+                <input id="sppd-wiz-lokasi" class="form-input" value="DRAGON MOTION PICTURE ASIA" />
+              </div>
+            </div>
+            <div>
+              <label class="form-label">Maksud Perjalanan Dinas (Poin 6 SPPD)</label>
+              <input id="sppd-wiz-maksud-sppd" class="form-input" value="Penjemputan siswa kelas 12 Multimedia ke tempat PKL" />
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
+              <div>
+                <label class="form-label">Kendaraan</label>
+                <input id="sppd-wiz-kendaraan" class="form-input" value="Mobil" />
+              </div>
+              <div>
+                <label class="form-label">Jenis Kendaraan (Hal 3)</label>
+                <input id="sppd-wiz-jenis-kend" class="form-input" value="Roda 4" />
+              </div>
+              <div>
+                <label class="form-label">Lama Perjalanan (Hari)</label>
+                <input id="sppd-wiz-lama" class="form-input" value="1" />
+              </div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
+              <div>
+                <label class="form-label">Tanggal Surat</label>
+                <input id="sppd-wiz-tgl-surat" class="form-input" value="${escapeHtmlText(todayStr)}" />
+              </div>
+              <div>
+                <label class="form-label">Tanggal Berangkat</label>
+                <input id="sppd-wiz-tgl-berangkat" class="form-input" value="${escapeHtmlText(todayStr)}" />
+              </div>
+              <div>
+                <label class="form-label">Tanggal Kembali</label>
+                <input id="sppd-wiz-tgl-kembali" class="form-input" value="${escapeHtmlText(todayStr)}" />
+              </div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+              <div>
+                <label class="form-label">Tempat Tiba (Pojok Bawah Hal 1)</label>
+                <input id="sppd-wiz-tiba" class="form-input" value="Dragon Motion Picture" />
+              </div>
+              <div>
+                <label class="form-label">Pemberi Perintah / Penanda Tangan</label>
+                <input id="sppd-wiz-pemberi" class="form-input" value="${escapeHtmlText(school.principalName || 'Dian Nurhadian, S.Pd.')}" />
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="smart-modal-cancel">Batal</button>
+            <button class="btn btn-primary" id="sppd-wiz-apply">✨ Terapkan ke Kanvas Word Pro (1:1)</button>
+          </div>
+        </div>
+      </div>`;
+    modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
+    modalRoot.querySelector('#smart-modal-cancel').onclick = closeSmartModal;
+    modalRoot.querySelector('#sppd-wiz-apply').onclick = () => {
+      const pkg = modalRoot.querySelector('#sppd-wiz-pkg').value;
+      const paperSize = modalRoot.querySelector('#sppd-wiz-paper').value || 'f4';
+      const curOpts = store.getLetterOptions();
+      store.updateLetterOptions({ paperSize });
+      const paperSelect = container.querySelector('#smart-paper-select');
+      if (paperSelect) paperSelect.value = paperSize;
+
+      const formData = {
+        nomorSurat: modalRoot.querySelector('#sppd-wiz-nomor').value.trim(),
+        assignees: modalRoot.querySelector('#sppd-wiz-assignees').value,
+        maksudTugas: modalRoot.querySelector('#sppd-wiz-maksud-st').value.trim(),
+        tujuanLokasi: modalRoot.querySelector('#sppd-wiz-lokasi').value.trim(),
+        maksudSppd: modalRoot.querySelector('#sppd-wiz-maksud-sppd').value.trim(),
+        kendaraan: modalRoot.querySelector('#sppd-wiz-kendaraan').value.trim() || 'Mobil',
+        kendaraanSingkat: modalRoot.querySelector('#sppd-wiz-jenis-kend').value.trim() || 'Roda 4',
+        lamaHari: modalRoot.querySelector('#sppd-wiz-lama').value.trim() || '1',
+        tanggalSurat: modalRoot.querySelector('#sppd-wiz-tgl-surat').value.trim() || todayStr,
+        tglBerangkat: modalRoot.querySelector('#sppd-wiz-tgl-berangkat').value.trim() || todayStr,
+        tglKembali: modalRoot.querySelector('#sppd-wiz-tgl-kembali').value.trim() || todayStr,
+        tempatTiba: modalRoot.querySelector('#sppd-wiz-tiba').value.trim() || 'Dragon Motion Picture',
+        pemberiNama: modalRoot.querySelector('#sppd-wiz-pemberi').value.trim() || school.principalName
+      };
+
+      pushUndoSnapshot();
+      const docModel = buildSuratTugasSppdDocModel(formData, school, {
+        includeSuratTugas: pkg !== 'sppd',
+        includeSppd: pkg !== 'st',
+        showKop: curOpts.showKop !== false,
+        paperSize,
+        orientation: 'portrait',
+        margins: curOpts.margins
+      });
+      const converted = docModelToSmartPages(docModel, school);
+      smartDoc = { pages: converted.pages, meta: converted.meta };
+      store.setState({ smartDocument: smartDoc }, false);
+      store.setActiveVaultId(null, 'smart');
+      syncGlobalPrintPageStyle(store.getLetterOptions());
+      closeSmartModal();
+      renderAllSmartPages(smartDoc.pages);
+      updateSmartVaultBadge?.();
+      showToast('Template Surat Tugas & SPPD berhasil diterapkan 1:1 ke Word Pro!', 'success');
+    };
+  }
+
+  container.querySelector('#smart-btn-template-sppd')?.addEventListener('click', openSuratTugasSppdModal);
+
   // Modal Sisipkan Tabel Word / Rincian
   container.querySelector('#smart-btn-insert-table')?.addEventListener('click', () => {
     modalRoot.innerHTML = `
       <div class="modal-overlay">
-        <div class="modal-box" style="max-width: 440px;">
+        <div class="modal-box" style="max-width: 470px;">
           <div class="modal-header">
             <h3>Sisipkan Tabel ke Dokumen</h3>
             <button class="btn-icon" id="smart-modal-close">✕</button>
           </div>
           <div class="modal-body" style="display:grid; gap:12px;">
             <div>
-              <label class="form-label">Jenis Tabel Word</label>
+              <label class="form-label">Jenis Tabel &amp; Garis Word</label>
               <select id="sm-tbl-type" class="form-input">
-                <option value="grid">Tabel Berbingkai Penuh (Jadwal / Panitia / Rekap)</option>
+                <option value="grid">Tabel Berbingkai Penuh — Header Abu (Jadwal / Panitia)</option>
+                <option value="grid-clean">Tabel Berbingkai Penuh — Header Putih (No | Nama | Jabatan)</option>
+                <option value="sppd">Tabel SPPD — Garis Horizontal &amp; Tengah Saja</option>
+                <option value="none-2col">Layout 2 Kolom Berdampingan Tanpa Garis (Catatan + TTD)</option>
                 <option value="identity">Tabel Rincian Tanpa Garis (Label : Nilai)</option>
               </select>
             </div>
@@ -2764,6 +4153,22 @@ export function renderSmartWordCanvas(container) {
           `<tr><td style="width:30%;">Rincian ${i + 1}</td><td>: ........................................</td></tr>`
         ).join('');
         html = `<table class="smart-identity-table" data-smart-role="identity-table"><tbody>${rowsHtml}</tbody></table><p><br></p>`;
+      } else if (tType === 'none-2col') {
+        const bodyRows = Array.from({ length: nRows }, () =>
+          `<tr><td><p>Isi kolom kiri...</p></td><td><p>Isi kolom kanan...</p></td></tr>`
+        ).join('');
+        html = `<table class="smart-word-table smart-table-none" data-border-style="none" data-header-shading="false" data-header-bold="false" data-col-widths="50,50"><colgroup><col style="width:50%;"><col style="width:50%;"></colgroup><tbody>${bodyRows}</tbody></table><p><br></p>`;
+      } else if (tType === 'sppd') {
+        const bodyRows = Array.from({ length: nRows }, (_, i) =>
+          `<tr><td>${i + 1}.   Uraian poin SPPD</td><td>Isi rincian...</td></tr>`
+        ).join('');
+        html = `<table class="smart-word-table smart-table-sppd" data-border-style="sppd" data-header-shading="false" data-header-bold="false" data-col-widths="46,54"><colgroup><col style="width:46%;"><col style="width:54%;"></colgroup><tbody>${bodyRows}</tbody></table><p><br></p>`;
+      } else if (tType === 'grid-clean') {
+        const thCells = Array.from({ length: nCols }, (_, c) => `<th style="text-align: center;">Kolom ${c + 1}</th>`).join('');
+        const bodyRows = Array.from({ length: Math.max(1, nRows - 1) }, () =>
+          `<tr>${Array.from({ length: nCols }, () => '<td>Isi data...</td>').join('')}</tr>`
+        ).join('');
+        html = `<table class="smart-word-table no-header-bg no-header-bold" data-header-shading="false" data-header-bold="false"><thead><tr data-header="true">${thCells}</tr></thead><tbody>${bodyRows}</tbody></table><p><br></p>`;
       } else {
         const thCells = Array.from({ length: nCols }, (_, c) => `<th>Kolom ${c + 1}</th>`).join('');
         const bodyRows = Array.from({ length: Math.max(1, nRows - 1) }, () =>
@@ -2771,6 +4176,7 @@ export function renderSmartWordCanvas(container) {
         ).join('');
         html = `<table class="smart-word-table"><thead><tr>${thCells}</tr></thead><tbody>${bodyRows}</tbody></table><p><br></p>`;
       }
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       closeSmartModal();
       execSmartCommand('insertHTML', html);
       showToast('Tabel berhasil disisipkan.', 'success');
@@ -2787,21 +4193,82 @@ export function renderSmartWordCanvas(container) {
     });
   }
 
+  const statusVaultBadgeEl = container.querySelector('#smart-status-vault-badge');
+
+  function updateSmartVaultBadge() {
+    renderCanvasVaultBadge(statusVaultBadgeEl, store.getActiveVaultEntry('smart'));
+  }
+  updateSmartVaultBadge();
+
   function resetSmartCanvasToEmpty(notify = true) {
     pushUndoSnapshot();
     smartDoc = createEmptySmartDocument();
     store.setState({ smartDocument: smartDoc }, false);
+    store.setActiveVaultId(null, 'smart');
     renderAllSmartPages(smartDoc.pages);
+    updateSmartVaultBadge();
     if (notify) {
       showToast('Lembar Word Pro berhasil dikosongkan ke kertas baru.', 'info');
     }
   }
 
-  function openSmartSaveVaultModal({ clearAfterSave = false } = {}) {
+  function writeSmartUpdateToEntry(targetEntry, { unlock = false, clearAfterSave = false } = {}) {
     const snap = extractSmartSnapshotFromPages(collectLivePagesData(), store.getSchoolProfile());
-    const defaultTitle = snap.letterTitle && snap.letterTitle !== 'SURAT DINAS SEKOLAH'
+    const liveDocModel = getActiveSmartDocModel();
+    const summaryText = (snap.blocks || [])
+      .filter(b => b.type === 'paragraph' && b.text)
+      .map(b => b.text)
+      .join(' ')
+      .slice(0, 160);
+
+    store.updateLetterVaultEntry(targetEntry.id, {
+      nomorSurat: snap.nomorSurat || targetEntry.nomorSurat || '-',
+      tanggalSurat: snap.signer?.date || targetEntry.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+      targetPerson: snap.tujuan || targetEntry.targetPerson || '-',
+      perihal: snap.hal || targetEntry.perihal || targetEntry.title,
+      summary: summaryText || targetEntry.summary || 'Dokumen persuratan dari Kanvas Word Pro.',
+      document: liveDocModel,
+      ...(unlock ? { isLockedTemplate: false, isMasterTemplate: false } : {})
+    });
+    syncGlobalPrintPageStyle(store.getLetterOptions());
+    updateSmartVaultBadge();
+    if (clearAfterSave) {
+      resetSmartCanvasToEmpty(false);
+      showToast(`✓ Perubahan disimpan ke "${targetEntry.title}" & kertas dikosongkan!`, 'success');
+    } else if (unlock) {
+      showToast(`🔓 Kunci dibuka & perubahan disimpan ke "${targetEntry.title}". Anda dapat mengunci Master ⭐ kembali di Gudang Surat.`, 'success');
+    } else {
+      showToast(`✓ Tersimpan ke "${targetEntry.title}" (Ctrl+S) — file Gudang diperbarui tanpa duplikat.`, 'success');
+    }
+  }
+
+  function performSmartSave({ clearAfterSave = false } = {}) {
+    const activeEntry = store.getActiveVaultEntry('smart');
+    if (!activeEntry) {
+      openSmartSaveVaultModal({ mode: 'save', clearAfterSave });
+      return;
+    }
+    if (activeEntry.isLockedTemplate || activeEntry.isMasterTemplate) {
+      openLockedMasterSaveChoiceModal(modalRoot, activeEntry, {
+        clearAfterSave,
+        onSaveAsCopy: () => openSmartSaveVaultModal({ mode: 'save-as', clearAfterSave }),
+        onUnlockAndSave: () => writeSmartUpdateToEntry(activeEntry, { unlock: true, clearAfterSave })
+      });
+      return;
+    }
+    writeSmartUpdateToEntry(activeEntry, { clearAfterSave });
+  }
+
+  function openSmartSaveVaultModal({ mode = 'save', clearAfterSave = false } = {}) {
+    const isSaveAs = mode === 'save-as';
+    const activeEntry = store.getActiveVaultEntry('smart');
+    const snap = extractSmartSnapshotFromPages(collectLivePagesData(), store.getSchoolProfile());
+    const fallbackTitle = snap.letterTitle && snap.letterTitle !== 'SURAT DINAS SEKOLAH'
       ? snap.letterTitle
       : (smartDoc?.meta?.title && smartDoc.meta.title !== 'Dokumen Baru' ? smartDoc.meta.title : 'Dokumen Surat Sekolah');
+    const defaultTitle = isSaveAs
+      ? `Salinan - ${activeEntry?.title || fallbackTitle}`
+      : fallbackTitle;
     const summaryText = (snap.blocks || [])
       .filter(b => b.type === 'paragraph' && b.text)
       .map(b => b.text)
@@ -2810,46 +4277,107 @@ export function renderSmartWordCanvas(container) {
 
     modalRoot.innerHTML = `
       <div class="modal-overlay">
-        <div class="modal-box" style="max-width: 460px;">
+        <div class="modal-box" style="max-width: 480px;">
           <div class="modal-header">
-            <h3>${ICON_SAVE} ${clearAfterSave ? 'Simpan ke Gudang Sebelum Mengosongkan' : 'Simpan ke Gudang Surat'}</h3>
+            <h3>${isSaveAs ? ICON_COPY_DOC : ICON_SAVE} ${clearAfterSave ? 'Simpan ke Gudang Sebelum Mengosongkan' : (isSaveAs ? 'Save As / Duplikat ke Gudang Surat' : 'Simpan Dokumen Baru ke Gudang Surat')}</h3>
             <button class="btn-icon" id="smart-modal-close">✕</button>
           </div>
           <div class="modal-body" style="display:grid; gap:10px;">
-            <div><label class="form-label">Judul Arsip</label><input id="sm-v-title" class="form-input" value="${escapeHtmlText(defaultTitle)}"></div>
-            <div><label class="form-label">Kategori</label><input id="sm-v-cat" class="form-input" value="Surat Dinas"></div>
+            ${isSaveAs && activeEntry ? `<div class="auth-alert" style="background:#eff6ff; border-color:#bfdbfe; color:#1e3a8a; font-size:12px;">Membuat salinan independen baru dari <strong>${escapeHtmlText(activeEntry.title)}</strong> agar dokumen asli tetap aman tanpa tertimpa.</div>` : ''}
+            <div>
+              <label class="form-label">Judul Arsip</label>
+              <input id="sm-v-title" class="form-input" value="${escapeHtmlText(defaultTitle)}">
+              <div id="sm-v-dup-warn" class="hidden" style="margin-top:6px; padding:7px 10px; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; font-size:11.5px; color:#92400e;"></div>
+            </div>
+            <div><label class="form-label">Kategori</label><input id="sm-v-cat" class="form-input" value="${escapeHtmlText(activeEntry?.category || 'Surat Dinas')}"></div>
             <div><label class="form-label">Nomor Surat</label><input id="sm-v-nomor" class="form-input" value="${escapeHtmlText(snap.nomorSurat)}"></div>
             <div><label class="form-label">Perihal</label><input id="sm-v-hal" class="form-input" value="${escapeHtmlText(snap.hal)}"></div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary" id="smart-modal-cancel">Batal</button>
-            <button class="btn btn-primary" id="smart-modal-save-ok">${clearAfterSave ? 'Simpan &amp; Kosongkan Kertas' : 'Simpan ke Gudang'}</button>
+            <button class="btn btn-secondary hidden" id="smart-modal-overwrite-btn" title="Timpa file gudang dengan judul yang sama">Timpa File Sama</button>
+            <button class="btn btn-primary" id="smart-modal-save-ok">${clearAfterSave ? 'Simpan &amp; Kosongkan Kertas' : (isSaveAs ? 'Save As (Simpan Duplikat)' : 'Simpan ke Gudang')}</button>
           </div>
         </div>
       </div>`;
+
+    const titleInput = modalRoot.querySelector('#sm-v-title');
+    const dupWarnEl = modalRoot.querySelector('#sm-v-dup-warn');
+    const overwriteBtn = modalRoot.querySelector('#smart-modal-overwrite-btn');
+    let matchedDup = null;
+
+    const checkDupTitle = () => {
+      const val = titleInput?.value.trim() || '';
+      matchedDup = store.findLetterVaultByTitle(val);
+      if (matchedDup) {
+        if (matchedDup.isLockedTemplate || matchedDup.isMasterTemplate) {
+          dupWarnEl.textContent = `🔒 "${matchedDup.title}" berstatus ⭐ Master Terkunci dan dilindungi agar tidak tertimpa. Ubah judul untuk menyimpan Salinan Baru.`;
+          dupWarnEl.classList.remove('hidden');
+          overwriteBtn?.classList.add('hidden');
+        } else {
+          dupWarnEl.textContent = `⚠️ Dokumen berjudul "${matchedDup.title}" sudah ada di Gudang. Ganti judul untuk membuat file duplikat terpisah, atau klik "Timpa File Sama".`;
+          dupWarnEl.classList.remove('hidden');
+          overwriteBtn?.classList.remove('hidden');
+        }
+      } else {
+        dupWarnEl.classList.add('hidden');
+        overwriteBtn?.classList.add('hidden');
+      }
+    };
+    titleInput?.addEventListener('input', checkDupTitle);
+    checkDupTitle();
+
     modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
     modalRoot.querySelector('#smart-modal-cancel').onclick = closeSmartModal;
+
+    const buildEntryPayload = (titleVal) => ({
+      title: titleVal,
+      category: modalRoot.querySelector('#sm-v-cat').value.trim() || 'Surat Dinas',
+      nomorSurat: modalRoot.querySelector('#sm-v-nomor').value.trim() || '-',
+      tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+      targetPerson: snap.tujuan || '-',
+      perihal: modalRoot.querySelector('#sm-v-hal').value.trim() || titleVal,
+      summary: summaryText || 'Dokumen persuratan dari Kanvas Word Pro.',
+      document: getActiveSmartDocModel(),
+      isAiReference: true,
+      source: 'created'
+    });
+
+    if (overwriteBtn) {
+      overwriteBtn.onclick = () => {
+        if (!matchedDup) return;
+        const titleVal = titleInput.value.trim() || matchedDup.title;
+        store.updateLetterVaultEntry(matchedDup.id, buildEntryPayload(titleVal));
+        store.setActiveVaultId(matchedDup.id, 'smart');
+        syncGlobalPrintPageStyle(store.getLetterOptions());
+        closeSmartModal();
+        if (clearAfterSave) {
+          resetSmartCanvasToEmpty(false);
+          showToast(`✓ File "${titleVal}" di Gudang diperbarui & kertas dikosongkan!`, 'success');
+        } else {
+          updateSmartVaultBadge();
+          showToast(`✓ File "${titleVal}" di Gudang Surat berhasil diperbarui!`, 'success');
+        }
+      };
+    }
+
     modalRoot.querySelector('#smart-modal-save-ok').onclick = () => {
-      const liveDocModel = getActiveSmartDocModel();
-      const titleVal = modalRoot.querySelector('#sm-v-title').value.trim() || defaultTitle;
-      store.addLetterVaultEntry({
-        title: titleVal,
-        category: modalRoot.querySelector('#sm-v-cat').value.trim() || 'Surat Dinas',
-        nomorSurat: modalRoot.querySelector('#sm-v-nomor').value.trim() || '-',
-        tanggalSurat: snap.signer?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-        targetPerson: snap.tujuan || '-',
-        perihal: modalRoot.querySelector('#sm-v-hal').value.trim() || titleVal,
-        summary: summaryText || 'Dokumen persuratan dari Kanvas Word Pro.',
-        document: liveDocModel,
-        isAiReference: true,
-        source: 'created'
-      });
+      const titleVal = titleInput.value.trim() || defaultTitle;
+      const created = store.addLetterVaultEntry(buildEntryPayload(titleVal));
+      store.setActiveVaultId(created.id, 'smart');
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       closeSmartModal();
       if (clearAfterSave) {
         resetSmartCanvasToEmpty(false);
         showToast(`"${titleVal}" tersimpan ke Gudang Surat & kertas siap dipakai ulang!`, 'success');
       } else {
-        showToast('Dokumen Word Pro berhasil disimpan ke Gudang Surat!', 'success');
+        updateSmartVaultBadge();
+        showToast(
+          isSaveAs
+            ? `✓ Save As berhasil! Salinan "${titleVal}" dibuat & kini aktif diedit (Ctrl+S).`
+            : `✓ "${titleVal}" disimpan ke Gudang Surat! Edit berikutnya cukup tekan Ctrl+S.`,
+          'success'
+        );
       }
     };
   }
@@ -2863,6 +4391,7 @@ export function renderSmartWordCanvas(container) {
     });
     const firstPara = (snap.blocks || []).find(b => b.type === 'paragraph' && b.text)?.text || '';
     const liveModel = getActiveSmartDocModel();
+    const livePages = collectLivePagesData();
     return {
       snap,
       nextInfo,
@@ -2878,7 +4407,11 @@ export function renderSmartWordCanvas(container) {
         signerName: snap.signer?.name || store.getSchoolProfile()?.principalName || 'Kepala Sekolah',
         summary: firstPara.slice(0, 160),
         sourceMode: 'smart',
-        document: liveModel
+        document: liveModel,
+        smartPagesSnapshot: {
+          pages: livePages,
+          letterOptions: store.getLetterOptions()
+        }
       }
     };
   }
@@ -2894,6 +4427,7 @@ export function renderSmartWordCanvas(container) {
       syncActiveDocMode: 'smart',
       clearAfterSave
     });
+    if (!clearAfterSave) refreshSmartFloatingQrOverlay();
     return result;
   };
   activeSmartRequestAccHandler = async (signerRole = 'kepala_sekolah', clearAfterSave = false) => {
@@ -2996,7 +4530,11 @@ export function renderSmartWordCanvas(container) {
           signerName: snap.signer?.name || school?.principalName || 'Kepala Sekolah',
           summary: firstPara.slice(0, 160),
           sourceMode: 'smart',
-          document: liveModel
+          document: liveModel,
+          smartPagesSnapshot: {
+            pages: collectLivePagesData(),
+            letterOptions: store.getLetterOptions()
+          }
         };
 
         if (requiresAcc) {
@@ -3007,7 +4545,8 @@ export function renderSmartWordCanvas(container) {
             syncActiveDocMode: 'smart',
             clearAfterSave
           });
-          closeSmartModal();
+          syncGlobalPrintPageStyle(store.getLetterOptions());
+      closeSmartModal();
           if (clearAfterSave) {
             resetSmartCanvasToEmpty(false);
           }
@@ -3027,13 +4566,15 @@ export function renderSmartWordCanvas(container) {
           clearAfterSave
         });
 
-        closeSmartModal();
+        syncGlobalPrintPageStyle(store.getLetterOptions());
+      closeSmartModal();
         if (clearAfterSave) {
           resetSmartCanvasToEmpty(false);
           showToast(`Tercatat (${recorded.nomorSurat})${authorizeSah ? ' & DISAHKAN' : ''} ke Surat Keluar, kertas dikosongkan!`, 'success');
         } else {
+          refreshSmartFloatingQrOverlay();
           showToast(
-            `Tercatat! Nomor ${recorded.nomorSurat}${authorizeSah ? (cloudResult.ok ? ' DISAHKAN (Barcode QR Aktif)' : ' DISAHKAN (Lokal)') : ' tersimpan'} ke Surat Keluar.`,
+            `Tercatat! Nomor ${recorded.nomorSurat}${authorizeSah ? (cloudResult.ok ? ' DISAHKAN (Barcode QR Aktif di Kanvas — bebas digeser atau disembunyikan)' : ' DISAHKAN (Lokal)') : ' tersimpan'} ke Surat Keluar.`,
             'success'
           );
         }
@@ -3096,16 +4637,18 @@ export function renderSmartWordCanvas(container) {
 
     modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
     modalRoot.querySelector('#smart-modal-cancel').onclick = closeSmartModal;
-    modalRoot.querySelector('#sm-ref-vault').onclick = () => openSmartSaveVaultModal({ clearAfterSave: true });
+    modalRoot.querySelector('#sm-ref-vault').onclick = () => performSmartSave({ clearAfterSave: true });
     modalRoot.querySelector('#sm-ref-outgoing').onclick = () => openSmartRecordOutgoingModal({ clearAfterSave: true });
     modalRoot.querySelector('#sm-ref-discard').onclick = () => {
+      syncGlobalPrintPageStyle(store.getLetterOptions());
       closeSmartModal();
       resetSmartCanvasToEmpty(true);
     };
   }
 
-  // Modal Simpan ke Gudang Surat
-  container.querySelector('#smart-btn-save-vault')?.addEventListener('click', () => openSmartSaveVaultModal({ clearAfterSave: false }));
+  // Simpan (Save: Ctrl+S) & Save As (Duplikat: Ctrl+Shift+S / F12)
+  container.querySelector('#smart-btn-save-vault')?.addEventListener('click', () => performSmartSave({ clearAfterSave: false }));
+  container.querySelector('#smart-btn-save-as-vault')?.addEventListener('click', () => openSmartSaveVaultModal({ mode: 'save-as', clearAfterSave: false }));
 
   // Tombol Refresh / Bersihkan Lembar Kerja Word Pro
   container.querySelector('#smart-btn-refresh')?.addEventListener('click', openSmartRefreshConfirmModal);
@@ -3113,11 +4656,22 @@ export function renderSmartWordCanvas(container) {
   // Modal Catat Surat Keluar Resmi (berbagi nomor urut buku agenda!)
   container.querySelector('#smart-btn-record-outgoing')?.addEventListener('click', () => openSmartRecordOutgoingModal({ clearAfterSave: false }));
 
-  // Expose helper download lokal bila dibutuhkan oleh shortcut
-  container.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      container.querySelector('#smart-btn-save-vault')?.click();
+  // Shortcut Global Word Pro (Ctrl+S = Save, Ctrl+Shift+S / F12 = Save As)
+  const smartWorkspaceRoot = container.querySelector('.smart-word-workspace');
+  const onSmartGlobalKeyDown = (e) => {
+    if (!smartWorkspaceRoot || !smartWorkspaceRoot.isConnected) {
+      document.removeEventListener('keydown', onSmartGlobalKeyDown);
+      return;
     }
-  });
+    const isSaveAs = ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') || e.key === 'F12';
+    const isSave = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 's';
+    if (isSaveAs) {
+      e.preventDefault();
+      openSmartSaveVaultModal({ mode: 'save-as', clearAfterSave: false });
+    } else if (isSave) {
+      e.preventDefault();
+      performSmartSave({ clearAfterSave: false });
+    }
+  };
+  document.addEventListener('keydown', onSmartGlobalKeyDown);
 }

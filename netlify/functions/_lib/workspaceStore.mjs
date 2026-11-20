@@ -22,6 +22,8 @@ export const BLOB_KEYS = Object.freeze({
   API_VAULT: 'data_api_vault',
   AGENDA_BOOK: 'data_agenda_book',
   OUTGOING_LIST: 'data_outgoing_list',
+  INCOMING_LIST: 'data_incoming_list',
+  INCOMING_FILE_PREFIX: 'incoming_file_',
   DOC_DRAFTS: 'data_doc_drafts',
   SYNC_META: 'sync_meta'
 });
@@ -32,6 +34,7 @@ export const DEFAULT_PERMISSIONS = Object.freeze({
   allowTuRevokePrincipalQr: false,
   allowTuManageApiVault: true,
   allowTuDeleteOutgoing: false,
+  allowTuDeleteIncoming: true,
   updatedAt: '',
   updatedBy: 'system',
   updatedByRole: 'admin',
@@ -375,7 +378,7 @@ export async function callGasBridge(wsStore, env, action, payload = {}, fetchImp
   }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 18000) : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 28000) : null;
 
   try {
     const res = await fetchImpl(internal.webhookUrl, {
@@ -411,7 +414,7 @@ export async function callGasBridge(wsStore, env, action, payload = {}, fetchImp
     return { ok: true, data: json };
   } catch (err) {
     const errMsg = err?.name === 'AbortError'
-      ? 'Koneksi ke Google Apps Script Drive timeout (>18 detik).'
+      ? 'Koneksi ke Google Apps Script Drive timeout (>28 detik).'
       : `Gagal menghubungi jembatan Google Drive (${err?.message || 'network error'}).`;
     await saveDriveStatusUpdate(wsStore, { lastError: errMsg });
     return { ok: false, error: errMsg };

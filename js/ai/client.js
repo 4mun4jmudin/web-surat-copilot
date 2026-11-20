@@ -10,6 +10,7 @@
 import { store, getBuiltinFallbackConfigs, getBuiltinSystemKey } from '../state.js';
 import { POLISHER_SYSTEM_PROMPT, buildPolisherUserPrompt, EDITOR_SYSTEM_PROMPT, buildEditorUserPrompt } from './prompts.js';
 import { formatSmartNomorSurat } from '../letters/numbering.js';
+import { shouldAllowLayoutRestructure } from './surgicalEdit.js';
 
 // Proxy default Cloudflare Functions (produksi)
 const DEFAULT_PROXY_ENDPOINT = '/api/ai';
@@ -737,15 +738,88 @@ async function readGeminiStream(streamBody, onChunk) {
  * @param {object} [options]
  * @returns {Promise<object>} Document Model JSON resmi
  */
+/**
+ * Mengonversi array blok output JSON AI menjadi DocumentModel blocks standar aplikasi.
+ * Dipakai bersama oleh AI Polisher dan Kanvas Word Pro agar dukungan tabel, pageBreak,
+ * list, heading, paragraf, dan identityTable selalu konsisten.
+ */
+export function convertAiBlocksToDocumentBlocks(parsedBlocks = []) {
+  const result = [];
+  if (!Array.isArray(parsedBlocks)) return result;
+
+  for (const b of parsedBlocks) {
+    if (!b || !b.type) continue;
+    if (b.type === 'pageBreak') {
+      result.push({ type: 'pageBreak' });
+    } else if (b.type === 'heading' && b.text) {
+      result.push({
+        type: 'paragraph',
+        style: 'letterBody',
+        alignment: b.alignment || 'left',
+        runs: [{ text: String(b.text).trim(), bold: true }]
+      });
+    } else if (b.type === 'list' && Array.isArray(b.items)) {
+      result.push({
+        type: 'list',
+        ordered: b.ordered !== false,
+        items: b.items.map(it => [{ text: String(it) }])
+      });
+    } else if (b.type === 'table' && Array.isArray(b.rows) && b.rows.length > 0) {
+      result.push({
+        type: 'table',
+        borderStyle: b.borderStyle || 'grid',
+        headerRow: b.headerRow !== false,
+        ...(b.headerShading !== undefined ? { headerShading: Boolean(b.headerShading) } : {}),
+        ...(b.headerBold !== undefined ? { headerBold: Boolean(b.headerBold) } : {}),
+        ...(Array.isArray(b.colWidthsPct) ? { colWidthsPct: b.colWidthsPct } : {}),
+        rows: b.rows
+      });
+    } else if (b.type === 'paragraph') {
+      const txt = String(b.text || '').trim();
+      if (txt || b.spacingAfter || b.spacingBefore) {
+        result.push({
+          type: 'paragraph',
+          style: 'letterBody',
+          ...(b.alignment ? { alignment: b.alignment } : {}),
+          ...(b.spacingBefore !== undefined ? { spacingBefore: b.spacingBefore } : {}),
+          ...(b.spacingAfter !== undefined ? { spacingAfter: b.spacingAfter } : {}),
+          runs: Array.isArray(b.runs) && b.runs.length > 0
+            ? b.runs
+            : [{
+                text: txt,
+                ...(b.bold ? { bold: true } : {}),
+                ...(b.italic ? { italic: true } : {}),
+                ...(b.underline ? { underline: true } : {}),
+                ...(b.fontSizeHalfPt ? { fontSizeHalfPt: b.fontSizeHalfPt } : {})
+              }]
+        });
+      }
+    } else if (b.type === 'identityTable' && Array.isArray(b.rows)) {
+      result.push({
+        type: 'identityTable',
+        rows: b.rows.map(r => ({
+          label: r.label || '',
+          value: (r.value || '').startsWith(':') ? r.value : `: ${r.value || ''}`
+        }))
+      });
+    }
+  }
+  return result;
+}
+
 export async function polishMessyDocumentWithAi(messyText, options = {}) {
   const school = options.schoolProfile || store.getSchoolProfile();
   const dateStr = options.dateStr || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+  const kbSelection = store.getSmartAiReferencesForPrompt(String(messyText || '').slice(0, 600), 2);
 
   const userPrompt = buildPolisherUserPrompt({
     messyText,
     schoolName: school.schoolName,
     principalName: school.principalName,
-    dateStr
+    dateStr,
+    references: kbSelection.references,
+    matchMode: kbSelection.matchMode,
+    totalKnowledgeCount: kbSelection.totalKnowledgeCount
   });
 
   const rawJson = await callAiApi({
@@ -771,14 +845,39 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
     forcedTypeCode: parsed.kodeJenisSurat || ''
   });
 
+  const resolvedPaper = ['a4', 'f4', 'letter'].includes(String(parsed.paperSize || '').toLowerCase())
+    ? String(parsed.paperSize).toLowerCase()
+    : (options.paperSize || 'a4');
+
+  const letterTitleBlock = {
+    type: 'letterTitle',
+    title: title.toUpperCase(),
+    nomor: `Nomor: ${smartNomor}`
+  };
+  if (parsed.hideMetaRecipient !== true) {
+    letterTitleBlock.metaRecipient = {
+      metaRows: [
+        { label: 'Sifat', value: parsed.sifat || 'Penting' },
+        { label: 'Perihal', value: parsed.hal || parsed.perihal || 'Undangan Rapat' }
+      ],
+      recipientLines: [
+        'Kepada',
+        parsed.tujuan ? (parsed.tujuan.toLowerCase().startsWith('yth') ? parsed.tujuan : `Yth. ${parsed.tujuan}`) : 'Yth. ...............',
+        '__________________',
+        'Di',
+        'Tempat'
+      ]
+    };
+  }
+
   const docModel = {
     meta: {
       title,
       author: school.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
-    profile: options.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
-    paperSize: options.paperSize || 'a4',
+    profile: resolvedPaper === 'f4' ? 'suratDinasF4' : 'suratDinas',
+    paperSize: resolvedPaper,
     orientation: options.orientation || 'portrait',
     customMargins: options.margins,
     letterData: {
@@ -788,64 +887,35 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
         nomorSurat: smartNomor,
         judulSurat: title
       },
-      options
+      options,
+      aiLearningMeta: {
+        matchMode: kbSelection.matchMode,
+        matchedTitle: kbSelection.topReference?.title || null,
+        matchedMaster: Boolean(kbSelection.topReference?.isMasterTemplate)
+      }
     },
     blocks: [
       {
         type: 'letterKop',
         school
       },
-      {
-        type: 'letterTitle',
-        title: title.toUpperCase(),
-        nomor: `Nomor: ${smartNomor}`,
-        metaRecipient: {
-          metaRows: [
-            { label: 'Sifat', value: parsed.sifat || 'Penting' },
-            { label: 'Perihal', value: parsed.hal || parsed.perihal || 'Undangan Rapat' }
-          ],
-          recipientLines: [
-            'Kepada',
-            parsed.tujuan ? (parsed.tujuan.toLowerCase().startsWith('yth') ? parsed.tujuan : `Yth. ${parsed.tujuan}`) : 'Yth. ...............',
-            '__________________',
-            'Di',
-            'Tempat'
-          ]
-        }
-      }
+      letterTitleBlock,
+      ...convertAiBlocksToDocumentBlocks(parsed.blocks)
     ]
   };
 
-  if (Array.isArray(parsed.blocks) && parsed.blocks.length > 0) {
-    for (const b of parsed.blocks) {
-      if (b.type === 'paragraph' && b.text) {
-        docModel.blocks.push({
-          type: 'paragraph',
-          style: 'letterBody',
-          runs: [{ text: b.text.trim() }]
-        });
-      } else if (b.type === 'identityTable' && Array.isArray(b.rows)) {
-        docModel.blocks.push({
-          type: 'identityTable',
-          rows: b.rows.map(r => ({
-            label: r.label || '',
-            value: (r.value || '').startsWith(':') ? r.value : `: ${r.value}`
-          }))
-        });
-      }
-    }
-  }
-
   // Tanda tangan
-  const sig = parsed.signer || {};
-  docModel.blocks.push({
-    type: 'letterSignature',
-    city: sig.city || 'Garut',
-    date: sig.date || parsed.tanggalSurat || dateStr,
-    title: sig.title || school.principalTitle || 'Kepala Sekolah',
-    name: sig.name || school.principalName || 'Dian Nurhadian, S.Pd.',
-    nip: sig.nip && sig.nip !== '-' ? sig.nip : (school.principalNip || '-')
-  });
+  if (parsed.hideSignature !== true) {
+    const sig = parsed.signer || {};
+    docModel.blocks.push({
+      type: 'letterSignature',
+      city: sig.city || school.city || 'Garut',
+      date: sig.date || parsed.tanggalSurat || dateStr,
+      title: sig.title || school.principalTitle || 'Kepala Sekolah',
+      name: sig.name || school.principalName || 'Dian Nurhadian, S.Pd.',
+      nip: sig.nip && sig.nip !== '-' ? sig.nip : (school.principalNip || '-')
+    });
+  }
 
   return docModel;
 }
@@ -861,13 +931,17 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
 export async function editDocumentWithAi(currentSnapshot, userInstruction, options = {}) {
   const school = options.schoolProfile || store.getSchoolProfile();
   const dateStr = options.dateStr || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+  const allowLayoutRestructure = options.allowLayoutRestructure !== undefined
+    ? Boolean(options.allowLayoutRestructure)
+    : shouldAllowLayoutRestructure(userInstruction);
 
   const userPrompt = buildEditorUserPrompt({
     currentSnapshot,
     userInstruction,
     schoolName: school.schoolName,
     principalName: school.principalName,
-    dateStr
+    dateStr,
+    allowLayoutRestructure
   });
 
   const rawJson = await callAiApi({

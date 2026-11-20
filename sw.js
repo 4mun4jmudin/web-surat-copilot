@@ -3,7 +3,7 @@
  * Menyediakan caching offline untuk antarmuka, aset Word (.docx) generator, dan pustaka lokal.
  */
 
-const CACHE_NAME = 'ai-docbuilder-pwa-v16-20261116';
+const CACHE_NAME = 'ai-docbuilder-pwa-v29-20261120';
 
 const PRECACHE_ASSETS = [
   './',
@@ -38,7 +38,9 @@ const PRECACHE_ASSETS = [
   './js/sync/workspaceClient.js',
   './js/sync/liveSync.js',
   './js/ai/client.js',
+  './js/ai/knowledgeBase.js',
   './js/ai/prompts.js',
+  './js/ai/surgicalEdit.js',
   './js/checks/consistency.js',
   './js/docx/profiles/jurnal.js',
   './js/docx/profiles/pkl.js',
@@ -50,9 +52,11 @@ const PRECACHE_ASSETS = [
   './js/docx/render.js',
   './js/docx/styles.js',
   './js/letters/templates/suratKeterangan.js',
+  './js/letters/templates/suratTugasSppd.js',
   './js/letters/agenda.js',
   './js/letters/builder.js',
   './js/letters/defaultKop.js',
+  './js/letters/incoming.js',
   './js/letters/numbering.js',
   './js/letters/schoolProfile.js',
   './js/letters/verification.js',
@@ -68,17 +72,22 @@ const PRECACHE_ASSETS = [
   './js/ui/letterFormView.js',
   './js/ui/loginView.js',
   './js/ui/notification.js',
+  './js/ui/incomingLettersView.js',
   './js/ui/outgoingLettersView.js',
   './js/ui/patchView.js',
   './js/ui/preview.js',
   './js/ui/printChoiceModal.js',
+  './js/ui/qrFloatingHelper.js',
   './js/ui/schoolProfileView.js',
   './js/ui/settingsView.js',
   './js/ui/vaultView.js',
+  './js/ui/vaultSaveHelper.js',
   './js/ui/verifyView.js',
   './js/ui/wordCanvas.js',
   './js/ui/smartWordCanvas.js',
+  './js/ui/tableInteraction.js',
   './js/utils/download.js',
+  './js/utils/htmlAst.js',
   './js/utils/xml.js',
   './js/utils/zip.js'
 ];

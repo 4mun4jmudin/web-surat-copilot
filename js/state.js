@@ -6,8 +6,11 @@
 
 import { DEFAULT_SCHOOL_PROFILE, normalizeSchoolProfileNaming, normalizeSmkText } from './letters/schoolProfile.js';
 import { suratKeteranganTemplate } from './letters/templates/suratKeterangan.js';
+import { buildSuratTugasSppdDocModel } from './letters/templates/suratTugasSppd.js';
+import { selectRelevantAiReferences } from './ai/knowledgeBase.js';
 import { DEFAULT_KOP_GALLERY, DEFAULT_KOP_DATA_URL } from './letters/defaultKop.js';
 import { detectLetterTypeCode, formatSequenceNumber, toRomanMonth, buildOrderedNomorSurat, LETTER_TYPE_CODES } from './letters/numbering.js';
+import { formatIncomingCode, getNextIncomingSequence, sortIncomingLetters } from './letters/incoming.js';
 import { DEFAULT_ACCESS_PERMISSIONS } from './auth/permissions.js';
 import {
   clearStoredAuthToken,
@@ -16,7 +19,7 @@ import {
 } from './sync/workspaceClient.js';
 
 const DB_NAME = 'ai_school_doc_builder_db';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const STORE_PROJECTS = 'projects';
 const STORE_SCHOOL = 'school_profile';
 const STORE_AGENDA = 'agenda_book';
@@ -24,6 +27,8 @@ const STORE_API_VAULT = 'api_vault';
 const STORE_KOP_GALLERY = 'kop_gallery';
 const STORE_LETTER_VAULT = 'letter_vault';
 const STORE_OUTGOING_LETTERS = 'outgoing_letters';
+const STORE_INCOMING_LETTERS = 'incoming_letters';
+const STORE_INCOMING_FILES = 'incoming_files';
 
 // Nilai awal form surat keterangan (SMK IT Al-Hawari)
 const INITIAL_FORM_DATA = {
@@ -79,7 +84,10 @@ export const DEFAULT_LETTER_VAULT = [
     perihal: 'Keterangan Siswa Aktif Beasiswa Prestasi',
     summary: 'Menerangkan bahwa Ahmad Fauzi adalah siswa aktif kelas XII MM 1 Multimedia SMK IT Al-Hawari Tahun Ajaran 2026/2027 untuk keperluan pendaftaran beasiswa.',
     isAiReference: true,
+    isMasterTemplate: true,
+    isLockedTemplate: true,
     source: 'builder',
+    document: suratKeteranganTemplate.generateDocumentModel(INITIAL_FORM_DATA, DEFAULT_SCHOOL_PROFILE, { paperSize: 'a4' }),
     createdAt: '2026-11-14T08:00:00Z'
   },
   {
@@ -92,6 +100,8 @@ export const DEFAULT_LETTER_VAULT = [
     perihal: 'Penugasan Pelatihan Implementasi Kurikulum Merdeka',
     summary: 'Menugaskan Kepala Sekolah dan guru kejuruan Multimedia dan ATPH mengikuti Bimbingan Teknis Implementasi Kurikulum Merdeka di Balai Penjaminan Mutu Pendidikan (BPMP).',
     isAiReference: true,
+    isMasterTemplate: false,
+    isLockedTemplate: false,
     source: 'builder',
     createdAt: '2026-11-10T09:00:00Z'
   },
@@ -105,8 +115,40 @@ export const DEFAULT_LETTER_VAULT = [
     perihal: 'Rapat Persiapan Penilaian Akhir Semester (PAS) Ganjil',
     summary: 'Undangan rapat dinas pleno dewan guru dan staf tata usaha dalam rangka koordinasi jadwal, kisi-kisi soal, dan teknis administrasi ujian semester ganjil.',
     isAiReference: true,
+    isMasterTemplate: true,
+    isLockedTemplate: true,
     source: 'builder',
     createdAt: '2026-11-08T10:00:00Z'
+  },
+  {
+    id: 'vault-ref-004',
+    title: 'SURAT TUGAS & SPPD PENJEMPUTAN PKL (3 HALAMAN WORD)',
+    nomorSurat: '065 / ST / SMKITA / 12.01 / XI / 2026',
+    tanggalSurat: '18 November 2026',
+    category: 'Surat Tugas & SPPD',
+    targetPerson: 'Guru Pembimbing PKL SMK IT Al-Hawari',
+    perihal: 'Surat Tugas & SPPD Penjemputan Peserta Didik PKL',
+    summary: 'Paket lengkap 3 halaman 1:1 Microsoft Word: Halaman 1 Surat Tugas dengan tabel pegawai No/Nama/Jabatan, Halaman 2 SPPD 8 poin + Catatan PP & TTD 2 kolom, dan Halaman 3 Keterangan Pejabat & Tempat Dikunjungi dengan Header Merge.',
+    isAiReference: true,
+    isMasterTemplate: true,
+    isLockedTemplate: true,
+    source: 'builder',
+    preferSmartCanvas: true,
+    document: buildSuratTugasSppdDocModel({
+      nomorSurat: '065/ST/SMKITA/12.01/XI/2026',
+      assignees: [
+        { nama: 'Taufik Dwi Setyo Ramadhan, S.Pd.', jabatan: 'Guru' },
+        { nama: 'Siti Laras Maemunah, S.Pd.', jabatan: 'Guru' }
+      ],
+      maksudTugas: 'Penjemputan Peserta Didik PKL',
+      tujuanLokasi: 'DRAGON MOTION PICTURE ASIA',
+      tempatTiba: 'Dragon Motion Picture',
+      maksudSppd: 'Penjemputan siswa kelas 12 Multimedia ke tempat PKL',
+      kendaraan: 'Mobil',
+      kendaraanSingkat: 'Roda 4',
+      lamaHari: '1'
+    }, DEFAULT_SCHOOL_PROFILE, { paperSize: 'f4' }),
+    createdAt: '2026-11-18T08:00:00Z'
   }
 ];
 
@@ -186,6 +228,20 @@ export function getBuiltinFallbackConfigs() {
     .map(item => ({ ...item }));
 }
 
+/**
+ * Menghitung skala zoom awal kanvas agar proporsional dan lega di zoom browser 100%
+ */
+export function computeDefaultDesktopZoom(viewportWidth) {
+  const w = typeof viewportWidth === 'number' && viewportWidth > 0
+    ? viewportWidth
+    : (typeof window !== 'undefined' ? window.innerWidth : 1920);
+  if (w <= 860) return 100;
+  if (w <= 1180) return 75;
+  if (w <= 1480) return 80;
+  if (w <= 1720) return 90;
+  return 100;
+}
+
 class StateStore {
   constructor() {
     this.listeners = new Set();
@@ -240,9 +296,13 @@ class StateStore {
       apiVault: initialVault,
       activeApiId: initialVault.find(v => v.isActive)?.id || 'gemini-auto',
       kopGallery: JSON.parse(JSON.stringify(DEFAULT_KOP_GALLERY)),
-      zoomLevel: 100, // 100%
+      zoomLevel: computeDefaultDesktopZoom(),
+      zoomUserAdjusted: false,
       letterVault: JSON.parse(JSON.stringify(DEFAULT_LETTER_VAULT)),
+      activeVaultId: null,
+      activeSmartVaultId: null,
       outgoingLetters: [],
+      incomingLetters: [],
       smartDocument: null,
       activeUploadedDocx: null,
       authUser: null,
@@ -462,6 +522,9 @@ class StateStore {
       if (Array.isArray(ws.outgoingLetters)) {
         nextPatch.outgoingLetters = ws.outgoingLetters;
       }
+      if (Array.isArray(ws.incomingLetters)) {
+        nextPatch.incomingLetters = ws.incomingLetters;
+      }
       if (ws.apiVault?.items) {
         const mergedApi = this.mergeApiVaultWithRemote(this.state.apiVault, ws.apiVault);
         nextPatch.apiVault = mergedApi.items;
@@ -472,6 +535,9 @@ class StateStore {
       if (nextPatch.outgoingLetters) {
         this.saveOutgoingLetters(nextPatch.outgoingLetters);
         this.syncActiveDocumentNumberToNextOutgoing(false);
+      }
+      if (nextPatch.incomingLetters) {
+        this.saveIncomingLetters(nextPatch.incomingLetters);
       }
       if (nextPatch.letterVault) {
         this.saveLetterVault(nextPatch.letterVault);
@@ -504,6 +570,9 @@ class StateStore {
       if (Array.isArray(ws.outgoingLetters)) {
         nextPatch.outgoingLetters = ws.outgoingLetters;
       }
+      if (Array.isArray(ws.incomingLetters)) {
+        nextPatch.incomingLetters = ws.incomingLetters;
+      }
       if (Array.isArray(ws.letterVault)) {
         nextPatch.letterVault = ws.letterVault;
       }
@@ -531,7 +600,8 @@ class StateStore {
 
       if (nextPatch.outgoingLetters) {
         this.saveOutgoingLetters(nextPatch.outgoingLetters);
-        // Sinkronkan hanya metadata .verification dokumen aktif jika surat tersebut baru di-ACC / ditolak (tanpa mereset ketikan/kurser)
+        let verificationUpdated = false;
+        // Sinkronkan hanya metadata .verification dokumen aktif jika surat tersebut baru di-ACC / ditolak (tanpa mereset ketikan/kursor)
         const stdOutId = this.state.document?.verification?.outgoingId;
         if (stdOutId && !nextPatch.document) {
           const matchedStd = nextPatch.outgoingLetters.find(x => x.id === stdOutId);
@@ -549,6 +619,7 @@ class StateStore {
               qrDataUrl: matchedStd.qrDataUrl || '',
               rejectedReason: matchedStd.rejectedReason || ''
             };
+            verificationUpdated = true;
           }
         }
         const smartOutId = this.state.smartDocument?.verification?.outgoingId;
@@ -568,7 +639,11 @@ class StateStore {
               qrDataUrl: matchedSmart.qrDataUrl || '',
               rejectedReason: matchedSmart.rejectedReason || ''
             };
+            verificationUpdated = true;
           }
+        }
+        if (verificationUpdated && typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('docbuilder:verification-updated'));
         }
         if (this.state.document?.isBlankDraft) {
           this.syncActiveDocumentNumberToNextOutgoing(false);
@@ -576,6 +651,9 @@ class StateStore {
       }
       if (nextPatch.letterVault) {
         this.saveLetterVault(nextPatch.letterVault);
+      }
+      if (nextPatch.incomingLetters) {
+        this.saveIncomingLetters(nextPatch.incomingLetters);
       }
       return true;
     } finally {
@@ -686,9 +764,12 @@ class StateStore {
   }
 
   // --- ZOOM LEMBAR KERTAS ---
-  setZoomLevel(zoom) {
+  setZoomLevel(zoom, { fromUser = true } = {}) {
     const clamped = Math.max(50, Math.min(200, zoom));
-    this.setState({ zoomLevel: clamped }, false);
+    this.setState({
+      zoomLevel: clamped,
+      ...(fromUser ? { zoomUserAdjusted: true } : {})
+    }, false);
   }
 
   // --- GUDANG API (API VAULT) METHODS ---
@@ -827,6 +908,8 @@ class StateStore {
       perihal: entry.perihal || '-',
       summary: entry.summary || '',
       isAiReference: entry.isAiReference !== undefined ? entry.isAiReference : true,
+      isMasterTemplate: Boolean(entry.isMasterTemplate),
+      isLockedTemplate: Boolean(entry.isLockedTemplate || entry.isMasterTemplate),
       source: entry.source || 'builder',
       document: entry.document || null,
       uploadedDocx: entry.uploadedDocx || null,
@@ -845,24 +928,113 @@ class StateStore {
     return newEntry;
   }
 
+  getActiveVaultId(mode = 'standard') {
+    return mode === 'smart' ? (this.state.activeSmartVaultId || null) : (this.state.activeVaultId || null);
+  }
+
+  getActiveVaultEntry(mode = 'standard') {
+    const id = this.getActiveVaultId(mode);
+    if (!id) return null;
+    return this.getLetterVault().find(item => item.id === id) || null;
+  }
+
+  findLetterVaultByTitle(title = '', excludeId = null) {
+    const norm = String(title || '').trim().toLowerCase();
+    if (!norm) return null;
+    return this.getLetterVault().find(item =>
+      item.id !== excludeId && String(item.title || '').trim().toLowerCase() === norm
+    ) || null;
+  }
+
+  setActiveVaultId(id, mode = 'standard') {
+    const patch = mode === 'smart'
+      ? { activeSmartVaultId: id || null }
+      : { activeVaultId: id || null };
+    this.setState(patch, false);
+    this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+      activeVaultId: this.state.activeVaultId || null,
+      activeSmartVaultId: this.state.activeSmartVaultId || null
+    });
+  }
+
   updateLetterVaultEntry(id, updates) {
     const vault = this.getLetterVault();
+    const idx = vault.findIndex(item => item.id === id);
+    if (idx === -1) return null;
+
+    const updatedEntry = {
+      ...vault[idx],
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+    const updated = vault.map((item, i) => (i === idx ? updatedEntry : item));
+    this.setState({ letterVault: updated }, false);
+    this.saveLetterVault(updated);
+    this.queueCloudSyncPatch({
+      letterVault: updated,
+      replaceLetterVault: true,
+      syncDriveItem: { type: 'vault', item: updatedEntry }
+    });
+    return updatedEntry;
+  }
+
+  removeLetterVaultEntry(id, { bypassLock = false } = {}) {
+    const current = this.getLetterVault();
+    const target = current.find(item => item.id === id);
+    if (!target) return false;
+    if ((target.isLockedTemplate || target.isMasterTemplate) && !bypassLock) {
+      return false;
+    }
+
+    const vault = current.filter(item => item.id !== id);
+    const patch = { letterVault: vault };
+    let refsChanged = false;
+    if (this.state.activeVaultId === id) {
+      patch.activeVaultId = null;
+      refsChanged = true;
+    }
+    if (this.state.activeSmartVaultId === id) {
+      patch.activeSmartVaultId = null;
+      refsChanged = true;
+    }
+    this.setState(patch, false);
+    this.saveLetterVault(vault);
+    if (refsChanged) {
+      this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+        activeVaultId: this.state.activeVaultId || null,
+        activeSmartVaultId: this.state.activeSmartVaultId || null
+      });
+    }
+    this.queueCloudSyncPatch({ letterVault: vault, replaceLetterVault: true, deletedIds: [id] });
+    return true;
+  }
+
+  toggleMasterTemplate(id) {
+    const vault = this.getLetterVault();
+    let newStatus = false;
+    let updatedItem = null;
     const updated = vault.map(item => {
       if (item.id === id) {
-        return { ...item, ...updates, updatedAt: new Date().toISOString() };
+        newStatus = !Boolean(item.isMasterTemplate || item.isLockedTemplate);
+        updatedItem = {
+          ...item,
+          isMasterTemplate: newStatus,
+          isLockedTemplate: newStatus,
+          isAiReference: newStatus ? true : item.isAiReference,
+          updatedAt: new Date().toISOString()
+        };
+        return updatedItem;
       }
       return item;
     });
     this.setState({ letterVault: updated }, false);
     this.saveLetterVault(updated);
-    this.queueCloudSyncPatch({ letterVault: updated, replaceLetterVault: true });
-  }
-
-  removeLetterVaultEntry(id) {
-    const vault = this.getLetterVault().filter(item => item.id !== id);
-    this.setState({ letterVault: vault }, false);
-    this.saveLetterVault(vault);
-    this.queueCloudSyncPatch({ letterVault: vault, replaceLetterVault: true, deletedIds: [id] });
+    this.queueCloudSyncPatch({
+      letterVault: updated,
+      replaceLetterVault: true,
+      ...(updatedItem ? { syncDriveItem: { type: 'vault', item: updatedItem } } : {})
+    });
+    return updatedItem;
   }
 
   toggleLetterAiReference(id) {
@@ -871,7 +1043,12 @@ class StateStore {
     const updated = vault.map(item => {
       if (item.id === id) {
         newStatus = !item.isAiReference;
-        return { ...item, isAiReference: newStatus, updatedAt: new Date().toISOString() };
+        return {
+          ...item,
+          isAiReference: newStatus,
+          ...(newStatus ? {} : { isMasterTemplate: false, isLockedTemplate: false }),
+          updatedAt: new Date().toISOString()
+        };
       }
       return item;
     });
@@ -881,18 +1058,27 @@ class StateStore {
     return newStatus;
   }
 
-  getAiReferences(limit = 4) {
-    const vault = this.getLetterVault();
-    const activeRefs = vault.filter(v => v.isAiReference);
-    return activeRefs.slice(0, limit).map(v => ({
-      title: v.title,
-      nomorSurat: v.nomorSurat,
-      category: v.category,
-      targetPerson: v.targetPerson,
-      perihal: v.perihal,
-      summary: v.summary,
-      isAiReference: v.isAiReference
-    }));
+  getAiReferences(limit = 4, queryPrompt = '') {
+    return selectRelevantAiReferences(queryPrompt, this.getLetterVault(), { limit }).references;
+  }
+
+  getSmartAiReferencesForPrompt(userPrompt = '', limit = 3) {
+    return selectRelevantAiReferences(userPrompt, this.getLetterVault(), { limit });
+  }
+
+  isSmartTemplateDocument(doc) {
+    if (!doc || typeof doc !== 'object') return false;
+    const tplId = doc.letterData?.templateId || '';
+    if (['surat_tugas_sppd', 'smart_word_pro', 'smart_word_ai', 'sppd_only'].includes(tplId)) {
+      return true;
+    }
+    const blocks = doc.blocks || [];
+    return blocks.some(b =>
+      b?.type === 'pageBreak' ||
+      (b?.type === 'table' && (b.borderStyle === 'sppd' || b.borderStyle === 'none' || (b.rows || []).some(r =>
+        (Array.isArray(r) ? r : r?.cells || []).some(c => c && typeof c === 'object' && (c.colspan > 1 || c.rowspan > 1 || Array.isArray(c.paragraphs)))
+      )))
+    );
   }
 
   loadLetterToCanvas(id) {
@@ -903,8 +1089,13 @@ class StateStore {
     if (target.uploadedDocx) {
       this.setState({
         activeUploadedDocx: target.uploadedDocx,
+        activeVaultId: id,
         document: target.document || this.state.document
       }, true);
+      this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+        activeVaultId: id,
+        activeSmartVaultId: this.state.activeSmartVaultId || null
+      });
       return true;
     }
 
@@ -920,10 +1111,35 @@ class StateStore {
         });
         titleBlock.nomor = `Nomor: ${nextInfo.nomorSurat}`;
       }
+      if (target.preferSmartCanvas || this.isSmartTemplateDocument(cloned)) {
+        this.setState({
+          activeUploadedDocx: null,
+          activeSmartVaultId: id,
+          document: cloned,
+          smartDocument: {
+            pages: [],
+            pendingDocModel: cloned,
+            meta: {
+              title: cloned.meta?.title || target.title || 'Dokumen Word Pro',
+              nomorSurat: titleBlock ? (titleBlock.nomor || '').replace(/^Nomor\s*:\s*/i, '').trim() : (target.nomorSurat || '')
+            }
+          }
+        }, true);
+        this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+          activeVaultId: this.state.activeVaultId || null,
+          activeSmartVaultId: id
+        });
+        return true;
+      }
       this.setState({
         activeUploadedDocx: null,
+        activeVaultId: id,
         document: cloned
       }, true);
+      this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+        activeVaultId: id,
+        activeSmartVaultId: this.state.activeSmartVaultId || null
+      });
       return true;
     }
 
@@ -934,8 +1150,13 @@ class StateStore {
     doc.metadata.nomorSurat = target.nomorSurat || '';
     this.setState({
       activeUploadedDocx: null,
+      activeVaultId: id,
       document: doc
     }, true);
+    this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+      activeVaultId: id,
+      activeSmartVaultId: this.state.activeSmartVaultId || null
+    });
     return true;
   }
 
@@ -1027,6 +1248,7 @@ class StateStore {
       }).nomorSurat;
 
     const lockedSnapshot = entry.document ? JSON.parse(JSON.stringify(entry.document)) : null;
+    const lockedSmartPages = entry.smartPagesSnapshot ? JSON.parse(JSON.stringify(entry.smartPagesSnapshot)) : null;
     const lockedUploadedDocx = entry.uploadedDocx ? { ...entry.uploadedDocx } : null;
 
     const newEntry = {
@@ -1060,6 +1282,7 @@ class StateStore {
       sourceMode: entry.sourceMode || 'standard',
       isLocked: true, // Surat keluar bersifat tetap & tidak dapat diedit kembali
       documentSnapshot: lockedSnapshot,
+      ...(lockedSmartPages ? { smartPagesSnapshot: lockedSmartPages } : {}),
       uploadedDocx: lockedUploadedDocx,
       recordedAt: now.toISOString()
     };
@@ -1151,12 +1374,47 @@ class StateStore {
       if (!smartDoc) return;
       const nextSmart = { ...smartDoc, verification: verificationMeta || null };
       this.setState({ smartDocument: nextSmart }, false);
-      return;
+    } else {
+      const doc = this.state.document;
+      if (!doc) return;
+      const nextDoc = { ...doc, verification: verificationMeta || null };
+      this.setState({ document: nextDoc }, false);
     }
-    const doc = this.state.document;
-    if (!doc) return;
-    const nextDoc = { ...doc, verification: verificationMeta || null };
-    this.setState({ document: nextDoc }, false);
+    if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('docbuilder:verification-updated'));
+    }
+  }
+
+  /**
+   * Menyimpan konfigurasi posisi/lapisan/visibilitas Barcode QR mengambang pada kanvas aktif
+   * serta menyinkronkannya ke arsip Surat Keluar terkait bila sudah tercatat.
+   */
+  setActiveQrPlacement(qrPlacement, mode = 'standard') {
+    const cleanPlacement = qrPlacement ? { ...qrPlacement } : null;
+    const isSmart = mode === 'smart';
+    const targetDoc = isSmart ? this.state.smartDocument : this.state.document;
+    if (!targetDoc) return;
+
+    this.setState(
+      isSmart
+        ? { smartDocument: { ...targetDoc, qrPlacement: cleanPlacement } }
+        : { document: { ...targetDoc, qrPlacement: cleanPlacement } },
+      false
+    );
+
+    const outId = targetDoc.verification?.outgoingId;
+    if (outId && cleanPlacement) {
+      const list = this.getOutgoingLetters();
+      if (list.some(item => item.id === outId)) {
+        const updated = list.map(item => (item.id === outId ? {
+          ...item,
+          qrPlacement: cleanPlacement,
+          ...(item.documentSnapshot ? { documentSnapshot: { ...item.documentSnapshot, qrPlacement: cleanPlacement } } : {})
+        } : item));
+        this.setState({ outgoingLetters: updated }, false);
+        this.saveOutgoingLetters(updated);
+      }
+    }
   }
 
   removeOutgoingLetter(id) {
@@ -1178,6 +1436,7 @@ class StateStore {
     if (!target || !target.documentSnapshot) return false;
     const clonedDoc = JSON.parse(JSON.stringify(target.documentSnapshot));
     delete clonedDoc.verification;
+    delete clonedDoc.qrPlacement;
     for (const blk of (clonedDoc.blocks || [])) {
       if (blk?.type === 'letterSignature') {
         delete blk.signatureMode;
@@ -1200,6 +1459,82 @@ class StateStore {
       document: clonedDoc
     }, true);
     return true;
+  }
+
+  // --- SURAT MASUK (UPLOAD GAMBAR / PDF / FOTO KAMERA & SINKRON DRIVE) ---
+  getIncomingLetters() {
+    return Array.isArray(this.state.incomingLetters) ? this.state.incomingLetters : [];
+  }
+
+  getNextIncomingCodeInfo(date = new Date()) {
+    const list = this.getIncomingLetters();
+    const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+    const year = String(d.getFullYear());
+    const sequenceNumber = getNextIncomingSequence(list, year);
+    return {
+      sequenceNumber,
+      year,
+      kodeSurat: formatIncomingCode({ sequenceNumber, date: d })
+    };
+  }
+
+  saveIncomingLetters(list) {
+    this.saveToIndexedDb(STORE_INCOMING_LETTERS, 'incoming_list', Array.isArray(list) ? list : []);
+  }
+
+  upsertIncomingLetterLocal(entry = {}) {
+    if (!entry?.id) return null;
+    const list = this.getIncomingLetters();
+    const exists = list.some(i => i.id === entry.id);
+    const next = sortIncomingLetters(
+      exists ? list.map(i => (i.id === entry.id ? { ...i, ...entry } : i)) : [entry, ...list],
+      'newest'
+    );
+    this.setState({ incomingLetters: next }, false);
+    this.saveIncomingLetters(next);
+    return entry;
+  }
+
+  removeIncomingLetterLocal(id) {
+    const next = this.getIncomingLetters().filter(i => i.id !== id);
+    this.setState({ incomingLetters: next }, false);
+    this.saveIncomingLetters(next);
+    if (this.db && id) {
+      try {
+        const tx = this.db.transaction([STORE_INCOMING_FILES], 'readwrite');
+        tx.objectStore(STORE_INCOMING_FILES).delete(id);
+      } catch {}
+    }
+    return next;
+  }
+
+  saveIncomingFileCache(id, filePayload = {}) {
+    if (!id || !filePayload?.fileBase64) return;
+    this.saveToIndexedDb(STORE_INCOMING_FILES, id, {
+      id,
+      fileName: filePayload.fileName || '',
+      mimeType: filePayload.mimeType || 'application/octet-stream',
+      fileKind: filePayload.fileKind || 'image',
+      fileBase64: filePayload.fileBase64,
+      cachedAt: new Date().toISOString()
+    });
+  }
+
+  getIncomingFileCache(id) {
+    return new Promise((resolve) => {
+      if (!this.db || !id) {
+        resolve(null);
+        return;
+      }
+      try {
+        const tx = this.db.transaction([STORE_INCOMING_FILES], 'readonly');
+        const req = tx.objectStore(STORE_INCOMING_FILES).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
   }
 
   // --- UNDO / REDO ---
@@ -1251,6 +1586,12 @@ class StateStore {
       }
       if (!db.objectStoreNames.contains(STORE_OUTGOING_LETTERS)) {
         db.createObjectStore(STORE_OUTGOING_LETTERS);
+      }
+      if (!db.objectStoreNames.contains(STORE_INCOMING_LETTERS)) {
+        db.createObjectStore(STORE_INCOMING_LETTERS);
+      }
+      if (!db.objectStoreNames.contains(STORE_INCOMING_FILES)) {
+        db.createObjectStore(STORE_INCOMING_FILES);
       }
     };
     req.onsuccess = (e) => {
@@ -1408,6 +1749,18 @@ class StateStore {
       };
     } catch (e) {}
 
+    // 6b. Pulihkan Daftar Surat Masuk
+    try {
+      const txIncoming = this.db.transaction([STORE_INCOMING_LETTERS], 'readonly');
+      const storeIncoming = txIncoming.objectStore(STORE_INCOMING_LETTERS);
+      const reqIncoming = storeIncoming.get('incoming_list');
+      reqIncoming.onsuccess = () => {
+        if (Array.isArray(reqIncoming.result)) {
+          this.setState({ incomingLetters: sortIncomingLetters(reqIncoming.result, 'newest') }, false);
+        }
+      };
+    } catch (e) {}
+
     try {
       const txProjects = this.db.transaction([STORE_PROJECTS], 'readonly');
       const storeProjects = txProjects.objectStore(STORE_PROJECTS);
@@ -1415,6 +1768,15 @@ class StateStore {
       reqSmart.onsuccess = () => {
         if (reqSmart.result && Array.isArray(reqSmart.result.pages)) {
           this.setState({ smartDocument: reqSmart.result }, false);
+        }
+      };
+      const reqRefs = storeProjects.get('active_vault_refs');
+      reqRefs.onsuccess = () => {
+        if (reqRefs.result && typeof reqRefs.result === 'object') {
+          this.setState({
+            activeVaultId: reqRefs.result.activeVaultId || null,
+            activeSmartVaultId: reqRefs.result.activeSmartVaultId || null
+          }, false);
         }
       };
     } catch (e) {}

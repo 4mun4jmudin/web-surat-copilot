@@ -354,13 +354,18 @@ export function buildLetterMetaRecipientXml(block = {}) {
 /**
  * Menghasilkan OOXML untuk Tabel Identitas Siswa/Pegawai (tanpa border, indent rapi)
  */
-export function buildIdentityTableXml(rows = []) {
+export function buildIdentityTableXml(rows = [], colWidthsPct = null) {
+  const hasCustomW = Array.isArray(colWidthsPct) && colWidthsPct.length >= 2;
+  const p0 = hasCustomW ? Math.max(10, Math.min(80, Number(colWidthsPct[0]) || 28)) : 28;
+  const w0 = hasCustomW ? Math.round(9400 * (p0 / 100)) : 2600;
+  const w1 = hasCustomW ? Math.max(1200, 9400 - w0) : 6800;
+
   const rowsXml = rows.map(r => `
     <w:tr>
       <w:trPr><w:cantSplit/></w:trPr>
       <w:tc>
         <w:tcPr>
-          <w:tcW w:w="2600" w:type="dxa"/>
+          <w:tcW w:w="${w0}" w:type="dxa"/>
           <w:tcMar><w:top w:w="40" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:left w:w="80" w:type="dxa"/><w:right w:w="40" w:type="dxa"/></w:tcMar>
         </w:tcPr>
         <w:p>
@@ -370,7 +375,7 @@ export function buildIdentityTableXml(rows = []) {
       </w:tc>
       <w:tc>
         <w:tcPr>
-          <w:tcW w:w="6800" w:type="dxa"/>
+          <w:tcW w:w="${w1}" w:type="dxa"/>
           <w:tcMar><w:top w:w="40" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:left w:w="40" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tcMar>
         </w:tcPr>
         <w:p>
@@ -390,6 +395,7 @@ export function buildIdentityTableXml(rows = []) {
           <w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/>
         </w:tblBorders>
       </w:tblPr>
+      <w:tblGrid><w:gridCol w:w="${w0}"/><w:gridCol w:w="${w1}"/></w:tblGrid>
       ${rowsXml}
     </w:tbl>
     <w:p><w:pPr><w:spacing w:before="60" w:after="60"/></w:pPr></w:p>

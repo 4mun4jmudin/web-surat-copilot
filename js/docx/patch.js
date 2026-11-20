@@ -829,7 +829,7 @@ export function convertDocxToDocumentModel(parsedDocx, schoolProfile = null, opt
       templateId: 'surat_konversi',
       schoolProfile,
       formData: {
-        nomorSurat: nomor.replace(/^Nomor:\s*/i, ''),
+        nomorSurat: String(smartNomor || '').replace(/^Nomor:\s*/i, ''),
         judulSurat: title
       },
       options

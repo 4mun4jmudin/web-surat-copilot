@@ -15,6 +15,7 @@ import {
   triggerSmartCanvasDownloadWithChoice
 } from './ui/smartWordCanvas.js';
 import { renderOutgoingLettersView } from './ui/outgoingLettersView.js';
+import { renderIncomingLettersView } from './ui/incomingLettersView.js';
 import { renderVaultView } from './ui/vaultView.js';
 import { renderSchoolProfileView } from './ui/schoolProfileView.js';
 import { renderSettingsView } from './ui/settingsView.js';
@@ -31,7 +32,7 @@ import { renderQrVerificationView } from './ui/verifyView.js';
 import { renderDocx } from './docx/render.js';
 import { downloadFile } from './utils/download.js';
 import { showToast } from './ui/notification.js';
-import { runSafeWindowPrint } from './ui/printChoiceModal.js';
+import { runSafeWindowPrint, syncGlobalPrintPageStyle } from './ui/printChoiceModal.js';
 import {
   getPendingAccLetters,
   getRoleLabel,
@@ -165,6 +166,13 @@ async function initApp() {
             onClick: () => activateNavTab('outgoing')
           },
           {
+            id: 'sheet-incoming',
+            icon: '📥',
+            title: 'Daftar Surat Masuk (Drive)',
+            sub: 'Lihat dokumen Gambar / PDF / Foto yang diarsipkan ke Drive',
+            onClick: () => activateNavTab('incoming')
+          },
+          {
             id: 'sheet-school',
             icon: '🏛️',
             title: 'Profil Sekolah & Galeri Kop',
@@ -187,6 +195,13 @@ async function initApp() {
             title: 'Buka Word Pro Multi-Halaman',
             sub: 'Editor surat bebas & bantuan AI Copilot Persuratan',
             onClick: () => activateNavTab('smart-canvas')
+          },
+          {
+            id: 'sheet-incoming',
+            icon: '📥',
+            title: 'Catat & Foto Surat Masuk (Drive)',
+            sub: 'Upload gambar/PDF atau jepret foto langsung tersimpan ke Google Drive',
+            onClick: () => activateNavTab('incoming')
           },
           {
             id: 'sheet-acc',
@@ -361,7 +376,7 @@ async function initApp() {
       } else if (slot === 'outgoing') {
         isActive = tabName === 'outgoing';
       } else if (slot === 'settings') {
-        isActive = tabName === 'access' || tabName === 'settings' || tabName === 'school' || tabName === 'vault';
+        isActive = tabName === 'access' || tabName === 'settings' || tabName === 'school' || tabName === 'vault' || tabName === 'incoming';
       }
       btn.classList.toggle('active', isActive);
     });
@@ -369,6 +384,7 @@ async function initApp() {
 
   function activateNavTab(tabName) {
     currentTab = tabName;
+    if (document.body) document.body.dataset.activeTab = tabName;
     setMobileMenuOpen(false);
     closeMobileFabSheet();
     let activeTabBtn = null;
@@ -419,6 +435,9 @@ async function initApp() {
       case 'outgoing':
         renderOutgoingLettersView(container);
         break;
+      case 'incoming':
+        renderIncomingLettersView(container);
+        break;
       case 'vault':
         renderVaultView(container);
         break;
@@ -442,6 +461,7 @@ async function initApp() {
   }
 
   function updateHeaderSessionUi(state) {
+    syncGlobalPrintPageStyle(state.letterOptions);
     const user = state.authUser;
     const isKepsek = user?.role === 'kepsek';
     const canvasLocked = isCanvasLockedForUser(user);
@@ -512,6 +532,9 @@ async function initApp() {
     const roleIcon = user.role === 'admin' ? '🛡️' : user.role === 'kepsek' ? '🎓' : '📋';
     if (userRoleBadge) {
       userRoleBadge.textContent = `${roleIcon} ${getRoleLabel(user.role)} (${user.username})`;
+    }
+    if (userPillBtn) {
+      userPillBtn.title = `${getRoleLabel(user.role)} (${user.username}) — Klik untuk Kelola Akses & Drive`;
     }
     if (mobileUserChipLabelEl) {
       mobileUserChipLabelEl.textContent = `${roleIcon} ${user.username}`;
@@ -604,7 +627,7 @@ async function initApp() {
 
       const activeInput = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
       const openModal = Boolean(mainContainer.querySelector('.modal-overlay:not(.hidden)'));
-      if (!activeInput && !openModal && (currentTab === 'acc-queue' || currentTab === 'outgoing' || currentTab === 'access')) {
+      if (!activeInput && !openModal && (currentTab === 'acc-queue' || currentTab === 'outgoing' || currentTab === 'incoming' || currentTab === 'access')) {
         renderTab(currentTab, mainContainer);
       } else {
         renderLiveAccTray({ onNavigateToAccQueue: () => activateNavTab('acc-queue') });

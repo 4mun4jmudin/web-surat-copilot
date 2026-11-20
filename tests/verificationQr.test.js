@@ -4,6 +4,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { DOMParser as XmlDomParser } from '@xmldom/xmldom';
 import {
   buildVerificationId,
@@ -18,6 +20,17 @@ import {
   applySignatureModeToDocModel
 } from '../js/letters/verification.js';
 import { buildPrintQrBoxHtml } from '../js/ui/printChoiceModal.js';
+import { renderReadOnlyDocumentHtml } from '../js/ui/outgoingLettersView.js';
+import {
+  computePrintableDimsMm,
+  normalizeQrPlacement,
+  findPreferredSignatureQrPlacement,
+  buildFloatingQrElementHtml,
+  buildFloatingQrContextMenuHtml,
+  mountInteractiveFloatingQr
+} from '../js/ui/qrFloatingHelper.js';
+import { attachInteractiveTables } from '../js/ui/tableInteraction.js';
+import { buildSuratTugasSppdDocModel } from '../js/letters/templates/suratTugasSppd.js';
 import { DEFAULT_SCHOOL_PROFILE } from '../js/letters/schoolProfile.js';
 import { suratKeteranganTemplate } from '../js/letters/templates/suratKeterangan.js';
 import { renderDocx } from '../js/docx/render.js';
@@ -351,4 +364,514 @@ test('Store & Netlify Function /api/verify: POST SAH -> GET -> PATCH revoke/sahk
   assert.equal(clonedStateDoc.verification, undefined, 'Draf hasil salin tidak boleh membawa status SAH lama');
   const clonedSig = clonedStateDoc.blocks.find(b => b.type === 'letterSignature');
   assert.equal(clonedSig.signatureMode, undefined, 'Draf hasil salin tidak boleh membawa QR surat lama');
+});
+
+test('Pratinjau 1:1 Surat Keluar & Floating QR (Depan/Belakang Teks, Anti Halaman Kosong, Show/Hide Kanvas)', () => {
+  const sppdDoc = buildSuratTugasSppdDocModel(
+    {
+      nomorSurat: '800/006/ST.SMKITA/XI/2026',
+      tujuanLokasi: 'DRAGON MOTION PICTURE ASIA'
+    },
+    DEFAULT_SCHOOL_PROFILE,
+    { paperSize: 'f4' }
+  );
+
+  // 1. Default placement Surat Tugas menempatkan QR pada halaman 0 (halaman Surat Tugas)
+  const pref = findPreferredSignatureQrPlacement(sppdDoc, 3);
+  assert.equal(pref.pageIndex, 0);
+
+  // 2. Uji layer 'behind' (Di Belakang Teks) & koordinat kustom + hide di kanvas
+  const customPlacement = normalizeQrPlacement({
+    pageIndex: 0,
+    xPct: 62.5,
+    yPct: 71.2,
+    sizePx: 96,
+    layer: 'behind',
+    visibleOnCanvas: false,
+    showCaption: true,
+    customPositioned: true
+  }, 3);
+  assert.equal(customPlacement.layer, 'behind');
+  assert.equal(customPlacement.visibleOnCanvas, false);
+
+  const behindHtml = buildFloatingQrElementHtml({
+    qrDataUrl: 'data:image/png;base64,AA==',
+    placement: customPlacement,
+    interactive: true,
+    pageCount: 3
+  });
+  assert.ok(behindHtml.includes('layer-behind'));
+  assert.ok(behindHtml.includes('left: 62.5%; top: 71.2%; width: 96px;'));
+  assert.ok(!behindHtml.includes('floating-qr-toolbar'), 'Kanvas barcode harus bersih tanpa toolbar menempel');
+
+  const ctxHtml = buildFloatingQrContextMenuHtml({
+    placement: customPlacement,
+    pageCount: 3
+  });
+  assert.ok(ctxHtml.includes('Di Belakang Teks'));
+  assert.ok(ctxHtml.includes('data-qr-action="hide-canvas"'));
+  assert.ok(ctxHtml.includes('data-qr-action="move-page"'));
+
+  // 3. Printable dimensions mencegah halaman ekstra kosong akibat overlay
+  const f4Dims = computePrintableDimsMm({
+    paperSize: 'f4',
+    orientation: 'portrait',
+    margins: { top: 2, bottom: 2, left: 2.5, right: 2 }
+  });
+  assert.equal(f4Dims.sheetHeightMm, 330);
+  assert.equal(f4Dims.printableHeightMm, 288);
+
+  // 4. Pratinjau Surat Keluar wajib mempertahankan ke-3 halaman, tabel SPPD, & floating QR meski visibleOnCanvas === false
+  sppdDoc.qrPlacement = customPlacement;
+  const savedOut = store.addOutgoingLetter({
+    sequenceNumber: 6,
+    year: 2026,
+    typeCode: 'ST',
+    nomorSurat: '800/006/ST.SMKITA/XI/2026',
+    title: 'SURAT TUGAS',
+    recipientName: 'Guru PKL',
+    isVerifiedSah: true,
+    verificationStatus: 'sah',
+    qrDataUrl: 'data:image/png;base64,AA==',
+    document: sppdDoc,
+    skipAutoAdvanceNumber: true
+  });
+
+  const previewHtml = renderReadOnlyDocumentHtml(savedOut, { signatureMode: 'auto', isForPrint: false });
+  assert.equal((previewHtml.match(/class="smart-paper-sheet /g) || []).length, 3, 'Pratinjau Surat Keluar wajib menampilkan tepat 3 halaman kertas 1:1');
+  assert.ok(previewHtml.includes('smart-word-table'), 'Tabel pegawai dan keterangan wajib tampil di pratinjau Surat Keluar');
+  assert.ok(previewHtml.includes('smart-table-sppd'), 'Tabel SPPD wajib tampil utuh di pratinjau Surat Keluar');
+  assert.ok(previewHtml.includes('data-floating-qr="true"'), 'Barcode QR wajib tetap muncul di Surat Keluar walau disembunyikan di kanvas');
+  assert.ok(previewHtml.includes('layer-behind'), 'Posisi lapisan Belakang Teks terbawa ke Surat Keluar');
+
+  const printManualHtml = renderReadOnlyDocumentHtml(savedOut, { signatureMode: 'manual', isForPrint: true });
+  assert.ok(!printManualHtml.includes('data-floating-qr="true"'), 'Mode cetak TTD manual tidak boleh merender Barcode QR');
+
+  // Persistensi setActiveQrPlacement sinkron ke arsip outgoing terkait
+  store.setState({ smartDocument: { pages: [{ id: 'p1', html: '<p>tes</p>' }], verification: { outgoingId: savedOut.id } } }, false);
+  store.setActiveQrPlacement({ ...customPlacement, layer: 'front', xPct: 70 }, 'smart');
+  const updatedOut = store.getOutgoingLetters().find(x => x.id === savedOut.id);
+  assert.equal(updatedOut.qrPlacement.layer, 'front');
+  assert.equal(updatedOut.qrPlacement.xPct, 70);
+
+  store.removeOutgoingLetter(savedOut.id);
+});
+
+function createMiniDomEnv() {
+  const createEvent = (type, props = {}) => {
+    const ev = {
+      type,
+      bubbles: props.bubbles !== false,
+      cancelable: props.cancelable !== false,
+      defaultPrevented: false,
+      cancelBubble: false,
+      target: null,
+      currentTarget: null,
+      button: props.button ?? 0,
+      buttons: props.buttons ?? 1,
+      clientX: props.clientX ?? 0,
+      clientY: props.clientY ?? 0,
+      key: props.key ?? '',
+      preventDefault() { ev.defaultPrevented = true; },
+      stopPropagation() { ev.cancelBubble = true; },
+      stopImmediatePropagation() { ev.cancelBubble = true; }
+    };
+    return ev;
+  };
+
+  class MiniElement {
+    constructor(tagName = 'div') {
+      this.tagName = tagName.toUpperCase();
+      this.parentNode = null;
+      this.children = [];
+      this.attributes = {};
+      this.dataset = {};
+      this.style = {};
+      this._listeners = {};
+      this._rect = { left: 0, top: 0, right: 600, bottom: 900, width: 600, height: 900 };
+      this.offsetWidth = 600;
+      const self = this;
+      this.classList = {
+        _set: new Set(),
+        add(...cls) { cls.forEach(c => c && this._set.add(c)); self._syncClassAttr(); },
+        remove(...cls) { cls.forEach(c => this._set.delete(c)); self._syncClassAttr(); },
+        contains(c) { return this._set.has(c); },
+        toggle(c, force) {
+          if (force === true) { this._set.add(c); }
+          else if (force === false) { this._set.delete(c); }
+          else if (this._set.has(c)) { this._set.delete(c); }
+          else { this._set.add(c); }
+          self._syncClassAttr();
+        }
+      };
+    }
+    _syncClassAttr() {
+      this.attributes.class = [...this.classList._set].join(' ');
+    }
+    set className(val) {
+      this.classList._set = new Set(String(val || '').split(/\s+/).filter(Boolean));
+      this._syncClassAttr();
+    }
+    get className() {
+      return [...this.classList._set].join(' ');
+    }
+    setAttribute(k, v) {
+      const val = String(v ?? '');
+      this.attributes[k] = val;
+      if (k === 'class') this.className = val;
+      if (k.startsWith('data-')) {
+        const camel = k.slice(5).replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
+        this.dataset[camel] = val;
+      }
+    }
+    getAttribute(k) {
+      if (k === 'class') return this.className;
+      return this.attributes[k] ?? null;
+    }
+    appendChild(child) {
+      if (child.parentNode) {
+        const idx = child.parentNode.children.indexOf(child);
+        if (idx >= 0) child.parentNode.children.splice(idx, 1);
+      }
+      child.parentNode = this;
+      this.children.push(child);
+      return child;
+    }
+    remove() {
+      if (this.parentNode) {
+        const idx = this.parentNode.children.indexOf(this);
+        if (idx >= 0) this.parentNode.children.splice(idx, 1);
+        this.parentNode = null;
+      }
+    }
+    set innerHTML(htmlStr) {
+      this.children = [];
+      const root = parseMiniHtml(String(htmlStr || ''));
+      [...root.children].forEach(c => this.appendChild(c));
+    }
+    get innerHTML() {
+      return this.children.map(c => c.outerHTML || '').join('');
+    }
+    matchesSelectorPart(part) {
+      const s = part.trim();
+      if (!s) return false;
+      const tagMatch = s.match(/^[a-zA-Z0-9_-]+/);
+      let rest = s;
+      if (tagMatch) {
+        if (this.tagName !== tagMatch[0].toUpperCase()) return false;
+        rest = rest.slice(tagMatch[0].length);
+      }
+      while (rest.length > 0) {
+        if (rest.startsWith('.')) {
+          const m = rest.match(/^\.([a-zA-Z0-9_-]+)/);
+          if (!m || !this.classList.contains(m[1])) return false;
+          rest = rest.slice(m[0].length);
+        } else if (rest.startsWith('[')) {
+          const m = rest.match(/^\[([a-zA-Z0-9_-]+)(?:="([^"]*)")?\]/);
+          if (!m) return false;
+          const attrVal = this.getAttribute(m[1]);
+          if (attrVal === null) return false;
+          if (m[2] !== undefined && attrVal !== m[2]) return false;
+          rest = rest.slice(m[0].length);
+        } else {
+          return false;
+        }
+      }
+      return true;
+    }
+    matches(selector) {
+      return String(selector || '').split(',').some((commaSel) => {
+        const parts = commaSel.trim().split(/\s+/).filter(Boolean);
+        if (parts.length === 0) return false;
+        if (!this.matchesSelectorPart(parts[parts.length - 1])) return false;
+        let cur = this.parentNode;
+        for (let i = parts.length - 2; i >= 0; i--) {
+          while (cur && !cur.matchesSelectorPart(parts[i])) cur = cur.parentNode;
+          if (!cur) return false;
+          cur = cur.parentNode;
+        }
+        return true;
+      });
+    }
+    closest(selector) {
+      let cur = this;
+      while (cur) {
+        if (cur.matches && cur.matches(selector)) return cur;
+        cur = cur.parentNode;
+      }
+      return null;
+    }
+    contains(other) {
+      let cur = other;
+      while (cur) {
+        if (cur === this) return true;
+        cur = cur.parentNode;
+      }
+      return false;
+    }
+    querySelectorAll(selector) {
+      const out = [];
+      const walk = (node) => {
+        for (const ch of node.children) {
+          if (ch.matches(selector)) out.push(ch);
+          walk(ch);
+        }
+      };
+      walk(this);
+      return out;
+    }
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    }
+    addEventListener(type, fn, opts = false) {
+      const capture = typeof opts === 'boolean' ? opts : Boolean(opts?.capture);
+      if (!this._listeners[type]) this._listeners[type] = [];
+      this._listeners[type].push({ fn, capture });
+    }
+    removeEventListener(type, fn, opts = false) {
+      const capture = typeof opts === 'boolean' ? opts : Boolean(opts?.capture);
+      if (!this._listeners[type]) return;
+      this._listeners[type] = this._listeners[type].filter(l => l.fn !== fn || l.capture !== capture);
+    }
+    dispatchEvent(ev) {
+      if (!ev.target) ev.target = this;
+      const chain = [];
+      let cur = this;
+      while (cur) { chain.push(cur); cur = cur.parentNode; }
+      const fullPath = [win, ...chain.reverse()];
+      for (const node of fullPath) {
+        if (ev.cancelBubble) break;
+        const list = (node._listeners[ev.type] || []).filter(l => l.capture);
+        for (const l of list) {
+          ev.currentTarget = node;
+          l.fn.call(node, ev);
+          if (ev.cancelBubble) break;
+        }
+      }
+      if (!ev.cancelBubble && ev.bubbles) {
+        for (let i = fullPath.length - 1; i >= 0; i--) {
+          if (ev.cancelBubble) break;
+          const node = fullPath[i];
+          const list = (node._listeners[ev.type] || []).filter(l => !l.capture);
+          for (const l of list) {
+            ev.currentTarget = node;
+            l.fn.call(node, ev);
+            if (ev.cancelBubble) break;
+          }
+        }
+      }
+      return !ev.defaultPrevented;
+    }
+    getBoundingClientRect() {
+      return { ...this._rect };
+    }
+  }
+
+  function parseMiniHtml(html) {
+    const root = new MiniElement('div');
+    const stack = [root];
+    const tokenRe = /<\/([a-zA-Z0-9]+)\s*>|<([a-zA-Z0-9]+)([^>]*?)(\/?)>/g;
+    let m;
+    while ((m = tokenRe.exec(html))) {
+      if (m[1]) {
+        if (stack.length > 1) stack.pop();
+      } else {
+        const tag = m[2].toLowerCase();
+        const attrsStr = m[3] || '';
+        const selfClose = Boolean(m[4]) || tag === 'img';
+        const el = new MiniElement(tag);
+        const attrRe = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
+        let am;
+        while ((am = attrRe.exec(attrsStr))) {
+          el.setAttribute(am[1], am[2]);
+        }
+        stack[stack.length - 1].appendChild(el);
+        if (!selfClose) stack.push(el);
+      }
+    }
+    return root;
+  }
+
+  const docBody = new MiniElement('body');
+  const docEl = new MiniElement('document');
+  docEl.body = docBody;
+  docEl.createElement = (tag) => new MiniElement(tag);
+  docEl.createRange = () => ({ selectNodeContents() {} });
+
+  const win = new MiniElement('window');
+  win.appendChild(docEl);
+  docEl.appendChild(docBody);
+  win.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+
+  return { win, docEl, docBody, MiniElement, createEvent };
+}
+
+test('Interaksi Floating QR (Drag Bersih, Resize, Menu Klik Kanan MS Word, Lintas Halaman, Sembunyi) & Isolasi Border Tabel', () => {
+  const prevWin = globalThis.window;
+  const prevDoc = globalThis.document;
+  const prevGCS = globalThis.getComputedStyle;
+  const env = createMiniDomEnv();
+  globalThis.window = env.win;
+  globalThis.document = env.docEl;
+  globalThis.getComputedStyle = () => ({ position: 'relative' });
+
+  try {
+    // 1. Pastikan CSS bersih tanpa toolbar menempel permanen & tidak memerangkap visual layer
+    const cssText = fs.readFileSync(path.resolve('css/app.css'), 'utf8');
+    const boxBehindRule = cssText.match(/\.floating-qr-box\.layer-behind\s*\{([^}]*)\}/)?.[1] || '';
+    assert.ok(!/z-index\s*:/.test(boxBehindRule), '.floating-qr-box.layer-behind tidak boleh memiliki z-index agar layer tetap rapi');
+    assert.match(cssText, /\.floating-qr-box\.layer-behind\s+\.floating-qr-visual\s*\{[^}]*z-index:\s*2;/);
+    assert.match(cssText, /\.floating-qr-box\.layer-front\s+\.floating-qr-visual\s*\{[^}]*z-index:\s*70;/);
+    assert.match(cssText, /\.fqr-context-menu\s*\{[^}]*position:\s*fixed;[^}]*z-index:\s*99999;/);
+    assert.match(cssText, /\.floating-qr-resize\s*\{[^}]*z-index:\s*90;/);
+
+    // 2. Bangun kanvas desk dengan tabel SPPD di bawah overlay QR
+    const desk = new env.MiniElement('div');
+    env.docBody.appendChild(desk);
+    const page1 = new env.MiniElement('div');
+    page1.className = 'smart-paper-sheet';
+    const page2 = new env.MiniElement('div');
+    page2.className = 'smart-paper-sheet';
+    const tbl = new env.MiniElement('table');
+    tbl._rect = { left: 40, top: 80, right: 560, bottom: 520, width: 520, height: 440 };
+    const tr1 = new env.MiniElement('tr');
+    const tr2 = new env.MiniElement('tr');
+    const td1 = new env.MiniElement('td');
+    td1._rect = { left: 40, top: 80, right: 300, bottom: 200, width: 260, height: 120 };
+    const td2 = new env.MiniElement('td');
+    td2._rect = { left: 300, top: 80, right: 560, bottom: 200, width: 260, height: 120 };
+    const td3 = new env.MiniElement('td');
+    td3.setAttribute('colspan', '2');
+    td3._rect = { left: 40, top: 200, right: 560, bottom: 520, width: 520, height: 320 };
+    tr1.appendChild(td1);
+    tr1.appendChild(td2);
+    tr2.appendChild(td3);
+    tbl.appendChild(tr1);
+    tbl.appendChild(tr2);
+    page1.appendChild(tbl);
+
+    const stage1 = new env.MiniElement('div');
+    stage1.className = 'floating-qr-stage';
+    stage1._rect = { left: 50, top: 40, right: 550, bottom: 740, width: 500, height: 700 };
+    stage1.offsetWidth = 625; // Simulasi zoom 80% (500 / 625 = 0.8)
+    page1.appendChild(stage1);
+
+    const stage2 = new env.MiniElement('div');
+    stage2.className = 'floating-qr-stage';
+    stage2._rect = { left: 50, top: 800, right: 550, bottom: 1500, width: 500, height: 700 };
+    stage2.offsetWidth = 625;
+    page2.appendChild(stage2);
+
+    desk.appendChild(page1);
+    desk.appendChild(page2);
+
+    const tableCtrl = attachInteractiveTables({
+      deskEl: desk,
+      tableSelector: 'table',
+      onMutate: () => { throw new Error('Tabel tidak boleh ikut terseret saat klik/drag QR'); }
+    });
+
+    let latestPlacement = null;
+    mountInteractiveFloatingQr({
+      stages: [stage1, stage2],
+      verification: { isVerifiedSah: true, qrDataUrl: 'data:image/png;base64,AA==' },
+      rawPlacement: { pageIndex: 0, xPct: 50, yPct: 30, sizePx: 86, layer: 'front', visibleOnCanvas: true, showCaption: true, customPositioned: true },
+      onPlacementChange: (p) => { latestPlacement = p; }
+    });
+
+    const getBox = (st) => st.querySelector('[data-floating-qr="true"]');
+    const getCtxMenu = () => env.docBody.querySelector('.fqr-context-menu');
+
+    let box = getBox(stage1);
+    assert.ok(box, 'Floating QR harus terpasang pada stage halaman 1');
+    assert.equal(box.querySelector('.floating-qr-toolbar'), null, 'Tidak boleh ada bar tombol muncul permanen bersama barcode');
+    box._rect = { left: 300, top: 200, right: 386, bottom: 300, width: 86, height: 100 };
+
+    // A. Hover dulu ke batas baris tabel (x = 350, y = 200 -> armedHit aktif), lalu pindah ke QR di titik x = 350, y = 200:
+    //    tableInteraction wajib melepas armedHit, membersihkan cursor resize, dan tidak membajak drag QR!
+    const visualEl = box.querySelector('.floating-qr-visual');
+    tbl.dispatchEvent(env.createEvent('mousemove', { clientX: 350, clientY: 200 }));
+    assert.equal(env.docBody.classList.contains('cursor-row-resize'), true, 'Pra-syarat: batas tabel asli memicu cursor-row-resize');
+
+    visualEl.dispatchEvent(env.createEvent('mousemove', { clientX: 350, clientY: 200 }));
+    assert.equal(env.docBody.classList.contains('cursor-row-resize'), false, 'Hover QR di atas garis tabel wajib membersihkan row-resize');
+    assert.equal(env.docBody.classList.contains('cursor-col-resize'), false, 'Hover QR di atas garis kolom tabel wajib membersihkan col-resize');
+
+    const mdVisualEv = env.createEvent('mousedown', { clientX: 350, clientY: 200 });
+    visualEl.dispatchEvent(mdVisualEv);
+    assert.equal(env.docBody.classList.contains('word-table-dragging'), false, 'Klik QR di atas garis tabel tidak boleh membajak drag tabel');
+    env.win.dispatchEvent(env.createEvent('mouseup', { clientX: 350, clientY: 200 }));
+
+    // B. Klik kanan (contextmenu) pada QR membuka menu konteks profesional di document.body
+    assert.equal(getCtxMenu(), null, 'Menu konteks belum boleh muncul sebelum klik kanan');
+    box.dispatchEvent(env.createEvent('contextmenu', { clientX: 340, clientY: 240 }));
+    let ctxMenu = getCtxMenu();
+    assert.ok(ctxMenu, 'Klik kanan pada barcode QR wajib membuka menu konteks .fqr-context-menu');
+
+    // Switch ke Belakang Teks lewat menu konteks
+    ctxMenu.querySelector('[data-qr-action="set-layer"][data-layer="behind"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.layer, 'behind');
+    assert.equal(getCtxMenu(), null, 'Menu konteks otomatis menutup setelah memilih aksi');
+
+    // C. Saat mode Belakang Teks (pointer-events: none), klik kanan di koordinat di atas QR (di sel td3 di balik QR) tetap membuka menu QR!
+    box = getBox(stage1);
+    box._rect = { left: 300, top: 200, right: 386, bottom: 300, width: 86, height: 100 };
+    td3.dispatchEvent(env.createEvent('contextmenu', { clientX: 340, clientY: 240 }));
+    ctxMenu = getCtxMenu();
+    assert.ok(ctxMenu, 'Klik kanan di area barcode meski dalam mode Belakang Teks wajib tetap membuka menu konteks');
+
+    // Ubah ke mode Depan Teks lagi
+    ctxMenu.querySelector('[data-qr-action="set-layer"][data-layer="front"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.layer, 'front');
+
+    // D. Klik kanan -> Toggle Caption, Pindah ke H2, & Ubah Ukuran Preset Besar (112px)
+    box = getBox(stage1);
+    box.dispatchEvent(env.createEvent('contextmenu', { clientX: 340, clientY: 240 }));
+    ctxMenu = getCtxMenu();
+    ctxMenu.querySelector('[data-qr-action="set-size"][data-size="112"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.sizePx, 112);
+
+    ctxMenu.querySelector('[data-qr-action="toggle-caption"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.showCaption, false);
+
+    box = getBox(stage1);
+    box.dispatchEvent(env.createEvent('contextmenu', { clientX: 340, clientY: 240 }));
+    ctxMenu = getCtxMenu();
+    ctxMenu.querySelector('[data-qr-action="move-page"][data-page="1"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.pageIndex, 1);
+    assert.ok(getBox(stage2), 'QR harus berpindah ke stage halaman 2 setelah memilih H2');
+    assert.equal(getBox(stage1), null);
+
+    // E. Drag langsung pada visual barcode QR (pointerdown -> pointermove -> pointerup) antar halaman
+    box = getBox(stage2);
+    box._rect = { left: 200, top: 900, right: 312, bottom: 1012, width: 112, height: 112 };
+    const qrDragZone = box.querySelector('[data-qr-drag="true"]');
+    qrDragZone.dispatchEvent(env.createEvent('pointerdown', { clientX: 240, clientY: 940 }));
+    env.win.dispatchEvent(env.createEvent('pointermove', { clientX: 160, clientY: 120 }));
+    env.win.dispatchEvent(env.createEvent('pointerup', { clientX: 160, clientY: 120 }));
+    assert.equal(latestPlacement.pageIndex, 0, 'Drag ke area atas harus memindahkan QR kembali ke halaman 1');
+    assert.ok(latestPlacement.yPct < 20, 'Koordinat Y hasil drag harus diperbarui');
+
+    // F. Resize sudut memperhitungkan zoom dinamis (0.8 => dx 40px layar = +50px ukuran QR: 112 + 50 = 162px)
+    box = getBox(stage1);
+    const resizeBtn = box.querySelector('[data-qr-resize="true"]');
+    resizeBtn.dispatchEvent(env.createEvent('mousedown', { clientX: 300, clientY: 300 }));
+    env.win.dispatchEvent(env.createEvent('mousemove', { clientX: 340, clientY: 340 }));
+    env.win.dispatchEvent(env.createEvent('mouseup', { clientX: 340, clientY: 340 }));
+    assert.equal(latestPlacement.sizePx, 162, 'Resize pada skala zoom 80% harus akurat diskalakan');
+
+    // G. Klik kanan -> Sembunyikan di Kanvas
+    box = getBox(stage1);
+    box.dispatchEvent(env.createEvent('contextmenu', { clientX: 200, clientY: 150 }));
+    ctxMenu = getCtxMenu();
+    ctxMenu.querySelector('[data-qr-action="hide-canvas"]').dispatchEvent(env.createEvent('click'));
+    assert.equal(latestPlacement.visibleOnCanvas, false);
+    assert.equal(getBox(stage1), null);
+
+    tableCtrl.destroy();
+  } finally {
+    globalThis.window = prevWin;
+    globalThis.document = prevDoc;
+    globalThis.getComputedStyle = prevGCS;
+  }
 });

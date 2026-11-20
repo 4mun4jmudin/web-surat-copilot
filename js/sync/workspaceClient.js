@@ -205,3 +205,23 @@ export function rejectAccCloud(payload) {
 export function cancelAccCloud(outgoingId) {
   return requestWorkspace('cancel_acc', { method: 'POST', body: { outgoingId }, timeoutMs: 15000 });
 }
+
+export function recordIncomingCloud(payload) {
+  return requestWorkspace('record_incoming', { method: 'POST', body: payload, timeoutMs: 45000 });
+}
+
+export function fetchIncomingFileCloud(incomingId) {
+  return requestWorkspace('get_incoming_file', { method: 'GET', query: { id: incomingId }, timeoutMs: 25000 });
+}
+
+export function syncIncomingDriveCloud(incomingId, fileBase64 = '') {
+  return requestWorkspace('sync_incoming_drive', {
+    method: 'POST',
+    body: { incomingId, ...(fileBase64 ? { fileBase64 } : {}) },
+    timeoutMs: 40000
+  });
+}
+
+export function deleteIncomingCloud(incomingId) {
+  return requestWorkspace('delete_incoming', { method: 'POST', body: { incomingId }, timeoutMs: 20000 });
+}

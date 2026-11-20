@@ -16,6 +16,9 @@ import {
 import { store, createEmptyDocumentModel } from '../js/state.js';
 import { DEFAULT_SCHOOL_PROFILE } from '../js/letters/schoolProfile.js';
 import { suratKeteranganTemplate } from '../js/letters/templates/suratKeterangan.js';
+import { buildSuratTugasSppdDocModel } from '../js/letters/templates/suratTugasSppd.js';
+import { applySignatureModeToDocModel } from '../js/letters/verification.js';
+import { computeColumnResizeWidths, pxToCm, cmToPx } from '../js/ui/tableInteraction.js';
 import { renderDocx } from '../js/docx/render.js';
 import { readZipPackage } from '../js/utils/zip.js';
 
@@ -221,4 +224,225 @@ test('Default Kosong: Lembar Kerja (createEmptyDocumentModel) dimulai kosong dan
   const parser = new XmlDomParser();
   const xmlDoc = parser.parseFromString(docXmlStr, 'text/xml');
   assert.ok(xmlDoc && xmlDoc.documentElement);
+});
+
+test('1:1 MS Word Layout: Surat Tugas + SPPD 3 Halaman (Merge Colspan/Rowspan, Garis SPPD, 2-Kolom, QR, & Ekspor .docx)', async () => {
+  const stSppdModel = buildSuratTugasSppdDocModel({
+    nomorSurat: '065/ST/SMKITA/12.01/XI/2026',
+    assignees: [
+      { nama: 'Taufik Dwi Setyo Ramadhan, S.Pd.', jabatan: 'Guru' },
+      { nama: 'Siti Laras Maemunah, S.Pd.', jabatan: 'Guru' }
+    ],
+    maksudTugas: 'Penjemputan Peserta Didik PKL',
+    tujuanLokasi: 'DRAGON MOTION PICTURE ASIA',
+    tempatTiba: 'Dragon Motion Picture',
+    maksudSppd: 'Penjemputan siswa kelas 12 Multimedia ke tempat PKL',
+    kendaraan: 'Mobil',
+    kendaraanSingkat: 'Roda 4',
+    lamaHari: '1',
+    tanggalSurat: '18 November 2026'
+  }, DEFAULT_SCHOOL_PROFILE, { paperSize: 'f4' });
+
+  // 1. Pastikan 3 halaman HTML Word Pro terbentuk lengkap
+  const converted = docModelToSmartPages(stSppdModel, DEFAULT_SCHOOL_PROFILE);
+  assert.equal(converted.pages.length, 3);
+  assert.ok(converted.pages[0].html.includes('SURAT TUGAS'));
+  assert.ok(converted.pages[0].html.includes('Tiba di'));
+  assert.ok(converted.pages[1].html.includes('( S P P D )'));
+  assert.ok(converted.pages[1].html.includes('smart-table-sppd'));
+  assert.ok(converted.pages[1].html.includes('smart-table-none'));
+  assert.ok(converted.pages[1].html.includes('CATATAN:'));
+  assert.ok(converted.pages[2].html.includes('K e t e r a n g a n :'));
+  assert.ok(converted.pages[2].html.includes('rowspan="2"'));
+  assert.ok(converted.pages[2].html.includes('colspan="2"'));
+  assert.ok(converted.pages[2].html.includes('colspan="3"'));
+
+  // 2. Round-trip Smart HTML -> DocumentModel tetap menjaga seluruh fitur tabel kompleks & bebas typo SMKS
+  const roundTripped = buildDocModelFromSmartPagesData({
+    pages: converted.pages,
+    schoolProfile: DEFAULT_SCHOOL_PROFILE,
+    letterOptions: { paperSize: 'f4', showKop: true }
+  });
+  const serializedRoundTrip = JSON.stringify(roundTripped);
+  assert.ok(!serializedRoundTrip.includes('SMKS'), 'Ejaan harus SMK IT AL-HAWARI, bukan SMKS');
+  assert.ok(serializedRoundTrip.includes('SMK IT Al-Hawari'));
+
+  // 3. Ekspor menjadi .docx OOXML dan validasi XML Struktur MS Word 1:1
+  const docxBytes = await renderDocx(roundTripped, 'uint8array');
+  const zip = await readZipPackage(docxBytes);
+  const docXmlStr = await zip.file('word/document.xml').async('string');
+  const parser = new XmlDomParser();
+  const xmlDoc = parser.parseFromString(docXmlStr, 'text/xml');
+  assert.ok(xmlDoc && xmlDoc.documentElement);
+
+  const pageBreaks = docXmlStr.match(/<w:br w:type="page"\/>/g) || [];
+  assert.equal(pageBreaks.length, 2, 'Harus memiliki tepat 2 page break (3 halaman utuh)');
+  assert.ok(docXmlStr.includes('<w:gridSpan w:val="2"/>'), 'Header Berangkat/Datang harus memakai colspan=2');
+  assert.ok(docXmlStr.includes('<w:gridSpan w:val="3"/>'), 'Header Berangkat lagi harus memakai colspan=3');
+  assert.ok(docXmlStr.includes('<w:vMerge w:val="restart"/>'), 'Header 2 baris harus memakai rowspan restart');
+  assert.ok(docXmlStr.includes('<w:vMerge/>'), 'Baris ke-2 header harus memakai rowspan continuation');
+  assert.ok(docXmlStr.includes('<w:left w:val="none"'), 'Tabel SPPD 8 poin harus tanpa garis tepi kiri luar');
+  assert.ok(docXmlStr.includes('<w:right w:val="none"'), 'Tabel SPPD 8 poin harus tanpa garis tepi kanan luar');
+  assert.ok(docXmlStr.includes('<w:trHeight w:val="2552"'), 'Baris stamp Hal 3 I harus punya minHeight 4.5cm');
+  assert.ok(docXmlStr.includes('<w:trHeight w:val="2722"'), 'Baris stamp Hal 3 II harus punya minHeight 4.8cm');
+  assert.ok(docXmlStr.includes('SURAT TUGAS'));
+  assert.ok(docXmlStr.includes('CATATAN:'));
+
+  // 4. Uji mode TTD QR Barcode (menanamkan media/qr.png pada Hal 1 & Hal 2 SPPD)
+  const minimalPngDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+  const qrModel = applySignatureModeToDocModel(roundTripped, {
+    mode: 'qr',
+    qrDataUrl: minimalPngDataUrl,
+    verificationUrl: 'https://copilot-dokumen-alhawari.netlify.app/verify?id=test-st-sppd'
+  });
+  const qrDocxBytes = await renderDocx(qrModel, 'uint8array');
+  const qrZip = await readZipPackage(qrDocxBytes);
+  assert.ok(qrZip.file('word/media/qr.png'), 'File media/qr.png wajib tertanam pada paket .docx mode QR');
+  const qrDocXml = await qrZip.file('word/document.xml').async('string');
+  const drawingMatches = qrDocXml.match(/<w:drawing>/g) || [];
+  assert.ok(drawingMatches.length >= 2, 'QR wajib muncul di Surat Tugas (Hal 1) maupun slot QR tabel SPPD (Hal 2)');
+
+  // 5. Pastikan AI converter & Gudang Surat mengenal template Surat Tugas + SPPD
+  const aiPresetModel = aiJsonToSmartDocModel({
+    templatePreset: 'surat_tugas_sppd',
+    letterTitle: 'SURAT TUGAS & SPPD',
+    formData: { tujuanLokasi: 'PT MEDIA GARUT', lamaHari: '2' }
+  }, DEFAULT_SCHOOL_PROFILE, { paperSize: 'f4' });
+  assert.ok(aiPresetModel.blocks.some(b => b.type === 'pageBreak'));
+  assert.ok(aiPresetModel.blocks.some(b => b.type === 'table' && b.borderStyle === 'sppd'));
+
+  const vaultEntry = store.getLetterVault().find(v => v.id === 'vault-ref-004');
+  assert.ok(vaultEntry, 'Gudang Surat bawaan harus menyediakan Surat Tugas & SPPD (vault-ref-004)');
+  assert.equal(store.isSmartTemplateDocument(vaultEntry.document), true);
+  assert.equal(store.loadLetterToCanvas('vault-ref-004'), true);
+  assert.ok(store.getState().smartDocument?.pendingDocModel, 'Memuat template 3-halaman dari Gudang harus mengisi smartDocument.pendingDocModel');
+});
+
+test('Kontrol Interaktif Tabel MS Word: Hitung Ulang Lebar Kolom, Tinggi Baris (cm), & Ekspor Lebar Kustom ke .docx', async () => {
+  // 1. Resize batas internal kolom 0 -> menggeser porsi antara kolom 0 dan kolom 1 dengan total tetap 100%
+  const resInternal = computeColumnResizeWidths([100, 300, 200], 0, 50, { minColPx: 28 });
+  assert.equal(resInternal.widthsPx[0], 150);
+  assert.equal(resInternal.widthsPx[1], 250);
+  assert.equal(resInternal.widthsPx[2], 200);
+  assert.equal(resInternal.totalWidthPx, 600);
+  const sumPct = resInternal.widthsPct.reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sumPct - 100) <= 0.2, `Total persen lebar kolom harus ~100%, actual: ${sumPct}`);
+
+  // 2. Resize batas tepi paling kanan tabel -> mengubah lebar keseluruhan tabel secara proporsional
+  const resOuter = computeColumnResizeWidths([200, 400], 1, -150, {
+    isOuterRight: true,
+    minTotalPx: 140,
+    maxTotalPx: 600
+  });
+  assert.equal(resOuter.totalWidthPx, 450);
+
+  // 3. Konversi presisi tinggi baris px <-> cm
+  const fourPointFivePx = cmToPx(4.5);
+  assert.equal(pxToCm(fourPointFivePx), 4.5);
+
+  // 4. Round-trip tabel berkustom lebar kolom + lebar tabel (<100%) + identityTable colWidths ke OOXML .docx
+  const customDoc = {
+    meta: { title: 'Uji Tabel Resizable', author: 'SMK IT Al-Hawari', year: '2026' },
+    profile: 'suratDinas',
+    paperSize: 'a4',
+    blocks: [
+      { type: 'letterKop', school: DEFAULT_SCHOOL_PROFILE },
+      {
+        type: 'identityTable',
+        colWidthsPct: [38, 62],
+        rows: [
+          { label: 'Nama Lengkap', value: ': Taufik Dwi Setyo Ramadhan, S.Pd.' }
+        ]
+      },
+      {
+        type: 'table',
+        borderStyle: 'grid',
+        headerRow: true,
+        colWidthsPct: [20, 50, 30],
+        tableWidthPct: 80,
+        rows: [
+          { isHeader: true, cells: ['No', 'Uraian', 'Ket'] },
+          { isHeader: false, minHeightCm: 2.5, cells: ['1', 'Kolom hasil resize', 'OK'] }
+        ]
+      }
+    ]
+  };
+
+  const smartPages = docModelToSmartPages(customDoc, DEFAULT_SCHOOL_PROFILE);
+  assert.ok(smartPages.pages[0].html.includes('data-table-width-pct="80"'));
+  assert.ok(smartPages.pages[0].html.includes('data-col-widths="20,50,30"'));
+  assert.ok(smartPages.pages[0].html.includes('data-col-widths="38,62"'));
+
+  const rebuilt = buildDocModelFromSmartPagesData({
+    pages: smartPages.pages,
+    schoolProfile: DEFAULT_SCHOOL_PROFILE,
+    letterOptions: { paperSize: 'a4', showKop: true }
+  });
+  const rebuiltTbl = rebuilt.blocks.find(b => b.type === 'table');
+  const rebuiltId = rebuilt.blocks.find(b => b.type === 'identityTable');
+  assert.deepEqual(rebuiltTbl.colWidthsPct, [20, 50, 30]);
+  assert.equal(rebuiltTbl.tableWidthPct, 80);
+  assert.deepEqual(rebuiltId.colWidthsPct, [38, 62]);
+
+  const docxBytes = await renderDocx(rebuilt, 'uint8array');
+  const zip = await readZipPackage(docxBytes);
+  const xmlStr = await zip.file('word/document.xml').async('string');
+  const xmlDoc = new XmlDomParser().parseFromString(xmlStr, 'text/xml');
+  assert.ok(xmlDoc && xmlDoc.documentElement);
+  assert.ok(xmlStr.includes('<w:tblLayout w:type="fixed"/>'), 'Tabel dengan kolom terukur harus mengekspor w:tblLayout fixed');
+  assert.ok(xmlStr.includes('<w:trHeight w:val="1418"'), 'Baris dengan tinggi 2.5cm harus mengekspor trHeight=1418 twips');
+});
+
+test('Alur Save (Update Asli Tanpa Duplikat) vs Save As (Buat Duplikat Terpisah) di Gudang Surat', () => {
+  const initialCount = store.getLetterVault().length;
+
+  // 1. Buka file Gudang Surat ke Word Pro -> activeSmartVaultId tercatat
+  assert.equal(store.loadLetterToCanvas('vault-ref-004'), true);
+  assert.equal(store.getActiveVaultId('smart'), 'vault-ref-004');
+  const activeSmart = store.getActiveVaultEntry('smart');
+  assert.equal(activeSmart.id, 'vault-ref-004');
+
+  // 2. Simulasikan Save (Ctrl+S): memperbarui item asli in-place tanpa menambah jumlah item di Gudang
+  const updated = store.updateLetterVaultEntry('vault-ref-004', {
+    perihal: 'Perihal Hasil Edit Save Langsung'
+  });
+  assert.ok(updated);
+  assert.equal(store.getLetterVault().length, initialCount, 'Save pada dokumen gudang aktif tidak boleh membuat duplikat');
+  assert.equal(store.getActiveVaultEntry('smart').perihal, 'Perihal Hasil Edit Save Langsung');
+
+  // 3. Deteksi judul kembar (pencegahan duplikasi tak sengaja)
+  const dupHit = store.findLetterVaultByTitle('surat tugas & sppd penjemputan pkl (3 halaman word)');
+  assert.ok(dupHit && dupHit.id === 'vault-ref-004');
+
+  // 4. Simulasikan Save As (Ctrl+Shift+S / F12): membuat salinan independen dan memindahkan activeVaultId ke salinan
+  const copyEntry = store.addLetterVaultEntry({
+    title: 'Salinan - SURAT TUGAS KHUSUS',
+    category: 'Surat Tugas & SPPD',
+    document: updated.document
+  });
+  store.setActiveVaultId(copyEntry.id, 'smart');
+  assert.equal(store.getLetterVault().length, initialCount + 1);
+  assert.equal(store.getActiveVaultId('smart'), copyEntry.id);
+
+  // Bersihkan item uji agar vault bawaan rapi kembali
+  store.removeLetterVaultEntry(copyEntry.id);
+  assert.equal(store.getActiveVaultId('smart'), null);
+});
+
+test('Word Pro: Unwrap container <div> agar tabel di dalam blok contenteditable tidak berubah menjadi teks datar', () => {
+  const wrappedHtml = `
+    <div>
+      <p>Paragraf pembuka surat tugas</p>
+      <table class="smart-word-table" data-col-widths="10,50,40">
+        <thead><tr><th>No</th><th>Nama</th><th>Jabatan</th></tr></thead>
+        <tbody><tr><td>1</td><td>Taufik Dwi Setyo Ramadhan, S.Pd.</td><td>Guru</td></tr></tbody>
+      </table>
+      <div><p>Paragraf penutup</p></div>
+    </div>
+  `;
+  const blocks = parseSmartPageHtmlToBlocks(wrappedHtml, DEFAULT_SCHOOL_PROFILE);
+  const tbl = blocks.find(b => b.type === 'table');
+  assert.ok(tbl, 'Tabel di dalam wrapper <div> wajib tetap terbaca sebagai block type="table"');
+  assert.deepEqual(tbl.colWidthsPct, [10, 50, 40]);
+  assert.equal(blocks.filter(b => b.type === 'paragraph').length, 2);
 });

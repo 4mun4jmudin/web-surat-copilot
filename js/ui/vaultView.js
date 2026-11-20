@@ -13,7 +13,8 @@ import { showToast } from './notification.js';
 let currentSearchQuery = '';
 let currentCategoryFilter = 'all';
 let filterOnlyAiRef = false;
-let currentVaultSort = 'newest';
+let filterOnlyMaster = false;
+let currentVaultSort = 'master_first';
 let currentVaultViewMode = 'grid';
 
 /**
@@ -297,8 +298,11 @@ export function renderVaultView(container) {
   if (!container) return;
 
   const allLetters = store.getLetterVault();
-  const aiRefLetters = allLetters.filter(l => l.isAiReference);
-  const categories = ['all', 'Surat Keterangan', 'Surat Tugas', 'Surat Undangan', 'Dokumen Impor'];
+  const aiRefLetters = allLetters.filter(l => l.isAiReference !== false || l.isMasterTemplate);
+  const masterLetters = allLetters.filter(l => l.isMasterTemplate);
+  const baseCategories = ['Surat Keterangan', 'Surat Tugas', 'Surat Undangan', 'Surat Panggilan', 'Surat Keputusan', 'Dokumen Impor'];
+  const presentCategories = Array.from(new Set(allLetters.map(l => l.category).filter(Boolean)));
+  const categories = ['all', ...Array.from(new Set([...baseCategories, ...presentCategories]))];
 
   container.innerHTML = `
     <div id="dropzone-docx-vault" class="view-atmosphere" style="transition: background 0.2s ease;">
@@ -350,9 +354,12 @@ export function renderVaultView(container) {
           <div class="kpi-card tint-amber">
             <div class="kpi-icon-box kpi-icon-amber">${V_SVG_STAR(20)}</div>
             <div>
-              <div style="font-size: 12.5px; font-weight: 600; color: #334155;">Acuan AI Copilot Aktif</div>
-              <div style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 4px;">
-                ${aiRefLetters.length} <span style="font-size: 13px; font-weight: 500; color: #475569;">surat dijadikan referensi</span>
+              <div style="font-size: 12.5px; font-weight: 600; color: #334155;">Pembelajaran AI &amp; Master Terkunci</div>
+              <div style="font-size: 24px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 4px;">
+                ${masterLetters.length} ⭐ <span style="font-size: 13px; font-weight: 700; color: #92400e;">Master Terkunci</span>
+              </div>
+              <div style="font-size: 11px; color: #78350f; margin-top: 2px;">
+                ${aiRefLetters.length} dari ${allLetters.length} arsip aktif dipelajari AI (Master ⭐ diprioritaskan &amp; dilindungi)
               </div>
             </div>
             <div class="kpi-watermark" style="color: #15803d;">${V_SVG_STAR(56)}</div>
@@ -390,6 +397,7 @@ export function renderVaultView(container) {
           <div class="icon-input-wrap" style="width: 185px;">
             <span class="icon-input-leading">⇅</span>
             <select id="select-vault-sort" class="icon-input-control" style="cursor: pointer;">
+              <option value="master_first" ${currentVaultSort === 'master_first' ? 'selected' : ''}>Urut: ⭐ Master Terkunci Dulu</option>
               <option value="newest" ${currentVaultSort === 'newest' ? 'selected' : ''}>Urut: Terbaru</option>
               <option value="oldest" ${currentVaultSort === 'oldest' ? 'selected' : ''}>Urut: Terlama</option>
               <option value="title_asc" ${currentVaultSort === 'title_asc' ? 'selected' : ''}>Urut: Judul (A - Z)</option>
@@ -411,6 +419,11 @@ export function renderVaultView(container) {
                 </button>
               `;
             }).join('')}
+
+            <button type="button" class="pill-tab ${filterOnlyMaster ? 'pill-gold-active' : ''} btn-toggle-master-filter" title="Tampilkan hanya Master Template bertanda Bintang & Terkunci">
+              <span>⭐</span>
+              <span>Master Terkunci (${masterLetters.length})</span>
+            </button>
 
             <button type="button" class="pill-tab ${filterOnlyAiRef ? 'pill-amber-active' : ''} btn-toggle-ai-filter">
               <span>✨</span>
@@ -441,9 +454,36 @@ export function renderVaultView(container) {
   bindVaultCardActions(container);
 }
 
+function buildVaultMasterLockBtnHtml(letter) {
+  const isMaster = Boolean(letter.isMasterTemplate);
+  const titleAttr = isMaster
+    ? 'Dokumen Master bagus & terkunci (Prioritas utama acuan AI & terlindung dari hapus/timpa). Klik untuk membuka kunci.'
+    : 'Beri Bintang & Kunci sebagai Master Template terbaik untuk acuan prioritas AI Copilot';
+  return `
+    <button type="button" class="vault-master-pill ${isMaster ? 'is-master' : ''} btn-toggle-master-lock" data-id="${letter.id}" title="${titleAttr}">
+      <span>${isMaster ? '⭐' : '☆'}</span>
+      <span>${isMaster ? 'Master Terkunci 🔒' : 'Jadikan Master'}</span>
+    </button>
+  `;
+}
+
+function buildVaultAiRefBtnHtml(letter) {
+  const isRef = letter.isAiReference !== false || Boolean(letter.isMasterTemplate);
+  const titleAttr = letter.isMasterTemplate
+    ? 'Master Terkunci otomatis aktif sebagai acuan prioritas AI.'
+    : (isRef ? 'Dipakai sebagai referensi belajar AI Copilot. Klik untuk nonaktifkan.' : 'Aktifkan agar dipelajari AI Copilot.');
+  return `
+    <button type="button" class="btn-toggle-ai-ref" data-id="${letter.id}" title="${titleAttr}"
+      style="background: ${isRef ? '#fef3c7' : '#f8fafc'}; border: 1px solid ${isRef ? '#fcd34d' : '#cbd5e1'}; color: ${isRef ? '#b45309' : '#64748b'}; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer;">
+      ${isRef ? '✨ Dipelajari AI' : '☆ Nonaktif AI'}
+    </button>
+  `;
+}
+
 function buildVaultCardsHtml(allLetters) {
   const baseFiltered = allLetters.filter(item => {
-    if (filterOnlyAiRef && !item.isAiReference) return false;
+    if (filterOnlyMaster && !item.isMasterTemplate) return false;
+    if (filterOnlyAiRef && item.isAiReference === false && !item.isMasterTemplate) return false;
     if (currentCategoryFilter !== 'all' && item.category !== currentCategoryFilter) return false;
     return true;
   });
@@ -455,6 +495,12 @@ function buildVaultCardsHtml(allLetters) {
     ranked = [...ranked].sort((a, b) => {
       const la = a.item;
       const lb = b.item;
+      if (currentVaultSort === 'master_first') {
+        const ma = la.isMasterTemplate ? 1 : 0;
+        const mb = lb.isMasterTemplate ? 1 : 0;
+        if (mb !== ma) return mb - ma;
+        return new Date(lb.createdAt || 0) - new Date(la.createdAt || 0);
+      }
       if (currentVaultSort === 'oldest') {
         return new Date(la.createdAt || 0) - new Date(lb.createdAt || 0);
       }
@@ -503,12 +549,17 @@ function buildVaultCardsHtml(allLetters) {
               </tr>
             </thead>
             <tbody>
-              ${ranked.map(({ item: letter }) => `
-                <tr style="border-bottom: 1px solid #f1f5f9;">
+              ${ranked.map(({ item: letter }) => {
+                const isLocked = Boolean(letter.isLockedTemplate || letter.isMasterTemplate);
+                return `
+                <tr style="border-bottom: 1px solid #f1f5f9; ${letter.isMasterTemplate ? 'background: #fffbeb;' : ''}">
                   <td style="padding: 11px 14px;">
-                    <span class="status-chip ${letter.category === 'Dokumen Impor' ? 'status-chip-blue' : 'status-chip-green'}" style="font-size: 10px; margin-bottom: 4px;">
-                      ${escapeHtml(letter.category || 'Surat Dinas')}
-                    </span>
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px;">
+                      <span class="status-chip ${letter.category === 'Dokumen Impor' ? 'status-chip-blue' : 'status-chip-green'}" style="font-size: 10px;">
+                        ${escapeHtml(letter.category || 'Surat Dinas')}
+                      </span>
+                      ${buildVaultMasterLockBtnHtml(letter)}
+                    </div>
                     <div style="font-weight: 700; color: #0f172a;">${escapeHtml(letter.title)}</div>
                   </td>
                   <td style="padding: 11px 14px; font-weight: 600; color: #334155; font-size: 12px;">${escapeHtml(letter.nomorSurat || '-')}</td>
@@ -517,19 +568,17 @@ function buildVaultCardsHtml(allLetters) {
                     <div style="color: #64748b;">${escapeHtml(letter.targetPerson || '-')}</div>
                   </td>
                   <td style="padding: 11px 14px; text-align: center;">
-                    <button class="btn-toggle-ai-ref" data-id="${letter.id}"
-                      style="background: ${letter.isAiReference ? '#fef3c7' : '#f1f5f9'}; border: 1px solid ${letter.isAiReference ? '#f59e0b' : '#cbd5e1'}; color: ${letter.isAiReference ? '#b45309' : '#64748b'}; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer;">
-                      ${letter.isAiReference ? '★ Acuan AI' : '☆ Jadikan'}
-                    </button>
+                    ${buildVaultAiRefBtnHtml(letter)}
                   </td>
                   <td style="padding: 11px 14px; text-align: right; white-space: nowrap;">
                     <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}">Buka di Word</button>
                     <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}">.docx</button>
-                    <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi">${V_SVG_COPY_13}</button>
-                    <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" style="color: #dc2626;" title="Hapus">${V_SVG_TRASH_13}</button>
+                    <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru">${V_SVG_COPY_13}</button>
+                    <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" style="color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.65' : '1'};" title="${isLocked ? 'Terkunci (⭐ Master Template). Buka kunci untuk menghapus.' : 'Hapus dari Gudang'}">${isLocked ? '🔒' : V_SVG_TRASH_13}</button>
                   </td>
                 </tr>
-              `).join('')}
+              `;
+              }).join('')}
             </tbody>
           </table>
         </div>
@@ -541,7 +590,8 @@ function buildVaultCardsHtml(allLetters) {
     ${queryHeaderHtml}
     <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px;">
       ${ranked.map(({ item: letter, isFuzzy }, idx) => {
-        const isRef = letter.isAiReference;
+        const isMaster = Boolean(letter.isMasterTemplate);
+        const isLocked = Boolean(letter.isLockedTemplate || isMaster);
         const cat = letter.category || 'Surat Dinas';
         const isImport = cat === 'Dokumen Impor';
         const isUndangan = cat === 'Surat Undangan';
@@ -550,19 +600,19 @@ function buildVaultCardsHtml(allLetters) {
         const isTopMatch = hasActiveQuery && idx === 0;
 
         return `
-          <div class="card vault-card vault-card-modern ${isTopMatch ? 'is-top-match' : ''}">
+          <div class="card vault-card vault-card-modern ${isMaster ? 'vault-card-master' : ''} ${isTopMatch ? 'is-top-match' : ''}">
             <div>
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 6px; flex-wrap: wrap;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 6px; flex-wrap: wrap;">
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                   <span class="status-chip ${chipClass}" style="font-size: 11px;">
                     ${escapeHtml(cat)}
                   </span>
                   ${isTopMatch ? `<span class="status-chip status-chip-green" style="font-size: 10px;">🎯 Paling Dekat</span>` : (hasActiveQuery && isFuzzy ? `<span class="status-chip status-chip-blue" style="font-size: 10px;">✓ Toleransi Typo</span>` : '')}
                 </div>
-                <button class="btn-toggle-ai-ref" data-id="${letter.id}" title="${isRef ? 'Surat ini dijadikan acuan AI. Klik untuk nonaktifkan.' : 'Jadikan surat ini sebagai acuan gaya penulisan AI Copilot.'}" 
-                  style="background: ${isRef ? '#fef3c7' : '#f8fafc'}; border: 1px solid ${isRef ? '#fcd34d' : '#cbd5e1'}; color: ${isRef ? '#b45309' : '#64748b'}; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px; cursor: pointer;">
-                  ${isRef ? '★ Acuan AI' : '☆ Jadikan Acuan'}
-                </button>
+                <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
+                  ${buildVaultMasterLockBtnHtml(letter)}
+                  ${buildVaultAiRefBtnHtml(letter)}
+                </div>
               </div>
 
               <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 11px;">
@@ -597,11 +647,11 @@ function buildVaultCardsHtml(allLetters) {
                 ${V_SVG_DL_13}
                 <span>.docx</span>
               </button>
-              <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi Surat" style="height: 34px; width: 34px; padding: 0; border-radius: 8px;">
+              <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru (tanpa kunci)" style="height: 34px; width: 34px; padding: 0; border-radius: 8px;">
                 ${V_SVG_COPY_13}
               </button>
-              <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" title="Hapus dari Gudang" style="height: 34px; width: 34px; padding: 0; border-radius: 8px; color: #dc2626;">
-                ${V_SVG_TRASH_13}
+              <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" title="${isLocked ? 'Terkunci sebagai ⭐ Master Template. Buka kunci bintang dahulu untuk menghapus.' : 'Hapus dari Gudang'}" style="height: 34px; width: 34px; padding: 0; border-radius: 8px; color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.68' : '1'};">
+                ${isLocked ? '🔒' : V_SVG_TRASH_13}
               </button>
             </div>
           </div>
@@ -678,7 +728,15 @@ function bindVaultEvents(container) {
     };
   });
 
-  // 3. Toggle only AI filter
+  // 3. Toggle only Master & only AI filters
+  const btnToggleMasterFilter = container.querySelector('.btn-toggle-master-filter');
+  if (btnToggleMasterFilter) {
+    btnToggleMasterFilter.onclick = () => {
+      filterOnlyMaster = !filterOnlyMaster;
+      renderVaultView(container);
+    };
+  }
+
   const btnToggleAiFilter = container.querySelector('.btn-toggle-ai-filter');
   if (btnToggleAiFilter) {
     btnToggleAiFilter.onclick = () => {
@@ -738,32 +796,56 @@ function bindVaultCardActions(container) {
       currentSearchQuery = '';
       currentCategoryFilter = 'all';
       filterOnlyAiRef = false;
+      filterOnlyMaster = false;
       renderVaultView(container);
       const input = container.querySelector('#input-vault-search');
       if (input) input.focus();
     };
   }
 
-  // 7. Toggle AI Reference per card
+  // 7A. Toggle Master Template Bintang & Kunci
+  container.querySelectorAll('.btn-toggle-master-lock').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const updated = store.toggleMasterTemplate(id);
+      if (updated?.isMasterTemplate) {
+        showToast('⭐ Dokumen ditandai sebagai Master Template Terkunci & prioritas utama pembelajaran AI!', 'success');
+      } else {
+        showToast('🔓 Kunci Master Template dibuka.', 'info');
+      }
+      renderVaultView(container);
+    };
+  });
+
+  // 7B. Toggle AI Reference per card
   container.querySelectorAll('.btn-toggle-ai-ref').forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
       const id = btn.dataset.id;
       store.toggleLetterAiReference(id);
-      showToast('Status acuan referensi AI diperbarui.', 'info');
+      showToast('Status acuan pembelajaran AI diperbarui.', 'info');
       renderVaultView(container);
     };
   });
 
-  // 8. Buka di Word Canvas
+  // 8. Buka di Word Canvas / Word Pro
   container.querySelectorAll('.btn-load-letter').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
+      const letter = store.getLetterVault().find(l => l.id === id);
+      const isSmartTarget = Boolean(letter?.preferSmartCanvas || (letter?.document && store.isSmartTemplateDocument(letter.document)));
       const success = store.loadLetterToCanvas(id);
       if (success) {
-        showToast('Dokumen berhasil dimuat ke Lembar Kerja Word.', 'success');
-        const canvasTab = document.querySelector('.nav-tab[data-tab="canvas"]');
-        if (canvasTab) canvasTab.click();
+        if (isSmartTarget) {
+          showToast('Dokumen multi-halaman dimuat ke Word Pro (1:1 MS Word)!', 'success');
+          const smartTab = document.querySelector('.nav-tab[data-tab="smart-canvas"]');
+          if (smartTab) smartTab.click();
+        } else {
+          showToast('Dokumen berhasil dimuat ke Lembar Kerja Word.', 'success');
+          const canvasTab = document.querySelector('.nav-tab[data-tab="canvas"]');
+          if (canvasTab) canvasTab.click();
+        }
       } else {
         showToast('Gagal memuat dokumen.', 'error');
       }
@@ -798,7 +880,7 @@ function bindVaultCardActions(container) {
     };
   });
 
-  // 10. Duplikasi Surat
+  // 10. Duplikasi Surat (salinan baru tidak dikunci sebagai Master agar bebas diedit)
   container.querySelectorAll('.btn-duplicate-letter').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
@@ -809,21 +891,29 @@ function bindVaultCardActions(container) {
         ...JSON.parse(JSON.stringify(letter)),
         id: `letter-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         title: `(Salinan) ${letter.title}`,
+        isMasterTemplate: false,
+        isLockedTemplate: false,
+        isAiReference: true,
         createdAt: new Date().toISOString()
       };
 
       store.addLetterVaultEntry(duplicated);
-      showToast('Surat berhasil diduplikasi.', 'success');
+      showToast('Surat diduplikasi sebagai salinan baru (tidak terkunci).', 'success');
       renderVaultView(container);
     };
   });
 
-  // 11. Hapus Surat dari Gudang
+  // 11. Hapus Surat dari Gudang (dilindungi bila berstatus ⭐ Master Terkunci)
   container.querySelectorAll('.btn-delete-vault-letter').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
       const letter = store.getLetterVault().find(l => l.id === id);
       if (!letter) return;
+
+      if (letter.isLockedTemplate || letter.isMasterTemplate) {
+        showToast('Dokumen ⭐ Master Terkunci dilindungi dari penghapusan. Klik tombol ⭐ Master Terkunci untuk membuka kunci terlebih dahulu.', 'warning');
+        return;
+      }
 
       if (confirm(`Apakah Anda yakin ingin menghapus "${letter.title}" dari Gudang Surat?`)) {
         store.removeLetterVaultEntry(id);

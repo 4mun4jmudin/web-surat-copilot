@@ -38,6 +38,12 @@ import {
   generateQrPngDataUrl
 } from '../../js/letters/verification.js';
 import { renderDocx } from '../../js/docx/render.js';
+import {
+  detectIncomingFileKind,
+  formatIncomingCode,
+  getNextIncomingSequence,
+  sortIncomingLetters
+} from '../../js/letters/incoming.js';
 
 export const config = {
   path: ['/api/workspace', '/api/workspace/:action']
@@ -150,6 +156,7 @@ async function handleBootstrap(user, wsStore, env) {
     apiVault,
     agendaBook,
     outgoingList,
+    incomingList,
     permissions,
     users,
     driveCfg,
@@ -161,6 +168,7 @@ async function handleBootstrap(user, wsStore, env) {
     wsStore.get(BLOB_KEYS.API_VAULT, { type: 'json' }),
     wsStore.get(BLOB_KEYS.AGENDA_BOOK, { type: 'json' }),
     wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
     getEffectivePermissions(wsStore),
     user.role === 'admin' ? ensureInitialUsers(wsStore, env) : Promise.resolve(null),
     getDriveConfigSafe(wsStore, env),
@@ -172,6 +180,7 @@ async function handleBootstrap(user, wsStore, env) {
     : undefined;
 
   const sortedOutgoing = Array.isArray(outgoingList) ? sortOutgoingList(outgoingList) : null;
+  const sortedIncoming = Array.isArray(incomingList) ? sortIncomingLetters(incomingList, 'newest') : [];
   const pendingAccCount = Array.isArray(sortedOutgoing)
     ? sortedOutgoing.filter(i => i?.verificationStatus === 'pending_acc' || i?.accStatus === 'pending').length
     : syncMeta.pendingAccCount;
@@ -190,7 +199,8 @@ async function handleBootstrap(user, wsStore, env) {
       letterVault: Array.isArray(letterVault) ? letterVault : null,
       apiVault: apiVault?.items ? apiVault : null,
       agendaBook: Array.isArray(agendaBook) ? agendaBook : null,
-      outgoingLetters: sortedOutgoing
+      outgoingLetters: sortedOutgoing,
+      incomingLetters: sortedIncoming
     },
     syncedAt: new Date().toISOString()
   }, 200);
@@ -608,6 +618,7 @@ async function handleUpdatePermissions(user, body, wsStore) {
     if (patch.allowTuRevokePrincipalQr !== undefined) next.allowTuRevokePrincipalQr = Boolean(patch.allowTuRevokePrincipalQr);
     if (patch.allowTuManageApiVault !== undefined) next.allowTuManageApiVault = Boolean(patch.allowTuManageApiVault);
     if (patch.allowTuDeleteOutgoing !== undefined) next.allowTuDeleteOutgoing = Boolean(patch.allowTuDeleteOutgoing);
+    if (patch.allowTuDeleteIncoming !== undefined) next.allowTuDeleteIncoming = Boolean(patch.allowTuDeleteIncoming);
   }
 
   await wsStore.setJSON(BLOB_KEYS.PERMISSIONS, next);
@@ -762,8 +773,9 @@ async function handleConfigureDrive(user, body, wsStore, env, fetchImpl) {
 }
 
 async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
-  const [outgoingList, letterVault, kopGallery, schoolProfile, apiVault] = await Promise.all([
+  const [outgoingList, incomingList, letterVault, kopGallery, schoolProfile, apiVault] = await Promise.all([
     wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
     wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
     wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
     wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
@@ -804,6 +816,7 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
     exportedBy: user.username,
     schoolProfile: schoolProfile || null,
     outgoingLetters: (Array.isArray(outgoingList) ? outgoingList : []).map(({ manageToken, qrDataUrl, ...rest }) => rest),
+    incomingLetters: (Array.isArray(incomingList) ? incomingList : []).map(({ previewThumbDataUrl, ...rest }) => rest),
     letterVault: Array.isArray(letterVault) ? letterVault : [],
     kopGalleryCount: Array.isArray(kopGallery) ? kopGallery.length : 0,
     apiVaultCount: Array.isArray(apiVault?.items) ? apiVault.items.length : 0
@@ -844,6 +857,7 @@ async function handlePollUpdates(user, url, wsStore, env) {
   const [
     permissions,
     outgoingList,
+    incomingList,
     driveCfg,
     schoolProfile,
     kopGallery,
@@ -852,6 +866,7 @@ async function handlePollUpdates(user, url, wsStore, env) {
   ] = await Promise.all([
     getEffectivePermissions(wsStore),
     wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
     getDriveConfigSafe(wsStore, env),
     wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
     wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
@@ -860,6 +875,7 @@ async function handlePollUpdates(user, url, wsStore, env) {
   ]);
 
   const sortedOutgoing = Array.isArray(outgoingList) ? sortOutgoingList(outgoingList) : [];
+  const sortedIncoming = Array.isArray(incomingList) ? sortIncomingLetters(incomingList, 'newest') : [];
   const pendingAccCount = sortedOutgoing.filter(
     i => i?.verificationStatus === 'pending_acc' || i?.accStatus === 'pending'
   ).length;
@@ -877,7 +893,8 @@ async function handlePollUpdates(user, url, wsStore, env) {
       kopGallery: Array.isArray(kopGallery) ? kopGallery : null,
       letterVault: Array.isArray(letterVault) ? letterVault : null,
       apiVault: apiVault?.items ? apiVault : null,
-      outgoingLetters: sortedOutgoing
+      outgoingLetters: sortedOutgoing,
+      incomingLetters: sortedIncoming
     },
     syncedAt: new Date().toISOString()
   }, 200);
@@ -1164,6 +1181,262 @@ async function handleCancelAcc(user, body, wsStore) {
 }
 
 /**
+ * Mencatat Surat Masuk baru (Gambar / PDF / Foto Kamera), menyimpan cadangan berkas di server,
+ * dan langsung mengunggah berkas ke Google Drive melalui Apps Script Bridge (`archive_incoming`).
+ */
+async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
+  const rawEntry = body.entry || {};
+  const namaSurat = String(rawEntry.namaSurat || '').trim().slice(0, 200);
+  if (!namaSurat) {
+    return jsonResponse({ ok: false, error: 'Nama / Judul Surat Masuk wajib diisi.' }, 400);
+  }
+
+  const fileBase64 = String(body.fileBase64 || '').trim();
+  if (!fileBase64) {
+    return jsonResponse({ ok: false, error: 'Berkas surat (Gambar, PDF, atau Foto) wajib dilampirkan.' }, 400);
+  }
+  if (fileBase64.length > 5_600_000) {
+    return jsonResponse({ ok: false, error: 'Ukuran berkas melebihi batas unggah (maksimal ~3,8 MB).' }, 400);
+  }
+
+  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const list = Array.isArray(existingList) ? existingList : [];
+  const nowDate = new Date();
+  const year = String(rawEntry.year || nowDate.getFullYear());
+  const nextSeq = getNextIncomingSequence(list, year);
+
+  const kodeSurat = String(rawEntry.kodeSurat || '').trim().slice(0, 80)
+    || formatIncomingCode({ sequenceNumber: nextSeq, date: nowDate });
+  const fileName = String(rawEntry.fileName || `${kodeSurat.replace(/[^a-zA-Z0-9._-]+/g, '-')}.jpg`).slice(0, 160);
+  const mimeType = String(rawEntry.mimeType || 'application/octet-stream').slice(0, 100);
+  const fileKind = detectIncomingFileKind(fileName, mimeType, rawEntry.captureSource || '');
+  const id = String(rawEntry.id || `in-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
+
+  const previewThumbDataUrl = typeof rawEntry.previewThumbDataUrl === 'string' && rawEntry.previewThumbDataUrl.length <= 45000
+    ? rawEntry.previewThumbDataUrl
+    : '';
+
+  const nowIso = nowDate.toISOString();
+  const finalItem = {
+    id,
+    sequenceNumber: nextSeq,
+    year,
+    kodeSurat,
+    namaSurat,
+    nomorSuratAsli: String(rawEntry.nomorSuratAsli || '').trim().slice(0, 120),
+    pengirim: String(rawEntry.pengirim || '').trim().slice(0, 160),
+    tanggalSurat: String(rawEntry.tanggalSurat || nowIso.slice(0, 10)).slice(0, 60),
+    kategori: String(rawEntry.kategori || 'Lainnya').trim().slice(0, 80),
+    catatan: String(rawEntry.catatan || '').trim().slice(0, 320),
+    captureSource: String(rawEntry.captureSource || (fileKind === 'pdf' ? 'upload_pdf' : 'upload_image')).slice(0, 32),
+    fileKind,
+    fileName,
+    mimeType,
+    fileSizeBytes: Number(rawEntry.fileSizeBytes) || Math.round((fileBase64.length * 3) / 4),
+    previewThumbDataUrl,
+    hasCloudFile: true,
+    driveSynced: false,
+    driveFileId: '',
+    driveUrl: '',
+    driveDownloadUrl: '',
+    driveError: '',
+    createdBy: user.username,
+    createdByName: user.displayName || user.username,
+    createdByRole: user.role,
+    receivedAt: rawEntry.receivedAt || nowIso,
+    createdAt: nowIso
+  };
+
+  // Simpan salinan berkas biner di blob terpisah agar daftar tetap ringan (<1ms poll) dan pratinjau selalu tersedia
+  await wsStore.setJSON(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, {
+    id,
+    fileName,
+    mimeType,
+    fileKind,
+    fileBase64,
+    uploadedAt: nowIso,
+    uploadedBy: user.username
+  });
+
+  // Unggah langsung ke Google Drive melalui Bridge Apps Script
+  const gasRes = await callGasBridge(wsStore, env, 'archive_incoming', {
+    item: finalItem,
+    fileBase64,
+    fileName,
+    mimeType,
+    actorUsername: user.username
+  }, fetchImpl);
+
+  const driveFileId = String(gasRes?.data?.driveFileId || gasRes?.data?.fileId || '').trim();
+  const driveUrl = String(gasRes?.data?.driveUrl || gasRes?.data?.fileUrl || gasRes?.data?.webViewLink || gasRes?.data?.url || '').trim();
+  const driveDownloadUrl = String(gasRes?.data?.driveDownloadUrl || gasRes?.data?.downloadUrl || '').trim();
+  const needGasUpdate = /aksi tidak dikenali|unknown action|not recognized|unsupported action/i.test(String(gasRes?.error || ''))
+    || (gasRes.ok && !driveFileId && !driveUrl);
+
+  if (gasRes.ok && (driveFileId || driveUrl)) {
+    finalItem.driveSynced = true;
+    finalItem.driveFileId = driveFileId;
+    finalItem.driveUrl = driveUrl || `https://drive.google.com/file/d/${driveFileId}/view`;
+    finalItem.driveDownloadUrl = driveDownloadUrl || (driveFileId ? `https://drive.google.com/uc?export=download&id=${driveFileId}` : '');
+    finalItem.driveError = '';
+  } else {
+    finalItem.driveSynced = false;
+    finalItem.driveError = needGasUpdate
+      ? 'Script Google Apps Script (Code.gs) belum memiliki handler archive_incoming. Klik "Script Drive" untuk salin kodenya.'
+      : (gasRes.error || 'Bridge Google Drive belum merespons.');
+  }
+
+  const nextList = sortIncomingLetters([finalItem, ...list.filter(i => i.id !== id)], 'newest');
+  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_recorded');
+  const { publicStatus } = await getDriveConfigSafe(wsStore, env);
+
+  return jsonResponse({
+    ok: true,
+    item: finalItem,
+    incomingLetters: nextList,
+    syncRev: syncMeta.rev,
+    driveStatus: publicStatus,
+    driveSync: {
+      ok: finalItem.driveSynced,
+      needGasUpdate,
+      url: finalItem.driveUrl,
+      error: finalItem.driveError
+    }
+  }, 201);
+}
+
+/**
+ * Mengambil berkas lampiran Surat Masuk (Gambar/PDF/Foto) dari cloud blob untuk pratinjau atau unduhan.
+ */
+async function handleGetIncomingFile(url, wsStore) {
+  const id = String(url.searchParams.get('id') || '').trim();
+  if (!id) {
+    return jsonResponse({ ok: false, error: 'Parameter id Surat Masuk wajib diisi.' }, 400);
+  }
+  const fileRecord = await wsStore.get(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
+  if (!fileRecord || !fileRecord.fileBase64) {
+    return jsonResponse({ ok: false, error: 'Berkas lampiran Surat Masuk tidak ditemukan di penyimpanan cloud.' }, 404);
+  }
+  return jsonResponse({
+    ok: true,
+    id: fileRecord.id,
+    fileName: fileRecord.fileName,
+    mimeType: fileRecord.mimeType,
+    fileKind: fileRecord.fileKind,
+    fileBase64: fileRecord.fileBase64
+  }, 200);
+}
+
+/**
+ * Mengunggah ulang berkas Surat Masuk yang belum tersinkron ke Google Drive.
+ */
+async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
+  const id = String(body.incomingId || '').trim();
+  if (!id) {
+    return jsonResponse({ ok: false, error: 'ID Surat Masuk wajib diisi.' }, 400);
+  }
+  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const list = Array.isArray(existingList) ? existingList : [];
+  const target = list.find(i => i.id === id);
+  if (!target) {
+    return jsonResponse({ ok: false, error: 'Catatan Surat Masuk tidak ditemukan.' }, 404);
+  }
+
+  let fileBase64 = String(body.fileBase64 || '').trim();
+  let fileName = target.fileName;
+  let mimeType = target.mimeType;
+
+  if (!fileBase64) {
+    const fileRec = await wsStore.get(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
+    if (fileRec?.fileBase64) {
+      fileBase64 = fileRec.fileBase64;
+      fileName = fileRec.fileName || fileName;
+      mimeType = fileRec.mimeType || mimeType;
+    }
+  }
+  if (!fileBase64) {
+    return jsonResponse({ ok: false, error: 'Berkas biner Surat Masuk tidak tersedia untuk diunggah ulang ke Drive.' }, 404);
+  }
+
+  const gasRes = await callGasBridge(wsStore, env, 'archive_incoming', {
+    item: target,
+    fileBase64,
+    fileName,
+    mimeType,
+    actorUsername: user.username
+  }, fetchImpl);
+
+  const driveFileId = String(gasRes?.data?.driveFileId || gasRes?.data?.fileId || '').trim();
+  const driveUrl = String(gasRes?.data?.driveUrl || gasRes?.data?.fileUrl || gasRes?.data?.webViewLink || gasRes?.data?.url || '').trim();
+  const driveDownloadUrl = String(gasRes?.data?.driveDownloadUrl || gasRes?.data?.downloadUrl || '').trim();
+  const needGasUpdate = /aksi tidak dikenali|unknown action|not recognized|unsupported action/i.test(String(gasRes?.error || ''))
+    || (gasRes.ok && !driveFileId && !driveUrl);
+
+  if (!gasRes.ok || (!driveFileId && !driveUrl)) {
+    const errMsg = needGasUpdate
+      ? 'Google Apps Script (Code.gs) belum mendukung archive_incoming. Salin handler archive_incoming ke script.google.com lalu Deploy Versi Baru.'
+      : (gasRes.error || 'Google Drive Bridge belum mengembalikan ID file untuk archive_incoming.');
+    const updatedErrList = list.map(i => (i.id === id ? { ...i, driveSynced: false, driveError: errMsg } : i));
+    await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, updatedErrList);
+    return jsonResponse({ ok: false, needGasUpdate, error: errMsg, item: updatedErrList.find(i => i.id === id) }, 502);
+  }
+
+  const updatedItem = {
+    ...target,
+    driveSynced: true,
+    driveFileId,
+    driveUrl: driveUrl || `https://drive.google.com/file/d/${driveFileId}/view`,
+    driveDownloadUrl: driveDownloadUrl || (driveFileId ? `https://drive.google.com/uc?export=download&id=${driveFileId}` : ''),
+    driveError: ''
+  };
+  const nextList = sortIncomingLetters(list.map(i => (i.id === id ? updatedItem : i)), 'newest');
+  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_drive_synced');
+  const { publicStatus } = await getDriveConfigSafe(wsStore, env);
+
+  return jsonResponse({
+    ok: true,
+    item: updatedItem,
+    incomingLetters: nextList,
+    syncRev: syncMeta.rev,
+    driveStatus: publicStatus
+  }, 200);
+}
+
+/**
+ * Menghapus catatan Surat Masuk (dan membersihkan salinan file blob terkait).
+ */
+async function handleDeleteIncoming(user, body, wsStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore);
+  const canDel = user.role === 'admin' || user.role === 'kepsek' || (user.role === 'tu' && permissions.allowTuDeleteIncoming !== false);
+  if (!canDel) {
+    return jsonResponse({ ok: false, error: 'Anda tidak memiliki izin menghapus arsip Surat Masuk.' }, 403);
+  }
+  const id = String(body.incomingId || '').trim();
+  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const list = Array.isArray(existingList) ? existingList : [];
+  const target = list.find(i => i.id === id);
+  const nextList = list.filter(i => i.id !== id);
+  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
+
+  if (typeof wsStore.delete === 'function') {
+    try { await wsStore.delete(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`); } catch {}
+  }
+
+  if (target?.driveFileId) {
+    await callGasBridge(wsStore, env, 'delete_incoming', {
+      incomingId: id,
+      driveFileId: target.driveFileId,
+      actorUsername: user.username
+    }, fetchImpl);
+  }
+
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_deleted');
+  return jsonResponse({ ok: true, remaining: nextList.length, incomingLetters: nextList, syncRev: syncMeta.rev }, 200);
+}
+
+/**
  * Router utama yang diekspor untuk runtime Netlify dan dapat diuji langsung di Node.js unit test.
  */
 export async function handleWorkspaceRequest(req, options = {}) {
@@ -1213,6 +1486,9 @@ export async function handleWorkspaceRequest(req, options = {}) {
     if (action === 'poll_updates') {
       return handlePollUpdates(user, url, wsStore, env);
     }
+    if (action === 'get_incoming_file') {
+      return handleGetIncomingFile(url, wsStore);
+    }
     return jsonResponse({ ok: false, error: `Aksi GET tidak dikenali: ${action}` }, 400);
   }
 
@@ -1251,6 +1527,12 @@ export async function handleWorkspaceRequest(req, options = {}) {
         return handleConfigureDrive(user, body, wsStore, env, fetchImpl);
       case 'sync_drive':
         return handleSyncDrive(user, body, wsStore, env, fetchImpl);
+      case 'record_incoming':
+        return handleRecordIncoming(user, body, wsStore, env, fetchImpl);
+      case 'sync_incoming_drive':
+        return handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl);
+      case 'delete_incoming':
+        return handleDeleteIncoming(user, body, wsStore, env, fetchImpl);
       default:
         return jsonResponse({ ok: false, error: `Aksi POST tidak dikenali: ${action}` }, 400);
     }
