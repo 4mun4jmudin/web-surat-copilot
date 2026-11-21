@@ -70,6 +70,11 @@ import {
   buildSurgicalIndexFromSmartPages,
   applySurgicalPatchesToSmartPages
 } from '../ai/surgicalEdit.js';
+import { requestAccCloud } from '../sync/workspaceClient.js';
+import { setLastKnownSyncRev } from '../sync/liveSync.js';
+
+const SMART_ICON_SEARCH = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
+const SMART_ICON_HISTORY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
 
 export { escapeHtmlText, decodeHtmlEntities, parseHtmlNodes };
 
@@ -124,15 +129,31 @@ function parseCssFontSizeHalfPt(node) {
   return Number.isNaN(pt) ? undefined : Math.round(pt * 2);
 }
 
+function normalizePreservedHtmlText(text = '', preserveNewlines = false) {
+  const raw = String(text ?? '');
+  if (preserveNewlines) {
+    return raw.replace(/\r\n/g, '\n');
+  }
+  // Hanya ubah newline + indentasi sumber HTML antar baris menjadi spasi tunggal;
+  // pertahankan spasi berulang ('   '), non-breaking space (\u00a0), dan tab (\t) milik pengguna.
+  return raw.replace(/\r?\n[ \t]*/g, ' ');
+}
+
+function formatRunTextToHtml(text = '') {
+  return escapeHtmlText(text)
+    .replace(/ (?= )/g, '&nbsp;')
+    .replace(/^ /, '&nbsp;')
+    .replace(/\u00a0/g, '&nbsp;')
+    .replace(/\r?\n/g, '<br>');
+}
+
 function extractInlineRuns(nodes, inherited = {}, opts = {}) {
   const runs = [];
   const preserveNewlines = Boolean(opts?.preserveNewlines);
 
   for (const node of nodes || []) {
     if (node.type === 'text') {
-      const clean = preserveNewlines
-        ? node.text.replace(/[ \t\r\n]+/g, ' ')
-        : node.text.replace(/\s+/g, ' ');
+      const clean = normalizePreservedHtmlText(node.text, preserveNewlines);
       if (clean) {
         runs.push({
           text: clean,
@@ -215,7 +236,7 @@ function parseCellParagraphChild(pNode) {
     };
   }
   const runs = extractInlineRuns(pNode.children, {}, { preserveNewlines: true });
-  const rawText = getNodePlainText(pNode).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim();
+  const rawText = getNodePlainText(pNode).replace(/\r\n/g, '\n').replace(/^[\r\n]+|[\r\n]+$/g, '');
   const nonEmptyRuns = runs.filter(r => (r.text || '').trim());
   const allBold = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.bold);
   const allItalic = nonEmptyRuns.length > 0 && nonEmptyRuns.every(r => r.italic);
@@ -240,8 +261,13 @@ function parseCellParagraphChild(pNode) {
 }
 
 function extractRichCellData(cellNode) {
-  const plainText = getNodePlainText(cellNode).replace(/\s+/g, ' ').trim();
-  const multilineText = getNodePlainText(cellNode).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n+$/, '').trim();
+  const rawNodeText = getNodePlainText(cellNode);
+  const plainText = rawNodeText.trim()
+    ? rawNodeText.replace(/\r?\n[ \t]*/g, ' ').replace(/^[\r\n]+|[\r\n]+$/g, '')
+    : '';
+  const multilineText = rawNodeText.trim()
+    ? rawNodeText.replace(/\r\n/g, '\n').replace(/^[\r\n]+|[\r\n]+$/g, '')
+    : '';
   const colspan = Math.max(1, parseInt(cellNode.attrs?.colspan || '1', 10) || 1);
   const rowspan = Math.max(1, parseInt(cellNode.attrs?.rowspan || '1', 10) || 1);
   const align = detectCssAlignment(cellNode);
@@ -407,9 +433,9 @@ export function parseSmartPageHtmlToBlocks(html = '', schoolProfile = {}) {
       const node = nodes[idx];
 
       if (node.type === 'text') {
-        const txt = node.text.trim();
-        if (txt) {
-          blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: txt }] });
+        if (node.text.trim()) {
+          const preserved = normalizePreservedHtmlText(node.text, false);
+          blocks.push({ type: 'paragraph', style: 'letterBody', runs: [{ text: preserved }] });
         }
         continue;
       }
@@ -560,14 +586,16 @@ export function parseSmartPageHtmlToBlocks(html = '', schoolProfile = {}) {
 
       // 4. Headings (<h1>, <h2>, <h3>)
       if (['h1', 'h2', 'h3', 'h4'].includes(node.tag)) {
-        const txt = getNodePlainText(node).replace(/\s+/g, ' ').trim();
-        if (!txt) continue;
+        const txtCheck = getNodePlainText(node).replace(/\u00a0/g, ' ').trim();
+        if (!txtCheck) continue;
         const align = detectCssAlignment(node) || 'left';
+        const hFontHalf = parseCssFontSizeHalfPt(node);
+        const hRuns = extractInlineRuns(node.children, { bold: true, ...(hFontHalf ? { fontSizeHalfPt: hFontHalf } : {}) });
         blocks.push({
           type: 'paragraph',
           style: 'letterBody',
           alignment: align,
-          runs: [{ text: txt, bold: true }]
+          runs: hRuns.length > 0 ? hRuns : [{ text: txtCheck, bold: true }]
         });
         continue;
       }
@@ -773,7 +801,7 @@ export function buildDocModelFromSmartPagesData({
 function runsToHtml(runs = []) {
   if (!Array.isArray(runs) || runs.length === 0) return '';
   return runs.map((r) => {
-    let html = escapeHtmlText(r.text || '').replace(/\r?\n/g, '<br>');
+    let html = formatRunTextToHtml(r.text || '');
     if (r.bold) html = `<strong>${html}</strong>`;
     if (r.italic) html = `<em>${html}</em>`;
     if (r.underline) html = `<u>${html}</u>`;
@@ -852,7 +880,7 @@ function renderRichTableCellHtml(cell, tag = 'td') {
         }]);
     return `<${tag}${attrStr}>${inner}</${tag}>`;
   }
-  return `<${tag}>${escapeHtmlText(cell ?? '').replace(/\r?\n/g, '<br>')}</${tag}>`;
+  return `<${tag}>${formatRunTextToHtml(cell ?? '')}</${tag}>`;
 }
 
 function renderTableBlockToHtml(b = {}) {
@@ -972,9 +1000,13 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
       const colAttr = hasCustomW ? ` data-col-widths="${w0},${w1}"` : '';
       const colGroup = hasCustomW ? `<colgroup><col style="width: ${w0}%;"><col style="width: ${w1}%;"></colgroup>` : '';
       const rowsHtml = (b.rows || []).map(r => {
-        const val = (r.value || '').trim();
-        const normVal = val.startsWith(':') ? val : (val ? `: ${val}` : ': ');
-        return `<tr><td style="width: ${w0}%;">${escapeHtmlText(r.label || '')}</td><td>${escapeHtmlText(normVal)}</td></tr>`;
+        const rawLabel = String(r.label ?? '').replace(/^[\r\n]+|[\r\n]+$/g, '');
+        const rawVal = String(r.value ?? '').replace(/^[\r\n]+|[\r\n]+$/g, '');
+        const trimmedVal = rawVal.trimStart();
+        const normVal = trimmedVal.startsWith(':')
+          ? rawVal
+          : (trimmedVal ? `: ${rawVal}` : ': ');
+        return `<tr><td style="width: ${w0}%;">${formatRunTextToHtml(rawLabel)}</td><td>${formatRunTextToHtml(normVal)}</td></tr>`;
       }).join('');
       currentParts.push(`<table class="smart-identity-table" data-smart-role="identity-table"${colAttr}>${colGroup}<tbody>${rowsHtml}</tbody></table>`);
       continue;
@@ -988,9 +1020,9 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
     if (b.type === 'list') {
       const tag = b.ordered ? 'ol' : 'ul';
       const liHtml = (b.items || []).map(item => {
-        if (typeof item === 'string') return `<li>${escapeHtmlText(item)}</li>`;
+        if (typeof item === 'string') return `<li>${formatRunTextToHtml(item)}</li>`;
         if (Array.isArray(item)) return `<li>${runsToHtml(item)}</li>`;
-        return `<li>${escapeHtmlText(item?.text || '')}</li>`;
+        return `<li>${formatRunTextToHtml(item?.text || '')}</li>`;
       }).join('');
       currentParts.push(`<${tag}>${liHtml}</${tag}>`);
       continue;
@@ -998,7 +1030,7 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
 
     if (b.type === 'heading') {
       const lvl = Math.min(Math.max(Number(b.level) || 2, 1), 3);
-      const inner = b.runs ? runsToHtml(b.runs) : escapeHtmlText(b.text || '');
+      const inner = b.runs ? runsToHtml(b.runs) : formatRunTextToHtml(b.text || '');
       currentParts.push(`<h${lvl}>${inner}</h${lvl}>`);
       continue;
     }
@@ -1009,7 +1041,7 @@ export function docModelToSmartPages(docModel, schoolProfile = {}) {
     }
 
     if (b.type === 'paragraph') {
-      const inner = b.runs ? runsToHtml(b.runs) : escapeHtmlText(b.text || '');
+      const inner = b.runs ? runsToHtml(b.runs) : formatRunTextToHtml(b.text || '');
       const styleParts = [];
       if (b.alignment) {
         styleParts.push(`text-align: ${b.alignment === 'both' ? 'justify' : b.alignment};`);
@@ -1732,6 +1764,14 @@ export function renderSmartWordCanvas(container) {
               ${ICON_COPY_DOC}
               <span>Save As</span>
             </button>
+            <button class="ribbon-tile" id="smart-btn-version-history" title="Riwayat Versi Dokumen Gudang &amp; Pulihkan Versi Sebelumnya">
+              ${SMART_ICON_HISTORY}
+              <span>Riwayat</span>
+            </button>
+            <button class="ribbon-tile" id="smart-btn-find-replace" title="Cari &amp; Ganti Teks Lintas Halaman (Ctrl+F / Ctrl+H)">
+              ${SMART_ICON_SEARCH}
+              <span>Cari/Ganti</span>
+            </button>
             <button class="ribbon-tile" id="smart-btn-refresh" title="Refresh / Kosongkan Kertas ke Lembar Baru">
               ${ICON_REFRESH}
               <span>Refresh</span>
@@ -1830,6 +1870,43 @@ export function renderSmartWordCanvas(container) {
                   <button class="quick-ai-chip" data-prompt="Tambahkan bagian Lampiran daftar peserta rapat pada halaman baru">+ Tambah Halaman Lampiran</button>
                 </div>
                 <div id="smart-quick-ai-status" class="quick-ai-status hidden"></div>
+              </div>
+
+              <!-- BANNER FEEDBACK REVISI KEPALA SEKOLAH (AKTIF BILA DIBUKA DARI ANTREAN ACC DITOLAK) -->
+              <div id="smart-kepsek-revision-banner" class="smart-kepsek-rev-banner hidden no-print" style="max-width: 920px; width: 100%; margin-bottom: 12px;"></div>
+
+              <!-- BAR CARI & GANTI CEPAT (CTRL+F / CTRL+H) -->
+              <div id="smart-find-replace-bar" class="smart-find-replace-bar hidden no-print" style="max-width: 920px; width: 100%; margin-bottom: 12px;">
+                <div class="smart-fr-row">
+                  <div class="smart-fr-inputs">
+                    <input type="text" id="smart-find-input" class="smart-fr-input" placeholder="Cari kata / tanggal / nama..." autocomplete="off" />
+                    <input type="text" id="smart-replace-input" class="smart-fr-input" placeholder="Ganti dengan..." autocomplete="off" />
+                    <label class="smart-fr-case-label" title="Cocokkan huruf besar/kecil (Case Sensitive)">
+                      <input type="checkbox" id="smart-find-case" />
+                      <span>Aa</span>
+                    </label>
+                  </div>
+                  <div class="smart-fr-controls">
+                    <span id="smart-find-count" class="smart-fr-count">0/0</span>
+                    <button type="button" class="smart-tbl-btn" id="smart-find-prev" title="Hasil Sebelumnya (Shift+Enter)">▲</button>
+                    <button type="button" class="smart-tbl-btn" id="smart-find-next" title="Hasil Berikutnya (Enter)">▼</button>
+                    <button type="button" class="smart-tbl-btn" id="smart-replace-one" title="Ganti yang sedang disorot">Ganti</button>
+                    <button type="button" class="smart-tbl-btn smart-tbl-btn-primary" id="smart-replace-all" title="Ganti semua kecocokan di semua halaman">Ganti Semua</button>
+                    <button type="button" class="smart-tbl-btn" id="smart-find-close" title="Tutup Cari & Ganti (Esc)">✕</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PANEL COMPARE / URUNGKAN REVISI AI TERAKHIR -->
+              <div id="smart-ai-compare-bar" class="smart-ai-compare-bar hidden no-print" style="max-width: 920px; width: 100%; margin-bottom: 12px;">
+                <div class="smart-cmp-info">
+                  <span id="smart-cmp-summary">✨ Revisi AI diterapkan (tata letak &amp; tabel aman).</span>
+                </div>
+                <div class="smart-cmp-actions">
+                  <button type="button" class="smart-tbl-btn smart-tbl-btn-primary" id="smart-btn-open-compare">👁️ Bandingkan Perubahan</button>
+                  <button type="button" class="smart-tbl-btn smart-tbl-btn-danger" id="smart-btn-rollback-ai">↶ Urungkan Revisi AI</button>
+                  <button type="button" class="smart-tbl-btn" id="smart-btn-dismiss-compare" title="Tutup bar perbandingan">✓</button>
+                </div>
               </div>
 
               <!-- TUMPUKAN HALAMAN KERTAS MS WORD BEBAS & BERKELANJUTAN -->
@@ -1931,6 +2008,10 @@ export function renderSmartWordCanvas(container) {
           <span class="status-item">${ICON_GLOBE} Bahasa Indonesia (PUEBI) &bull; Mode Bebas MS Word</span>
           <span class="status-sep">|</span>
           <span class="status-item status-vault-pill" id="smart-status-vault-badge">📄 Draf Baru</span>
+          <span class="status-sep">|</span>
+          <span class="status-item" id="smart-status-save-state" title="Status penyimpanan otomatis lokal & sinkronisasi Gudang Surat">✓ Draf lokal siap</span>
+          <span class="status-sep">|</span>
+          <button type="button" id="smart-btn-paste-mode-pill" class="status-item status-paste-pill" title="Klik untuk ganti mode tempel (Bersih Otomatis vs Tempel Teks Polos). Tekan Ctrl+Shift+V kapan saja untuk tempel polos.">🧹 Paste Bersih: Aktif</button>
         </div>
         <div class="status-right">
           <div class="zoom-slider-wrap">
@@ -1955,10 +2036,47 @@ export function renderSmartWordCanvas(container) {
   const pagesStack = container.querySelector('#smart-pages-stack');
   const statusPagesEl = container.querySelector('#smart-status-pages');
   const statusWordsEl = container.querySelector('#smart-status-words');
+  const statusSaveStateEl = container.querySelector('#smart-status-save-state');
+  const pasteModePillEl = container.querySelector('#smart-btn-paste-mode-pill');
   const modalRoot = container.querySelector('#smart-modal-root');
 
   let reflowTimer = null;
   let saveTimer = null;
+  let pastePlainTextMode = false;
+  let hasUnsavedVaultChanges = false;
+  let lastLocalSavedTime = '';
+  let lastAiCompareState = null;
+
+  function updateSmartSaveIndicator({ savedToVault = false } = {}) {
+    if (!statusSaveStateEl) return;
+    const activeEntry = store.getActiveVaultEntry('smart');
+    if (savedToVault) {
+      hasUnsavedVaultChanges = false;
+    }
+    const nowTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    if (activeEntry) {
+      const verCount = Array.isArray(activeEntry.versionHistory) ? activeEntry.versionHistory.length : 1;
+      if (hasUnsavedVaultChanges) {
+        statusSaveStateEl.innerHTML = `<span class="save-dot is-pending"></span> Belum simpan Gudang (Ctrl+S)${lastLocalSavedTime ? ` · Lokal ${lastLocalSavedTime}` : ''}`;
+      } else {
+        statusSaveStateEl.innerHTML = `<span class="save-dot is-synced"></span> Tersinkron Gudang · ${verCount} versi (${lastLocalSavedTime || nowTime})`;
+      }
+    } else {
+      statusSaveStateEl.innerHTML = `<span class="save-dot is-local"></span> Draf lokal tersimpan${lastLocalSavedTime ? ` · ${lastLocalSavedTime}` : ''}`;
+    }
+  }
+
+  pasteModePillEl?.addEventListener('click', () => {
+    pastePlainTextMode = !pastePlainTextMode;
+    pasteModePillEl.textContent = pastePlainTextMode ? '📋 Paste Polos: Aktif' : '🧹 Paste Bersih: Aktif';
+    pasteModePillEl.classList.toggle('is-plain', pastePlainTextMode);
+    showToast(
+      pastePlainTextMode
+        ? 'Mode Paste Polos aktif: semua teks yang ditempel otomatis bebas format/gaya sumber.'
+        : 'Mode Paste Bersih aktif: tebal/miring/tabel tetap terjaga, gaya liar sumber dibersihkan.',
+      'info'
+    );
+  });
 
   function collectLivePagesData() {
     const pageEls = [...pagesStack.querySelectorAll('.smart-editable-page')];
@@ -1995,6 +2113,9 @@ export function renderSmartWordCanvas(container) {
         ...(latestQrPlacement ? { qrPlacement: latestQrPlacement } : {})
       };
       store.setState({ smartDocument: smartDoc }, false);
+      lastLocalSavedTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+      hasUnsavedVaultChanges = Boolean(store.getActiveVaultEntry('smart'));
+      updateSmartSaveIndicator();
       updateStatusCounters();
     }, 250);
   }
@@ -2494,6 +2615,18 @@ export function renderSmartWordCanvas(container) {
     editable.addEventListener('paste', (e) => {
       const html = e.clipboardData?.getData('text/html');
       const plain = e.clipboardData?.getData('text/plain');
+      if ((pastePlainTextMode || e.shiftKey) && plain) {
+        e.preventDefault();
+        pushUndoSnapshot();
+        const paragraphs = plain
+          .split(/\r?\n\s*\r?\n/)
+          .map(p => `<p>${escapeHtmlText(p.trim()).replace(/\r?\n/g, '<br>')}</p>`)
+          .join('');
+        document.execCommand('insertHTML', false, paragraphs);
+        scheduleReflowPagination();
+        schedulePersistSmartDoc();
+        return;
+      }
       if (html) {
         e.preventDefault();
         pushUndoSnapshot();
@@ -2501,6 +2634,7 @@ export function renderSmartWordCanvas(container) {
         document.execCommand('insertHTML', false, sanitized);
         scheduleReflowPagination();
         schedulePersistSmartDoc();
+        showToast('✨ Format tempelan dirapikan otomatis ke gaya standar surat.', 'info');
       } else if (plain) {
         e.preventDefault();
         pushUndoSnapshot();
@@ -2667,7 +2801,22 @@ export function renderSmartWordCanvas(container) {
         [...node.childNodes].forEach(c => frag.appendChild(cleanNode(c)));
         return frag;
       }
-      const el = document.createElement(tag);
+      if (tag === 'span') {
+        const frag = document.createDocumentFragment();
+        [...node.childNodes].forEach(c => frag.appendChild(cleanNode(c)));
+        return frag;
+      }
+      if (tag === 'div') {
+        const hasBlockKids = [...node.childNodes].some(
+          c => c.nodeType === 1 && /^(p|div|table|ul|ol|h[1-6])$/i.test(c.tagName)
+        );
+        if (hasBlockKids) {
+          const frag = document.createDocumentFragment();
+          [...node.childNodes].forEach(c => frag.appendChild(cleanNode(c)));
+          return frag;
+        }
+      }
+      const el = document.createElement(tag === 'div' ? 'p' : tag);
       const align = node.style?.textAlign;
       if (align && ['left', 'center', 'right', 'justify'].includes(align)) {
         el.style.textAlign = align;
@@ -3593,6 +3742,94 @@ export function renderSmartWordCanvas(container) {
     });
   });
 
+  const compareBarEl = container.querySelector('#smart-ai-compare-bar');
+  const compareSummaryEl = container.querySelector('#smart-cmp-summary');
+
+  function showAiCompareBar(stateObj) {
+    lastAiCompareState = stateObj;
+    if (!compareBarEl || !stateObj) return;
+    if (compareSummaryEl) {
+      compareSummaryEl.textContent = stateObj.summaryText || 'Revisi AI berhasil diterapkan (tata letak & tabel tetap aman).';
+    }
+    compareBarEl.classList.remove('hidden');
+  }
+
+  function hideAiCompareBar() {
+    lastAiCompareState = null;
+    compareBarEl?.classList.add('hidden');
+  }
+
+  function rollbackLastAiRevision() {
+    if (!lastAiCompareState || !Array.isArray(lastAiCompareState.prevPages)) return;
+    pushUndoSnapshot();
+    const latestState = store.getState().smartDocument || {};
+    smartDoc = {
+      ...smartDoc,
+      pages: JSON.parse(JSON.stringify(lastAiCompareState.prevPages)),
+      meta: lastAiCompareState.prevMeta || smartDoc.meta,
+      ...(latestState.verification ? { verification: latestState.verification } : {}),
+      ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
+    };
+    store.setState({ smartDocument: smartDoc }, false);
+    renderAllSmartPages(smartDoc.pages);
+    hideAiCompareBar();
+    showToast('↶ Revisi AI dibatalkan. Dokumen dikembalikan ke kondisi persis sebelum diedit AI.', 'info');
+  }
+
+  function openAiCompareModal() {
+    if (!lastAiCompareState) return;
+    const changes = Array.isArray(lastAiCompareState.changes) ? lastAiCompareState.changes : [];
+    const rowsHtml = changes.length === 0
+      ? `<tr><td colspan="3" style="text-align:center; padding:14px; color:#64748b;">Perubahan diterapkan pada dokumen (${escapeHtmlText(lastAiCompareState.summaryText || 'Revisi AI')}).</td></tr>`
+      : changes.map((c, idx) => `
+        <tr>
+          <td style="font-weight:700; color:#334155; font-size:12px;">${idx + 1}. ${escapeHtmlText(c.targetLabel || c.kind)}</td>
+          <td style="background:#fef2f2; color:#991b1b; font-size:12px; white-space:pre-wrap;">${escapeHtmlText(c.before || '-')}</td>
+          <td style="background:#ecfdf5; color:#14532d; font-size:12px; white-space:pre-wrap;">${escapeHtmlText(c.after || '-')}</td>
+        </tr>
+      `).join('');
+
+    modalRoot.innerHTML = `
+      <div class="modal-overlay">
+        <div class="modal-card" style="max-width: 820px; width: 95%; max-height: 88vh; display: flex; flex-direction: column;">
+          <div class="modal-header">
+            <h3>👁️ Perbandingan Revisi AI (Sebelum vs Sesudah)</h3>
+            <button type="button" class="modal-close" id="smart-modal-close">&times;</button>
+          </div>
+          <div class="modal-body" style="overflow-y: auto;">
+            <p style="font-size:12.5px; color:#475569; margin:0 0 12px 0;">
+              <strong>Ringkasan AI:</strong> ${escapeHtmlText(lastAiCompareState.summaryText || '-')}
+            </p>
+            <table class="smart-compare-table">
+              <thead>
+                <tr>
+                  <th style="width: 24%;">Bagian Target</th>
+                  <th style="width: 38%;">Sebelum Revisi</th>
+                  <th style="width: 38%;">Sesudah Revisi AI</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+          <div class="modal-footer" style="justify-content: space-between;">
+            <button type="button" class="btn btn-danger" id="smart-cmp-modal-rollback">↶ Urungkan Semua Revisi AI Ini</button>
+            <button type="button" class="btn btn-primary" id="smart-cmp-modal-keep">✓ Pertahankan Hasil</button>
+          </div>
+        </div>
+      </div>
+    `;
+    modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
+    modalRoot.querySelector('#smart-cmp-modal-keep').onclick = closeSmartModal;
+    modalRoot.querySelector('#smart-cmp-modal-rollback').onclick = () => {
+      closeSmartModal();
+      rollbackLastAiRevision();
+    };
+  }
+
+  container.querySelector('#smart-btn-open-compare')?.addEventListener('click', openAiCompareModal);
+  container.querySelector('#smart-btn-rollback-ai')?.addEventListener('click', rollbackLastAiRevision);
+  container.querySelector('#smart-btn-dismiss-compare')?.addEventListener('click', hideAiCompareBar);
+
   async function runSmartAiEdit(instruction) {
     const qStatus = container.querySelector('#smart-quick-ai-status');
     const cStatus = container.querySelector('#smart-copilot-status');
@@ -3606,6 +3843,8 @@ export function renderSmartWordCanvas(container) {
 
     try {
       const livePages = collectLivePagesData();
+      const prevPagesBackup = JSON.parse(JSON.stringify(livePages));
+      const prevMetaBackup = smartDoc.meta ? JSON.parse(JSON.stringify(smartDoc.meta)) : null;
       const schoolProfile = store.getSchoolProfile();
       const allowLayoutRestructure = shouldAllowLayoutRestructure(instruction);
       const hasExistingContent = livePages.some((p) => {
@@ -3631,6 +3870,7 @@ export function renderSmartWordCanvas(container) {
           (!Array.isArray(editedJson.patches) || editedJson.patches.length === 0));
 
       let summaryText = editedJson.summaryOfChanges || 'Revisi AI berhasil diterapkan ke Kanvas Word Pro.';
+      let recordedChanges = [];
 
       if (shouldFullRebuild) {
         const docModel = aiJsonToSmartDocModel(editedJson, schoolProfile, store.getLetterOptions());
@@ -3641,6 +3881,7 @@ export function renderSmartWordCanvas(container) {
           ...(latestState.verification ? { verification: latestState.verification } : {}),
           ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
         };
+        recordedChanges = [{ kind: 'rebuild', targetLabel: 'Seluruh Dokumen', before: 'Struktur sebelumnya', after: summaryText }];
       } else {
         const patchResult = applySurgicalPatchesToSmartPages(livePages, editedJson, {
           schoolProfile,
@@ -3657,13 +3898,23 @@ export function renderSmartWordCanvas(container) {
           ...(latestState.verification ? { verification: latestState.verification } : {}),
           ...(latestState.qrPlacement ? { qrPlacement: latestState.qrPlacement } : {})
         };
+        recordedChanges = patchResult.changes || [];
         if (patchResult.appliedCount > 0) {
           summaryText = `${summaryText} (${patchResult.appliedCount} bagian diperbarui, tata letak & tabel tetap utuh)`;
         }
       }
 
       store.setState({ smartDocument: smartDoc }, false);
+      hasUnsavedVaultChanges = Boolean(store.getActiveVaultEntry('smart'));
+      lastLocalSavedTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+      updateSmartSaveIndicator();
       renderAllSmartPages(smartDoc.pages);
+      showAiCompareBar({
+        prevPages: prevPagesBackup,
+        prevMeta: prevMetaBackup,
+        summaryText,
+        changes: recordedChanges
+      });
 
       [qStatus, cStatus].forEach((el) => {
         if (el) el.textContent = summaryText;
@@ -4197,6 +4448,7 @@ Siti Laras Maemunah, S.Pd. | Guru</textarea>
 
   function updateSmartVaultBadge() {
     renderCanvasVaultBadge(statusVaultBadgeEl, store.getActiveVaultEntry('smart'));
+    updateSmartSaveIndicator({ savedToVault: true });
   }
   updateSmartVaultBadge();
 
@@ -4205,6 +4457,7 @@ Siti Laras Maemunah, S.Pd. | Guru</textarea>
     smartDoc = createEmptySmartDocument();
     store.setState({ smartDocument: smartDoc }, false);
     store.setActiveVaultId(null, 'smart');
+    hideAiCompareBar();
     renderAllSmartPages(smartDoc.pages);
     updateSmartVaultBadge();
     if (notify) {
@@ -4221,6 +4474,10 @@ Siti Laras Maemunah, S.Pd. | Guru</textarea>
       .join(' ')
       .slice(0, 160);
 
+    const versionNote = unlock
+      ? 'Buka kunci & simpan perubahan'
+      : (lastAiCompareState ? 'Simpan pasca revisi AI' : 'Simpan perubahan (Ctrl+S)');
+
     store.updateLetterVaultEntry(targetEntry.id, {
       nomorSurat: snap.nomorSurat || targetEntry.nomorSurat || '-',
       tanggalSurat: snap.signer?.date || targetEntry.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
@@ -4229,7 +4486,8 @@ Siti Laras Maemunah, S.Pd. | Guru</textarea>
       summary: summaryText || targetEntry.summary || 'Dokumen persuratan dari Kanvas Word Pro.',
       document: liveDocModel,
       ...(unlock ? { isLockedTemplate: false, isMasterTemplate: false } : {})
-    });
+    }, { versionNote });
+    lastLocalSavedTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
     syncGlobalPrintPageStyle(store.getLetterOptions());
     updateSmartVaultBadge();
     if (clearAfterSave) {
@@ -4650,27 +4908,394 @@ Siti Laras Maemunah, S.Pd. | Guru</textarea>
   container.querySelector('#smart-btn-save-vault')?.addEventListener('click', () => performSmartSave({ clearAfterSave: false }));
   container.querySelector('#smart-btn-save-as-vault')?.addEventListener('click', () => openSmartSaveVaultModal({ mode: 'save-as', clearAfterSave: false }));
 
+  // =========================================================================
+  // CARI & GANTI CEPAT (CTRL+F / CTRL+H) LINTAS HALAMAN WORD PRO
+  // =========================================================================
+  const findBarEl = container.querySelector('#smart-find-replace-bar');
+  const findInputEl = container.querySelector('#smart-find-input');
+  const replaceInputEl = container.querySelector('#smart-replace-input');
+  const findCaseEl = container.querySelector('#smart-find-case');
+  const findCountEl = container.querySelector('#smart-find-count');
+  let findMatches = [];
+  let activeFindIdx = -1;
+
+  function clearFindHighlights() {
+    if (typeof CSS !== 'undefined' && CSS.highlights) {
+      CSS.highlights.delete('smart-find-all');
+      CSS.highlights.delete('smart-find-current');
+    }
+  }
+
+  function collectSmartFindMatches() {
+    findMatches = [];
+    const query = findInputEl?.value || '';
+    if (!query) {
+      activeFindIdx = -1;
+      clearFindHighlights();
+      if (findCountEl) findCountEl.textContent = '0/0';
+      return;
+    }
+
+    const caseSensitive = Boolean(findCaseEl?.checked);
+    const needle = caseSensitive ? query : query.toLowerCase();
+    const pagesEls = [...pagesStack.querySelectorAll('.smart-editable-page')];
+
+    pagesEls.forEach((pageEl) => {
+      const walker = document.createTreeWalker(pageEl, NodeFilter.SHOW_TEXT, null);
+      let textNode;
+      while ((textNode = walker.nextNode())) {
+        const raw = textNode.nodeValue || '';
+        if (!raw) continue;
+        const hay = caseSensitive ? raw : raw.toLowerCase();
+        let pos = 0;
+        while ((pos = hay.indexOf(needle, pos)) !== -1) {
+          findMatches.push({ node: textNode, start: pos, end: pos + query.length });
+          pos += Math.max(1, query.length);
+        }
+      }
+    });
+
+    if (findMatches.length === 0) {
+      activeFindIdx = -1;
+      clearFindHighlights();
+    } else {
+      if (activeFindIdx < 0 || activeFindIdx >= findMatches.length) activeFindIdx = 0;
+      paintSmartFindHighlights();
+    }
+    if (findCountEl) {
+      findCountEl.textContent = findMatches.length > 0 ? `${activeFindIdx + 1}/${findMatches.length}` : '0/0';
+    }
+  }
+
+  function paintSmartFindHighlights() {
+    clearFindHighlights();
+    if (findMatches.length === 0 || typeof Range === 'undefined') return;
+    if (typeof CSS !== 'undefined' && CSS.highlights && typeof Highlight !== 'undefined') {
+      const allRanges = [];
+      let curRange = null;
+      findMatches.forEach((m, i) => {
+        try {
+          const r = document.createRange();
+          r.setStart(m.node, m.start);
+          r.setEnd(m.node, m.end);
+          if (i === activeFindIdx) curRange = r;
+          else allRanges.push(r);
+        } catch {}
+      });
+      if (allRanges.length > 0) CSS.highlights.set('smart-find-all', new Highlight(...allRanges));
+      if (curRange) CSS.highlights.set('smart-find-current', new Highlight(curRange));
+    }
+  }
+
+  function jumpToFindMatch(step = 1) {
+    if (findMatches.length === 0) collectSmartFindMatches();
+    if (findMatches.length === 0) return;
+    activeFindIdx = (activeFindIdx + step + findMatches.length) % findMatches.length;
+    const match = findMatches[activeFindIdx];
+    paintSmartFindHighlights();
+    if (findCountEl) findCountEl.textContent = `${activeFindIdx + 1}/${findMatches.length}`;
+    try {
+      const r = document.createRange();
+      r.setStart(match.node, match.start);
+      r.setEnd(match.node, match.end);
+      const sel = window.getSelection();
+      if (sel) {
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+      match.node.parentElement?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch {}
+  }
+
+  function openSmartFindReplaceBar({ focusReplace = false } = {}) {
+    if (!findBarEl) return;
+    findBarEl.classList.remove('hidden');
+    const selectedTxt = window.getSelection()?.toString()?.trim();
+    if (selectedTxt && selectedTxt.length <= 60 && findInputEl && !findInputEl.value) {
+      findInputEl.value = selectedTxt;
+    }
+    collectSmartFindMatches();
+    if (focusReplace && findInputEl?.value && replaceInputEl) {
+      replaceInputEl.focus();
+      replaceInputEl.select();
+    } else if (findInputEl) {
+      findInputEl.focus();
+      findInputEl.select();
+    }
+  }
+
+  function closeSmartFindReplaceBar() {
+    findBarEl?.classList.add('hidden');
+    clearFindHighlights();
+    findMatches = [];
+    activeFindIdx = -1;
+  }
+
+  container.querySelector('#smart-btn-find-replace')?.addEventListener('click', () => {
+    if (findBarEl && !findBarEl.classList.contains('hidden')) closeSmartFindReplaceBar();
+    else openSmartFindReplaceBar();
+  });
+  container.querySelector('#smart-find-close')?.addEventListener('click', closeSmartFindReplaceBar);
+  findInputEl?.addEventListener('input', () => { activeFindIdx = 0; collectSmartFindMatches(); });
+  findCaseEl?.addEventListener('change', () => { activeFindIdx = 0; collectSmartFindMatches(); });
+  container.querySelector('#smart-find-next')?.addEventListener('click', () => jumpToFindMatch(1));
+  container.querySelector('#smart-find-prev')?.addEventListener('click', () => jumpToFindMatch(-1));
+
+  findInputEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      jumpToFindMatch(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      closeSmartFindReplaceBar();
+    }
+  });
+  replaceInputEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSmartFindReplaceBar();
+  });
+
+  container.querySelector('#smart-replace-one')?.addEventListener('click', () => {
+    if (findMatches.length === 0) collectSmartFindMatches();
+    if (activeFindIdx < 0 || !findMatches[activeFindIdx]) return;
+    const replacement = replaceInputEl?.value ?? '';
+    const m = findMatches[activeFindIdx];
+    pushUndoSnapshot();
+    const curVal = m.node.nodeValue || '';
+    m.node.nodeValue = curVal.slice(0, m.start) + replacement + curVal.slice(m.end);
+    schedulePersistSmartDoc();
+    scheduleReflowPagination();
+    collectSmartFindMatches();
+    if (findMatches.length > 0) jumpToFindMatch(0);
+    showToast('1 teks berhasil diganti.', 'success');
+  });
+
+  container.querySelector('#smart-replace-all')?.addEventListener('click', () => {
+    collectSmartFindMatches();
+    if (findMatches.length === 0) {
+      showToast('Tidak ada teks yang cocok untuk diganti.', 'warning');
+      return;
+    }
+    const replacement = replaceInputEl?.value ?? '';
+    const totalReplaced = findMatches.length;
+    pushUndoSnapshot();
+    // Ganti mundur per node agar indeks offset teks sebelumnya tidak bergeser
+    const byNode = new Map();
+    findMatches.forEach((m) => {
+      if (!byNode.has(m.node)) byNode.set(m.node, []);
+      byNode.get(m.node).push(m);
+    });
+    byNode.forEach((list, textNode) => {
+      let val = textNode.nodeValue || '';
+      for (let i = list.length - 1; i >= 0; i--) {
+        const m = list[i];
+        val = val.slice(0, m.start) + replacement + val.slice(m.end);
+      }
+      textNode.nodeValue = val;
+    });
+    schedulePersistSmartDoc();
+    scheduleReflowPagination();
+    collectSmartFindMatches();
+    showToast(`✓ ${totalReplaced} kecocokan berhasil diganti di seluruh halaman.`, 'success');
+  });
+
+  // =========================================================================
+  // RIWAYAT VERSI DOKUMEN GUDANG & SNAPSHOT SESI (VERSION HISTORY)
+  // =========================================================================
+  function openSmartVersionHistoryModal() {
+    const activeEntry = store.getActiveVaultEntry('smart');
+    const vaultHistory = Array.isArray(activeEntry?.versionHistory) ? activeEntry.versionHistory : [];
+    const sessionUndoCount = smartUndoStack.length;
+
+    const vaultRowsHtml = !activeEntry
+      ? `<div style="padding:14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; font-size:12.5px; color:#475569;">
+           Dokumen ini masih berupa draf baru. Simpan ke <strong>Gudang Surat (Ctrl+S)</strong> terlebih dahulu agar setiap revisinya tercatat permanen di riwayat versi.
+         </div>`
+      : vaultHistory.length === 0
+      ? `<div style="padding:14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; font-size:12.5px; color:#475569;">
+           Belum ada riwayat versi tersimpan untuk <strong>${escapeHtmlText(activeEntry.title)}</strong>. Tekan <strong>Ctrl+S</strong> untuk menyimpan versi baru.
+         </div>`
+      : `<div style="display:grid; gap:8px;">
+          ${vaultHistory.map((ver, idx) => {
+            const when = ver.savedAt ? new Date(ver.savedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
+            return `
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; border:1px solid ${idx === 0 ? '#86efac' : '#e2e8f0'}; background:${idx === 0 ? '#f0fdf4' : '#ffffff'}; border-radius:10px;">
+                <div style="min-width:0;">
+                  <div style="font-size:12.5px; font-weight:700; color:#0f172a;">
+                    ${idx === 0 ? '✓ Versi Aktif Terbaru · ' : `Versi #${vaultHistory.length - idx} · `}${escapeHtmlText(ver.note || 'Simpan Perubahan')}
+                  </div>
+                  <div style="font-size:11.5px; color:#64748b; margin-top:2px;">
+                    🕒 ${escapeHtmlText(when)} · 👤 ${escapeHtmlText(ver.savedBy || 'Pengguna')} · No: ${escapeHtmlText(ver.nomorSurat || '-')}
+                  </div>
+                </div>
+                ${idx > 0 && ver.document ? `<button type="button" class="btn btn-sm btn-secondary btn-smart-restore-ver" data-ver-id="${escapeHtmlText(ver.versionId)}">Pulihkan Versi</button>` : '<span class="status-chip status-chip-green" style="font-size:10px;">Terkini</span>'}
+              </div>
+            `;
+          }).join('')}
+        </div>`;
+
+    modalRoot.innerHTML = `
+      <div class="modal-overlay">
+        <div class="modal-card" style="max-width: 680px; width: 95%; max-height: 88vh; display: flex; flex-direction: column;">
+          <div class="modal-header">
+            <h3>🕒 Riwayat Versi Dokumen${activeEntry ? `: ${escapeHtmlText(activeEntry.title)}` : ''}</h3>
+            <button type="button" class="modal-close" id="smart-modal-close">&times;</button>
+          </div>
+          <div class="modal-body" style="overflow-y: auto; display: grid; gap: 14px;">
+            <div>
+              <h4 style="margin:0 0 8px 0; font-size:13px; color:#0f172a;">Riwayat Tersimpan di Gudang Surat (Maks 10 Versi)</h4>
+              ${vaultRowsHtml}
+            </div>
+            <div style="padding-top:10px; border-top:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div style="font-size:12px; color:#475569;">
+                <strong>Undo Sesi Aktif:</strong> ${sessionUndoCount} langkah perubahan lokal tersedia di memori kanvas.
+              </div>
+              <button type="button" class="btn btn-sm btn-secondary" id="smart-modal-step-undo" ${sessionUndoCount === 0 ? 'disabled' : ''}>↶ Undo 1 Langkah</button>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-primary" id="smart-modal-close-btn">Tutup</button>
+          </div>
+        </div>
+      </div>
+    `;
+    modalRoot.querySelector('#smart-modal-close').onclick = closeSmartModal;
+    modalRoot.querySelector('#smart-modal-close-btn').onclick = closeSmartModal;
+    modalRoot.querySelector('#smart-modal-step-undo')?.addEventListener('click', () => {
+      closeSmartModal();
+      container.querySelector('#smart-btn-undo')?.click();
+    });
+    modalRoot.querySelectorAll('.btn-smart-restore-ver').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!activeEntry) return;
+        const restored = store.restoreLetterVaultVersion(activeEntry.id, btn.dataset.verId);
+        if (!restored || !restored.document) {
+          showToast('Gagal memulihkan versi dokumen.', 'error');
+          return;
+        }
+        pushUndoSnapshot();
+        const converted = docModelToSmartPages(restored.document, store.getSchoolProfile());
+        smartDoc = { pages: converted.pages, meta: converted.meta };
+        store.setState({ smartDocument: smartDoc }, false);
+        renderAllSmartPages(smartDoc.pages);
+        updateSmartVaultBadge();
+        closeSmartModal();
+        showToast('✓ Versi dokumen sebelumnya berhasil dipulihkan!', 'success');
+      });
+    });
+  }
+
+  container.querySelector('#smart-btn-version-history')?.addEventListener('click', openSmartVersionHistoryModal);
+
+  // =========================================================================
+  // FEEDBACK REVISI KEPALA SEKOLAH TERHUBUNG LANGSUNG KE AI SURGICAL
+  // =========================================================================
+  const kepsekRevBannerEl = container.querySelector('#smart-kepsek-revision-banner');
+
+  function renderKepsekRevisionBanner() {
+    const rev = store.getPendingKepsekRevision();
+    if (!kepsekRevBannerEl) return;
+    if (!rev) {
+      kepsekRevBannerEl.classList.add('hidden');
+      kepsekRevBannerEl.innerHTML = '';
+      return;
+    }
+
+    kepsekRevBannerEl.classList.remove('hidden');
+    kepsekRevBannerEl.innerHTML = `
+      <div class="smart-rev-head">
+        <div>
+          <span class="status-chip status-chip-red" style="font-size:10.5px;">📝 Catatan Revisi Kepala Sekolah</span>
+          <strong style="margin-left:6px; font-size:13px; color:#0f172a;">${escapeHtmlText(rev.title || 'Surat')} (${escapeHtmlText(rev.nomorSurat || '-')})</strong>
+        </div>
+        <button type="button" class="smart-tbl-btn" id="smart-rev-dismiss" title="Sembunyikan banner revisi">✕ Tutup</button>
+      </div>
+      <div class="smart-rev-reason">"${escapeHtmlText(rev.reason || 'Perlu penyesuaian data sebelum ACC QR.')}"</div>
+      <div class="smart-rev-actions">
+        <button type="button" class="btn btn-sm btn-primary" id="smart-rev-auto-ai">🤖 Perbaiki Otomatis Sesuai Catatan (AI Surgical)</button>
+        <button type="button" class="btn btn-sm btn-success" id="smart-rev-resubmit-acc">📨 Kirim Ajukan Ulang ACC Ini</button>
+      </div>
+    `;
+
+    kepsekRevBannerEl.querySelector('#smart-rev-dismiss').onclick = () => {
+      store.clearPendingKepsekRevision();
+      renderKepsekRevisionBanner();
+    };
+
+    const runKepsekAiFix = () => {
+      const promptTxt = `Lakukan perbaikan bedah (surgical) pada surat terbuka sesuai catatan revisi Kepala Sekolah berikut TANPA merombak tata letak atau struktur tabel: "${rev.reason}".`;
+      return runSmartAiEdit(promptTxt);
+    };
+
+    kepsekRevBannerEl.querySelector('#smart-rev-auto-ai').onclick = runKepsekAiFix;
+
+    kepsekRevBannerEl.querySelector('#smart-rev-resubmit-acc').onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = 'Mengirim ACC Ulang...';
+      try {
+        const livePages = collectLivePagesData();
+        const activeModel = getActiveSmartDocModel();
+        const snap = extractSmartSnapshotFromPages(livePages, store.getSchoolProfile());
+        const summaryText = (snap.blocks || []).filter(b => b.type === 'paragraph' && b.text).map(b => b.text).join(' ').slice(0, 160);
+        const res = await requestAccCloud({
+          outgoingId: rev.outgoingId,
+          signerRole: rev.signerRole || 'kepala_sekolah',
+          requestNote: `Sudah direvisi sesuai catatan Kepsek: ${rev.reason}`.slice(0, 200),
+          title: snap.letterTitle || rev.title,
+          recipientName: snap.tujuan || undefined,
+          perihal: snap.hal || undefined,
+          tanggalSurat: snap.signer?.date || undefined,
+          summary: summaryText || undefined,
+          documentSnapshot: { ...activeModel, pages: livePages }
+        });
+        if (!res.ok || !res.item) {
+          throw new Error(res.error || 'Gagal mengajukan ulang ACC ke server.');
+        }
+        store.upsertOutgoingLetterFromCloud(res.item);
+        if (res.syncRev) setLastKnownSyncRev(res.syncRev);
+        store.clearPendingKepsekRevision();
+        renderKepsekRevisionBanner();
+        showToast('📨 Surat hasil revisi berhasil diajukan ulang ke Antrean ACC Kepala Sekolah!', 'success');
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '📨 Kirim Ajukan Ulang ACC Ini';
+        showToast(err.message, 'error');
+      }
+    };
+
+    if (rev.autoRunAi) {
+      store.setPendingKepsekRevision({ ...rev, autoRunAi: false });
+      setTimeout(() => runKepsekAiFix(), 180);
+    }
+  }
+  renderKepsekRevisionBanner();
+
   // Tombol Refresh / Bersihkan Lembar Kerja Word Pro
   container.querySelector('#smart-btn-refresh')?.addEventListener('click', openSmartRefreshConfirmModal);
 
   // Modal Catat Surat Keluar Resmi (berbagi nomor urut buku agenda!)
   container.querySelector('#smart-btn-record-outgoing')?.addEventListener('click', () => openSmartRecordOutgoingModal({ clearAfterSave: false }));
 
-  // Shortcut Global Word Pro (Ctrl+S = Save, Ctrl+Shift+S / F12 = Save As)
+  // Shortcut Global Word Pro (Ctrl+S = Save, Ctrl+Shift+S / F12 = Save As, Ctrl+F / Ctrl+H = Cari & Ganti)
   const smartWorkspaceRoot = container.querySelector('.smart-word-workspace');
   const onSmartGlobalKeyDown = (e) => {
     if (!smartWorkspaceRoot || !smartWorkspaceRoot.isConnected) {
       document.removeEventListener('keydown', onSmartGlobalKeyDown);
+      clearFindHighlights();
       return;
     }
-    const isSaveAs = ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') || e.key === 'F12';
-    const isSave = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 's';
+    const key = e.key.toLowerCase();
+    const isSaveAs = ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 's') || e.key === 'F12';
+    const isSave = (e.ctrlKey || e.metaKey) && !e.shiftKey && key === 's';
+    const isFind = (e.ctrlKey || e.metaKey) && (key === 'f' || key === 'h');
     if (isSaveAs) {
       e.preventDefault();
       openSmartSaveVaultModal({ mode: 'save-as', clearAfterSave: false });
     } else if (isSave) {
       e.preventDefault();
       performSmartSave({ clearAfterSave: false });
+    } else if (isFind) {
+      e.preventDefault();
+      openSmartFindReplaceBar({ focusReplace: key === 'h' });
     }
   };
   document.addEventListener('keydown', onSmartGlobalKeyDown);

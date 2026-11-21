@@ -51,9 +51,19 @@ import {
   syncDriveCloud
 } from '../sync/workspaceClient.js';
 import { setLastKnownSyncRev } from '../sync/liveSync.js';
+import {
+  AGENDA_MONTH_LABELS,
+  filterLettersByPeriod,
+  collectAvailableAgendaYears,
+  formatPeriodLabel,
+  exportOutgoingLettersCsv,
+  buildPrintableAgendaHtml
+} from '../letters/agenda.js';
 
 let outgoingSearchQuery = '';
 let outgoingTypeFilter = 'all';
+let outgoingMonthFilter = 'all';
+let outgoingYearFilter = 'all';
 let outgoingSortMode = 'seq_desc';
 let showDeleteActions = false;
 let activeAltDHandler = null;
@@ -118,7 +128,13 @@ function getFilteredAndSortedOutgoing() {
   const list = store.getOutgoingLetters();
   const q = outgoingSearchQuery.trim();
 
-  let filtered = list.filter(item => {
+  const periodFiltered = filterLettersByPeriod(list, {
+    month: outgoingMonthFilter,
+    year: outgoingYearFilter,
+    getDateValue: (item) => item.tanggalSurat || item.recordedAt
+  });
+
+  let filtered = periodFiltered.filter(item => {
     if (outgoingTypeFilter !== 'all' && (item.typeCode || '').toUpperCase() !== outgoingTypeFilter) {
       return false;
     }
@@ -174,6 +190,7 @@ export function renderOutgoingLettersView(container) {
     : 0;
 
   const typeCodesInUse = Array.from(new Set(allOutgoing.map(i => (i.typeCode || '').toUpperCase()).filter(Boolean)));
+  const yearsInUse = collectAvailableAgendaYears(allOutgoing, (item) => item.tanggalSurat || item.recordedAt);
 
   const OUT_SVG_TRAY = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
   const OUT_SVG_DOC = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`;
@@ -203,7 +220,13 @@ export function renderOutgoingLettersView(container) {
             </div>
           </div>
 
-          <div style="display: flex; gap: 8px; align-items: center; flex-shrink: 0;">
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0;">
+            <button type="button" id="btn-out-export-csv" class="btn btn-sm btn-secondary" title="Unduh Buku Agenda Surat Keluar format Excel/CSV (sesuai filter periode)">
+              📊 Ekspor Excel/CSV
+            </button>
+            <button type="button" id="btn-out-print-rekap" class="btn btn-sm btn-secondary" title="Cetak Rekap Buku Agenda Surat Keluar resmi">
+              🖨️ Cetak Rekap
+            </button>
             <button id="btn-go-canvas-new-out" class="btn btn-blue-cta" style="font-size: 13px; padding: 10px 18px; border-radius: 8px;">
               + Buat &amp; Catat Surat Keluar Baru
             </button>
@@ -271,6 +294,23 @@ export function renderOutgoingLettersView(container) {
                 const label = LETTER_TYPE_CODES[code]?.label || code;
                 return `<option value="${escapeHtml(code)}" ${outgoingTypeFilter === code ? 'selected' : ''}>${escapeHtml(label)}</option>`;
               }).join('')}
+            </select>
+          </div>
+          <div class="icon-input-wrap filter-ctrl-sm">
+            <span class="icon-input-leading">${OUT_SVG_CAL(14)}</span>
+            <select id="select-outgoing-month" class="icon-input-control" style="cursor: pointer;">
+              <option value="all" ${outgoingMonthFilter === 'all' ? 'selected' : ''}>Semua Bulan</option>
+              ${AGENDA_MONTH_LABELS.map((mName, idx) => {
+                const mVal = String(idx + 1).padStart(2, '0');
+                return `<option value="${mVal}" ${outgoingMonthFilter === mVal ? 'selected' : ''}>${mName}</option>`;
+              }).join('')}
+            </select>
+          </div>
+          <div class="icon-input-wrap filter-ctrl-xs">
+            <span class="icon-input-leading">#</span>
+            <select id="select-outgoing-year" class="icon-input-control" style="cursor: pointer;">
+              <option value="all" ${outgoingYearFilter === 'all' ? 'selected' : ''}>Semua Tahun</option>
+              ${yearsInUse.map(y => `<option value="${escapeHtml(y)}" ${outgoingYearFilter === y ? 'selected' : ''}>${escapeHtml(y)}</option>`).join('')}
             </select>
           </div>
           <div class="icon-input-wrap" style="width: 225px;">
@@ -509,8 +549,12 @@ function updateOutgoingListInPlace(container) {
 function bindOutgoingEvents(container) {
   const searchInput = container.querySelector('#input-outgoing-search');
   const typeSelect = container.querySelector('#select-outgoing-type');
+  const monthSelect = container.querySelector('#select-outgoing-month');
+  const yearSelect = container.querySelector('#select-outgoing-year');
   const sortSelect = container.querySelector('#select-outgoing-sort');
   const btnGoCanvas = container.querySelector('#btn-go-canvas-new-out');
+  const btnExportCsv = container.querySelector('#btn-out-export-csv');
+  const btnPrintRekap = container.querySelector('#btn-out-print-rekap');
 
   if (searchInput) {
     searchInput.addEventListener('input', () => {
@@ -523,6 +567,61 @@ function bindOutgoingEvents(container) {
     typeSelect.addEventListener('change', () => {
       outgoingTypeFilter = typeSelect.value;
       updateOutgoingListInPlace(container);
+    });
+  }
+
+  if (monthSelect) {
+    monthSelect.addEventListener('change', () => {
+      outgoingMonthFilter = monthSelect.value;
+      updateOutgoingListInPlace(container);
+    });
+  }
+
+  if (yearSelect) {
+    yearSelect.addEventListener('change', () => {
+      outgoingYearFilter = yearSelect.value;
+      updateOutgoingListInPlace(container);
+    });
+  }
+
+  if (btnExportCsv) {
+    btnExportCsv.addEventListener('click', () => {
+      const filteredItems = getFilteredAndSortedOutgoing();
+      if (filteredItems.length === 0) {
+        showToast('Tidak ada data Surat Keluar pada filter periode yang dipilih.', 'warning');
+        return;
+      }
+      const periodLabel = formatPeriodLabel(outgoingMonthFilter, outgoingYearFilter);
+      const schoolName = store.getSchoolProfile()?.schoolName || 'SMK IT Al-Hawari';
+      const csv = exportOutgoingLettersCsv(filteredItems, { schoolName, periodLabel });
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const suffix = `${outgoingYearFilter === 'all' ? 'semua' : outgoingYearFilter}${outgoingMonthFilter !== 'all' ? `-${outgoingMonthFilter}` : ''}`;
+      downloadFile(blob, `buku-agenda-surat-keluar-${suffix}.csv`);
+      showToast(`✓ Buku Agenda Surat Keluar (${filteredItems.length} baris) berhasil diekspor ke CSV!`, 'success');
+    });
+  }
+
+  if (btnPrintRekap) {
+    btnPrintRekap.addEventListener('click', () => {
+      const filteredItems = getFilteredAndSortedOutgoing();
+      const periodLabel = formatPeriodLabel(outgoingMonthFilter, outgoingYearFilter);
+      const html = buildPrintableAgendaHtml({
+        kind: 'outgoing',
+        school: store.getSchoolProfile(),
+        periodLabel,
+        items: filteredItems
+      });
+      const win = window.open('', '_blank', 'width=1024,height=720');
+      if (!win) {
+        showToast('Popup diblokir browser — izinkan popup untuk mencetak rekap Buku Agenda.', 'warning');
+        return;
+      }
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      setTimeout(() => {
+        try { win.focus(); win.print(); } catch {}
+      }, 280);
     });
   }
 

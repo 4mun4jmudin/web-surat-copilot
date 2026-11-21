@@ -305,6 +305,7 @@ class StateStore {
       incomingLetters: [],
       smartDocument: null,
       activeUploadedDocx: null,
+      pendingKepsekRevision: null,
       authUser: null,
       authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
       driveStatus: {
@@ -896,8 +897,36 @@ class StateStore {
     return this.state.letterVault || [];
   }
 
+  buildVaultVersionSnapshot(entryLike = {}, note = 'Simpan Perubahan') {
+    const actor = this.state.authUser?.displayName || this.state.authUser?.username || 'Pengguna';
+    let docClone = null;
+    if (entryLike.document && typeof entryLike.document === 'object') {
+      try {
+        docClone = JSON.parse(JSON.stringify(entryLike.document));
+        if (docClone?.letterData?.kopImage && String(docClone.letterData.kopImage).length > 4000) {
+          docClone.letterData.kopImage = '';
+        }
+      } catch {
+        docClone = null;
+      }
+    }
+    return {
+      versionId: `ver-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      savedAt: new Date().toISOString(),
+      savedBy: actor,
+      note: String(note || 'Simpan Perubahan').trim().slice(0, 140),
+      title: entryLike.title || 'Surat Dinas',
+      nomorSurat: entryLike.nomorSurat || '-',
+      perihal: entryLike.perihal || '-',
+      document: docClone
+    };
+  }
+
   addLetterVaultEntry(entry) {
     const vault = this.getLetterVault();
+    const initialHistory = Array.isArray(entry.versionHistory) && entry.versionHistory.length > 0
+      ? entry.versionHistory.slice(0, 10)
+      : (entry.document ? [this.buildVaultVersionSnapshot(entry, entry.versionNote || 'Versi Awal')] : []);
     const newEntry = {
       id: entry.id || `letter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       title: entry.title || 'Surat Dinas',
@@ -913,6 +942,7 @@ class StateStore {
       source: entry.source || 'builder',
       document: entry.document || null,
       uploadedDocx: entry.uploadedDocx || null,
+      versionHistory: initialHistory,
       createdAt: entry.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -957,25 +987,83 @@ class StateStore {
     });
   }
 
-  updateLetterVaultEntry(id, updates) {
+  updateLetterVaultEntry(id, updates, options = {}) {
     const vault = this.getLetterVault();
     const idx = vault.findIndex(item => item.id === id);
     if (idx === -1) return null;
 
-    const updatedEntry = {
-      ...vault[idx],
+    const currentEntry = vault[idx];
+    const nextMerged = {
+      ...currentEntry,
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    const updated = vault.map((item, i) => (i === idx ? updatedEntry : item));
+
+    if (updates && updates.document) {
+      const existingHistory = Array.isArray(currentEntry.versionHistory) ? [...currentEntry.versionHistory] : [];
+      if (existingHistory.length === 0 && currentEntry.document) {
+        existingHistory.push(this.buildVaultVersionSnapshot(currentEntry, 'Versi Sebelumnya'));
+      }
+      const note = options.versionNote || updates.versionNote || 'Pembaruan Dokumen (Ctrl+S)';
+      const newSnap = this.buildVaultVersionSnapshot(nextMerged, note);
+      const latestDocStr = existingHistory[0]?.document ? JSON.stringify(existingHistory[0].document) : '';
+      const nextDocStr = newSnap.document ? JSON.stringify(newSnap.document) : '';
+      if (options.forceVersionSnapshot || !latestDocStr || latestDocStr !== nextDocStr) {
+        nextMerged.versionHistory = [newSnap, ...existingHistory].slice(0, 10);
+      } else {
+        nextMerged.versionHistory = existingHistory.slice(0, 10);
+      }
+      delete nextMerged.versionNote;
+    }
+
+    const updated = vault.map((item, i) => (i === idx ? nextMerged : item));
     this.setState({ letterVault: updated }, false);
     this.saveLetterVault(updated);
     this.queueCloudSyncPatch({
       letterVault: updated,
       replaceLetterVault: true,
-      syncDriveItem: { type: 'vault', item: updatedEntry }
+      syncDriveItem: { type: 'vault', item: nextMerged }
     });
-    return updatedEntry;
+    return nextMerged;
+  }
+
+  restoreLetterVaultVersion(vaultId, versionId) {
+    const vault = this.getLetterVault();
+    const entry = vault.find(item => item.id === vaultId);
+    if (!entry) return null;
+    const history = Array.isArray(entry.versionHistory) ? entry.versionHistory : [];
+    const targetVer = history.find(v => v.versionId === versionId);
+    if (!targetVer || !targetVer.document) return null;
+
+    const restoredDoc = JSON.parse(JSON.stringify(targetVer.document));
+    const timeLabel = targetVer.savedAt
+      ? new Date(targetVer.savedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+      : '';
+    return this.updateLetterVaultEntry(
+      vaultId,
+      {
+        title: targetVer.title || entry.title,
+        nomorSurat: targetVer.nomorSurat || entry.nomorSurat,
+        perihal: targetVer.perihal || entry.perihal,
+        document: restoredDoc
+      },
+      {
+        versionNote: `Pulihkan versi (${timeLabel || targetVer.note})`,
+        forceVersionSnapshot: true
+      }
+    );
+  }
+
+  setPendingKepsekRevision(revision) {
+    this.setState({ pendingKepsekRevision: revision ? { ...revision } : null }, false);
+  }
+
+  getPendingKepsekRevision() {
+    return this.state.pendingKepsekRevision || null;
+  }
+
+  clearPendingKepsekRevision() {
+    this.setState({ pendingKepsekRevision: null }, false);
   }
 
   removeLetterVaultEntry(id, { bypassLock = false } = {}) {

@@ -27,6 +27,8 @@ import {
   findPreferredSignatureQrPlacement
 } from './qrFloatingHelper.js';
 import { canSignWithRole, resolveDefaultAllowedSignerRole } from '../auth/permissions.js';
+import { requestAccCloud } from '../sync/workspaceClient.js';
+import { setLastKnownSyncRev } from '../sync/liveSync.js';
 import {
   openPrintSignatureChoiceModal,
   buildSignerRoleSelectorHtml,
@@ -489,6 +491,8 @@ export function renderWordCanvas(container) {
                 <span id="quick-ai-edit-status-text">AI sedang menerapkan instruksi revisi pada dokumen Anda...</span>
               </div>
             </div>
+
+            <div id="wc-kepsek-revision-banner" class="smart-kepsek-rev-banner hidden no-print" style="max-width: 820px; width: 100%; margin: 0 auto 14px;"></div>
         
         ${activeDocx ? `
           <!-- BANNER DOKUMEN IMPOR PRESERVASI FORMAT (TERPUSAT DI ATAS LEMBAR KERJA) -->
@@ -2176,6 +2180,68 @@ function bindCopilotDrawer(container) {
     });
   }
 
+  // Banner Feedback Revisi Kepala Sekolah (bila dibuka dari Antrean ACC ditolak)
+  const wcRevBanner = container.querySelector('#wc-kepsek-revision-banner');
+  if (wcRevBanner) {
+    const rev = store.getPendingKepsekRevision();
+    if (rev) {
+      wcRevBanner.classList.remove('hidden');
+      wcRevBanner.innerHTML = `
+        <div class="smart-rev-head">
+          <div>
+            <span class="status-chip status-chip-red" style="font-size:10.5px;">📝 Catatan Revisi Kepala Sekolah</span>
+            <strong style="margin-left:6px; font-size:13px; color:#0f172a;">${escapeHtml(rev.title || 'Surat')} (${escapeHtml(rev.nomorSurat || '-')})</strong>
+          </div>
+          <button type="button" class="smart-tbl-btn" id="wc-rev-dismiss">✕ Tutup</button>
+        </div>
+        <div class="smart-rev-reason">"${escapeHtml(rev.reason || 'Perlu revisi sebelum ACC QR.')}"</div>
+        <div class="smart-rev-actions">
+          <button type="button" class="btn btn-sm btn-primary" id="wc-rev-auto-ai">🤖 Perbaiki Otomatis Sesuai Catatan (AI Surgical)</button>
+          <button type="button" class="btn btn-sm btn-success" id="wc-rev-resubmit-acc">📨 Kirim Ajukan Ulang ACC Ini</button>
+        </div>
+      `;
+      wcRevBanner.querySelector('#wc-rev-dismiss').onclick = () => {
+        store.clearPendingKepsekRevision();
+        wcRevBanner.classList.add('hidden');
+      };
+      const runWcRevFix = () => executePromptEditOnOpenDoc(
+        `Lakukan perbaikan bedah (surgical) sesuai catatan revisi Kepala Sekolah berikut TANPA merombak tata letak atau tabel dokumen: "${rev.reason}".`,
+        true
+      );
+      wcRevBanner.querySelector('#wc-rev-auto-ai').onclick = runWcRevFix;
+      wcRevBanner.querySelector('#wc-rev-resubmit-acc').onclick = async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Mengirim ACC Ulang...';
+        try {
+          const liveModel = buildModelFromCanvas(container);
+          const titleB = (liveModel.blocks || []).find(b => b.type === 'letterTitle');
+          const res = await requestAccCloud({
+            outgoingId: rev.outgoingId,
+            signerRole: rev.signerRole || 'kepala_sekolah',
+            requestNote: `Sudah direvisi sesuai catatan Kepsek: ${rev.reason}`.slice(0, 200),
+            title: titleB?.title || liveModel.meta?.title || rev.title,
+            documentSnapshot: liveModel
+          });
+          if (!res.ok || !res.item) throw new Error(res.error || 'Gagal mengajukan ulang ACC.');
+          store.upsertOutgoingLetterFromCloud(res.item);
+          if (res.syncRev) setLastKnownSyncRev(res.syncRev);
+          store.clearPendingKepsekRevision();
+          wcRevBanner.classList.add('hidden');
+          showToast('📨 Surat hasil revisi berhasil diajukan ulang ke Antrean ACC Kepala Sekolah!', 'success');
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = '📨 Kirim Ajukan Ulang ACC Ini';
+          showToast(err.message, 'error');
+        }
+      };
+      if (rev.autoRunAi) {
+        store.setPendingKepsekRevision({ ...rev, autoRunAi: false });
+        setTimeout(() => runWcRevFix(), 180);
+      }
+    }
+  }
+
   // Tombol Batal
   if (btnCancel) {
     btnCancel.addEventListener('click', () => {
@@ -2448,10 +2514,18 @@ function bindCanvasLiveEditing(container) {
   bindDynamicBlockControls(container);
 }
 
+function preserveSpacesHtml(str = '') {
+  return escapeHtml(str)
+    .replace(/ (?= )/g, '&nbsp;')
+    .replace(/^ /, '&nbsp;')
+    .replace(/\u00a0/g, '&nbsp;')
+    .replace(/\r?\n/g, '<br>');
+}
+
 function runsToWordSafeHtml(runs = []) {
   if (!Array.isArray(runs) || runs.length === 0) return '';
   return runs.map((r) => {
-    let html = escapeHtml(r.text || '').replace(/\r?\n/g, '<br>');
+    let html = preserveSpacesHtml(r.text || '');
     if (r.bold) html = `<b>${html}</b>`;
     if (r.italic) html = `<i>${html}</i>`;
     if (r.underline) html = `<u>${html}</u>`;
@@ -2530,7 +2604,7 @@ function buildParagraphBlockHtml({
   const cleanText = String(text || '');
   const innerHtml = Array.isArray(runs) && runs.length > 0
     ? runsToWordSafeHtml(runs)
-    : escapeHtml(cleanText);
+    : preserveSpacesHtml(cleanText);
   const checkStr = Array.isArray(runs) && runs.length > 0
     ? runs.map(r => r.text || '').join('')
     : cleanText;
@@ -2669,14 +2743,15 @@ function buildIdentityTableBlockHtml(rows = [], colWidthsPct = null) {
 }
 
 function buildIdentityRowHtml(r = {}, colWidthsPct = null) {
-  const rawVal = String(r.value || '').trim();
-  const formattedVal = rawVal ? (rawVal.startsWith(':') ? rawVal : `: ${rawVal}`) : ': ';
+  const rawVal = String(r.value || '').replace(/^[\r\n]+|[\r\n]+$/g, '');
+  const trimmedVal = rawVal.trimStart();
+  const formattedVal = trimmedVal ? (trimmedVal.startsWith(':') ? rawVal : `: ${rawVal}`) : ': ';
   const anchorAttr = (r.index !== undefined && r.index !== -1) ? `data-anchor-index="${r.index}"` : '';
   const hasCustomW = Array.isArray(colWidthsPct) && colWidthsPct.length >= 2;
   return `
     <tr ${anchorAttr}>
-      <td class="id-label" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[0]}%;"` : ''}>${escapeHtml(r.label || '')}</td>
-      <td class="id-val" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[1]}%;"` : ''}>${escapeHtml(formattedVal)}</td>
+      <td class="id-label" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[0]}%;"` : ''}>${preserveSpacesHtml(String(r.label || '').replace(/^[\r\n]+|[\r\n]+$/g, ''))}</td>
+      <td class="id-val" contenteditable="true" spellcheck="false"${hasCustomW ? ` style="width: ${colWidthsPct[1]}%;"` : ''}>${preserveSpacesHtml(formattedVal)}</td>
       <td class="id-row-action-cell no-print">
         <button type="button" class="btn-row-mini" data-row-action="add-row-below" title="Tambah baris di bawah">+</button>
         <button type="button" class="btn-row-mini btn-row-del" data-row-action="delete-row" title="Hapus baris ini">✕</button>
@@ -2700,8 +2775,8 @@ function renderDynamicStandardBlocksHtml(doc) {
     if (b.type === 'pageBreak') {
       htmlParts.push(buildPageBreakBlockHtml());
     } else if (b.type === 'paragraph') {
-      const text = (b.runs ? b.runs.map(r => r.text).join('') : (b.text || '')).trim();
-      if (!text) continue; // Abaikan kotak kosong bawaan supaya tidak ada celah jauh
+      const text = (b.runs ? b.runs.map(r => r.text).join('') : (b.text || ''));
+      if (!text.trim()) continue; // Abaikan kotak kosong bawaan supaya tidak ada celah jauh
       htmlParts.push(buildParagraphBlockHtml({
         text,
         runs: b.runs || null,
@@ -2783,7 +2858,8 @@ function collectMergedDynamicItems(container) {
     }
     if (wrapper.classList.contains('paragraph-box-wrapper')) {
       const pBox = wrapper.querySelector('.paragraph-box');
-      const text = pBox ? pBox.innerText.trim() : '';
+      const rawText = pBox ? pBox.innerText.replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
+      const text = rawText.trim() ? rawText : '';
       const runs = pBox ? extractWordInlineRuns(pBox) : [];
       const alignCss = (pBox?.style?.textAlign || '').toLowerCase();
       const alignment = alignCss === 'justify' ? 'both' : (alignCss || 'both');
@@ -2805,9 +2881,9 @@ function collectMergedDynamicItems(container) {
         : [];
       const rows = [];
       wrapper.querySelectorAll('.identity-table-word tr').forEach(tr => {
-        const label = tr.querySelector('.id-label')?.innerText.trim() || '';
-        const val = tr.querySelector('.id-val')?.innerText.trim() || '';
-        if (label || val.replace(/^:\s*/, '')) {
+        const label = tr.querySelector('.id-label')?.innerText.replace(/^[\r\n]+|[\r\n]+$/g, '') || '';
+        const val = tr.querySelector('.id-val')?.innerText.replace(/^[\r\n]+|[\r\n]+$/g, '') || '';
+        if (label.trim() || val.trim().replace(/^:\s*/, '')) {
           rows.push({ label, value: val });
         }
       });
@@ -3726,6 +3802,14 @@ function bindDynamicBlockControls(container) {
           }
           return;
         }
+      }
+
+      // 3B. Tekan Tab -> Sisipkan 4 spasi non-breaking agar posisi sejajar seperti Word
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        document.execCommand('insertHTML', false, '&nbsp;&nbsp;&nbsp;&nbsp;');
+        scheduleSync(container);
+        return;
       }
 
       // 4. Tekan Enter (tanpa Shift) -> Buat area teks / paragraf baru tepat di bawahnya
@@ -5237,7 +5321,9 @@ async function performWordSave(container, { clearAfterSave = false } = {}) {
           ...(unlock ? { isLockedTemplate: false, isMasterTemplate: false } : {})
         };
 
-    store.updateLetterVaultEntry(activeEntry.id, updates);
+    store.updateLetterVaultEntry(activeEntry.id, updates, {
+      versionNote: unlock ? 'Buka kunci & simpan perubahan' : 'Simpan perubahan Lembar Kerja (Ctrl+S)'
+    });
     updateWordVaultBadge(container);
     if (clearAfterSave) {
       resetWordCanvasToBlank(container);

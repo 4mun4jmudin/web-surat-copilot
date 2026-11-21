@@ -573,6 +573,7 @@ function buildVaultCardsHtml(allLetters) {
                   <td style="padding: 11px 14px; text-align: right; white-space: nowrap;">
                     <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}">Buka di Word</button>
                     <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}">.docx</button>
+                    <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Lihat &amp; Pulihkan Riwayat Versi">🕒 ${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1}</button>
                     <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru">${V_SVG_COPY_13}</button>
                     <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" style="color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.65' : '1'};" title="${isLocked ? 'Terkunci (⭐ Master Template). Buka kunci untuk menghapus.' : 'Hapus dari Gudang'}">${isLocked ? '🔒' : V_SVG_TRASH_13}</button>
                   </td>
@@ -638,7 +639,7 @@ function buildVaultCardsHtml(allLetters) {
               </p>
             </div>
 
-            <div style="padding-top: 4px; display: flex; gap: 7px; align-items: center;">
+            <div style="padding-top: 4px; display: flex; gap: 6px; align-items: center;">
               <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}" style="flex: 1; height: 34px; font-weight: 600; border-radius: 8px;">
                 <span style="background: rgba(255,255,255,0.2); padding: 1px 4px; border-radius: 3px; font-size: 10px; font-weight: 800;">W</span>
                 <span>Buka di Word</span>
@@ -646,6 +647,9 @@ function buildVaultCardsHtml(allLetters) {
               <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}" title="Unduh berkas .docx" style="height: 34px; padding: 0 10px; border-radius: 8px; font-weight: 600;">
                 ${V_SVG_DL_13}
                 <span>.docx</span>
+              </button>
+              <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Riwayat Versi (${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1} versi)" style="height: 34px; padding: 0 8px; border-radius: 8px; font-weight: 600;">
+                🕒${Array.isArray(letter.versionHistory) && letter.versionHistory.length > 1 ? ` ${letter.versionHistory.length}` : ''}
               </button>
               <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru (tanpa kunci)" style="height: 34px; width: 34px; padding: 0; border-radius: 8px;">
                 ${V_SVG_COPY_13}
@@ -877,6 +881,81 @@ function bindVaultCardActions(container) {
       } catch (err) {
         showToast(`Gagal mengunduh: ${err.message}`, 'error');
       }
+    };
+  });
+
+  // 9B. Riwayat Versi Dokumen Gudang (Version History)
+  container.querySelectorAll('.btn-vault-history').forEach(btn => {
+    btn.onclick = () => {
+      const id = btn.dataset.id;
+      const letter = store.getLetterVault().find(l => l.id === id);
+      if (!letter) return;
+      const versions = Array.isArray(letter.versionHistory) ? letter.versionHistory : [];
+
+      container.querySelector('#vault-version-modal')?.remove();
+      const modalWrap = document.createElement('div');
+      modalWrap.id = 'vault-version-modal';
+      modalWrap.className = 'modal-overlay';
+      modalWrap.innerHTML = `
+        <div class="modal-card" style="max-width: 660px; width: 95%; max-height: 88vh; display: flex; flex-direction: column;">
+          <div class="modal-header">
+            <h3>🕒 Riwayat Versi: ${escapeHtml(letter.title)}</h3>
+            <button type="button" class="modal-close" id="btn-close-v-hist">&times;</button>
+          </div>
+          <div class="modal-body" style="overflow-y: auto; display: grid; gap: 9px;">
+            ${versions.length === 0
+              ? `<div style="padding:14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; font-size:13px; color:#475569;">
+                   Belum ada riwayat versi sebelumnya. Setiap kali Anda menyimpan pembaruan dokumen ini di Word (Ctrl+S), versinya otomatis terekam hingga 10 revisi terakhir.
+                 </div>`
+              : versions.map((ver, idx) => {
+                  const dtStr = ver.savedAt
+                    ? new Date(ver.savedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : '-';
+                  return `
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 13px; border:1px solid ${idx === 0 ? '#86efac' : '#e2e8f0'}; background:${idx === 0 ? '#f0fdf4' : '#ffffff'}; border-radius:10px;">
+                      <div style="min-width:0;">
+                        <div style="font-size:13px; font-weight:700; color:#0f172a;">
+                          ${idx === 0 ? '✓ Versi Aktif Terbaru · ' : `Versi #${versions.length - idx} · `}${escapeHtml(ver.note || 'Simpan Perubahan')}
+                        </div>
+                        <div style="font-size:11.5px; color:#64748b; margin-top:2px;">
+                          🕒 ${escapeHtml(dtStr)} · 👤 ${escapeHtml(ver.savedBy || 'Pengguna')} · No: ${escapeHtml(ver.nomorSurat || '-')}
+                        </div>
+                      </div>
+                      ${idx > 0 && ver.document
+                        ? `<button type="button" class="btn btn-sm btn-primary btn-restore-vault-ver" data-ver-id="${escapeHtml(ver.versionId)}">Pulihkan &amp; Buka</button>`
+                        : '<span class="status-chip status-chip-green" style="font-size:10.5px;">Terkini</span>'}
+                    </div>
+                  `;
+                }).join('')}
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="btn-ok-v-hist">Tutup</button>
+          </div>
+        </div>
+      `;
+      container.appendChild(modalWrap);
+      const closeHist = () => modalWrap.remove();
+      modalWrap.querySelector('#btn-close-v-hist').onclick = closeHist;
+      modalWrap.querySelector('#btn-ok-v-hist').onclick = closeHist;
+      modalWrap.addEventListener('click', (ev) => {
+        if (ev.target === modalWrap) closeHist();
+      });
+      modalWrap.querySelectorAll('.btn-restore-vault-ver').forEach((rBtn) => {
+        rBtn.onclick = () => {
+          const restored = store.restoreLetterVaultVersion(id, rBtn.dataset.verId);
+          if (!restored) {
+            showToast('Gagal memulihkan versi.', 'error');
+            return;
+          }
+          closeHist();
+          store.loadLetterToCanvas(id);
+          const isSmartTarget = Boolean(restored.preferSmartCanvas || (restored.document && store.isSmartTemplateDocument(restored.document)));
+          const tab = document.querySelector(`.nav-tab[data-tab="${isSmartTarget ? 'smart-canvas' : 'canvas'}"]`);
+          showToast('✓ Versi dokumen berhasil dipulihkan & dibuka di editor!', 'success');
+          if (tab) tab.click();
+          else renderVaultView(container);
+        };
+      });
     };
   });
 

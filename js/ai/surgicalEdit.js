@@ -762,20 +762,40 @@ function getLegacyTableMaxCols(srcTable) {
   return maxC;
 }
 
-function reconcileLegacyBlocksOntoAstPages(indexObj, editedJson = {}, schoolProfile = {}, warnings = []) {
+function recordSurgicalChange(changes, kind, targetLabel, beforeVal, afterVal) {
+  const before = normalizeStr(beforeVal).trim();
+  const after = normalizeStr(afterVal).trim();
+  if (before === after && kind !== 'addRow' && kind !== 'deleteRow' && kind !== 'insertParagraph' && kind !== 'appendPage') {
+    return;
+  }
+  changes.push({
+    kind,
+    targetLabel: String(targetLabel || kind),
+    before: before.slice(0, 220),
+    after: after.slice(0, 220)
+  });
+}
+
+function reconcileLegacyBlocksOntoAstPages(indexObj, editedJson = {}, schoolProfile = {}, warnings = [], changes = []) {
   let count = 0;
   const { roleNodes, orderedBlocks } = indexObj;
 
   if (editedJson.letterTitle && roleNodes.title?.node) {
-    updateInlineElementTextPreservingStyle(roleNodes.title.node, String(editedJson.letterTitle).trim().toUpperCase());
+    const prev = getNodePlainText(roleNodes.title.node).trim();
+    const next = String(editedJson.letterTitle).trim().toUpperCase();
+    updateInlineElementTextPreservingStyle(roleNodes.title.node, next);
+    recordSurgicalChange(changes, 'field', 'Judul Surat', prev, next);
     count++;
   }
   if (editedJson.nomorSurat && roleNodes.nomor?.node) {
+    const prev = getNodePlainText(roleNodes.nomor.node).trim();
     const rawNo = String(editedJson.nomorSurat).replace(/^Nomor\s*:\s*/i, '').trim();
     const formatted = editedJson.kodeJenisSurat
       ? formatSmartNomorSurat({ rawNomor: rawNo, forcedTypeCode: editedJson.kodeJenisSurat })
       : rawNo;
-    updateInlineElementTextPreservingStyle(roleNodes.nomor.node, `Nomor: ${formatted}`);
+    const next = `Nomor: ${formatted}`;
+    updateInlineElementTextPreservingStyle(roleNodes.nomor.node, next);
+    recordSurgicalChange(changes, 'field', 'Nomor Surat', prev, next);
     count++;
   }
 
@@ -857,6 +877,7 @@ function reconcileLegacyBlocksOntoAstPages(indexObj, editedJson = {}, schoolProf
               : String(cellItem?.text ?? ''));
         const curText = getNodePlainText(targetCells[c]).replace(/\u00a0/g, ' ').trim();
         if (cellText.trim() !== curText && updateTableCellNodePreservingLayout(targetCells[c], cellText)) {
+          recordSurgicalChange(changes, 'tableCell', `Sel Tabel (${entry.blockId}, Brs ${r + 1} Kol ${c + 1})`, curText, cellText);
           count++;
         }
       }
@@ -867,11 +888,17 @@ function reconcileLegacyBlocksOntoAstPages(indexObj, editedJson = {}, schoolProf
       if (srcRows.length > astRows.length) {
         for (let r = astRows.length; r < srcRows.length; r++) {
           const rowVals = srcRows[r].map((c) => (typeof c === 'string' ? c : String(c?.text ?? '')));
-          if (handleAddTableRowAst(entry.node, rowVals)) count++;
+          if (handleAddTableRowAst(entry.node, rowVals)) {
+            recordSurgicalChange(changes, 'addRow', `Tambah Baris (${entry.blockId})`, '-', rowVals.join(' | '));
+            count++;
+          }
         }
       } else if (srcRows.length < astRows.length && srcRows.length >= (astRows.length - bodyRows.length + 1)) {
         for (let r = astRows.length - 1; r >= srcRows.length; r--) {
-          if (handleDeleteTableRowAst(entry.node, r)) count++;
+          if (handleDeleteTableRowAst(entry.node, r)) {
+            recordSurgicalChange(changes, 'deleteRow', `Hapus Baris (${entry.blockId}, Brs ${r + 1})`, `Baris ${r + 1}`, '(dihapus)');
+            count++;
+          }
         }
       }
     }
@@ -885,6 +912,7 @@ function reconcileLegacyBlocksOntoAstPages(indexObj, editedJson = {}, schoolProf
       const curTxt = getNodePlainText(entry.node).replace(/\u00a0/g, ' ').trim();
       if (nextTxt && nextTxt !== curTxt) {
         updateInlineElementTextPreservingStyle(entry.node, nextTxt);
+        recordSurgicalChange(changes, 'paragraph', `Paragraf (${entry.blockId})`, curTxt, nextTxt);
         count++;
       }
     });
@@ -906,6 +934,7 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
   const schoolProfile = options.schoolProfile || {};
   const allowLayoutRestructure = Boolean(options.allowLayoutRestructure);
   const warnings = [];
+  const changes = [];
   const indexObj = buildSurgicalIndexFromSmartPages(pages, schoolProfile);
   const { astPages, nodeMap, roleNodes } = indexObj;
 
@@ -921,12 +950,17 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
       if (op === 'setField') {
         const target = String(patch.target || '').toLowerCase();
         if ((target === 'title' || target === 'lettertitle') && roleNodes.title?.node) {
-          updateInlineElementTextPreservingStyle(roleNodes.title.node, String(patch.text || '').toUpperCase());
+          const prev = getNodePlainText(roleNodes.title.node).trim();
+          const next = String(patch.text || '').toUpperCase();
+          updateInlineElementTextPreservingStyle(roleNodes.title.node, next);
+          recordSurgicalChange(changes, 'field', 'Judul Surat', prev, next);
           appliedCount++;
         } else if ((target === 'nomor' || target === 'nomorsurat') && roleNodes.nomor?.node) {
+          const prev = getNodePlainText(roleNodes.nomor.node).trim();
           const clean = String(patch.text || '').trim();
           const finalNomor = /^nomor\s*:/i.test(clean) ? clean : `Nomor: ${clean}`;
           updateInlineElementTextPreservingStyle(roleNodes.nomor.node, finalNomor);
+          recordSurgicalChange(changes, 'field', 'Nomor Surat', prev, finalNomor);
           appliedCount++;
         }
         continue;
@@ -947,6 +981,7 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
           isManualBreak: true,
           ast: parseHtmlNodes(newHtml)
         });
+        recordSurgicalChange(changes, 'appendPage', `Tambah Halaman ${astPages.length}`, '(tidak ada)', `Halaman baru (${Array.isArray(patch.blocks) ? patch.blocks.length : 1} blok)`);
         appliedCount++;
         continue;
       }
@@ -955,9 +990,13 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
       if (!entry) {
         if (op === 'setMetaRecipient') {
           const metaFallback = indexObj.orderedBlocks.find((b) => b.kind === 'metaRecipient');
-          if (metaFallback && handleSetMetaRecipientAst(metaFallback.node, patch)) {
-            appliedCount++;
-            continue;
+          if (metaFallback) {
+            const prevMeta = getNodePlainText(metaFallback.node).replace(/\s+/g, ' ').trim();
+            if (handleSetMetaRecipientAst(metaFallback.node, patch)) {
+              recordSurgicalChange(changes, 'meta', 'Perihal & Tujuan Surat', prevMeta, getNodePlainText(metaFallback.node).replace(/\s+/g, ' ').trim());
+              appliedCount++;
+              continue;
+            }
           }
         }
         warnings.push(`Blok target tidak ditemukan: ${patch.blockId || op}`);
@@ -965,44 +1004,80 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
       }
 
       if ((op === 'setParagraph' || op === 'setText' || op === 'replaceText') && entry.kind === 'paragraph') {
-        updateInlineElementTextPreservingStyle(entry.node, String(patch.text ?? ''));
+        const prevTxt = getNodePlainText(entry.node).replace(/\u00a0/g, ' ').trim();
+        const nextTxt = String(patch.text ?? '');
+        updateInlineElementTextPreservingStyle(entry.node, nextTxt);
+        recordSurgicalChange(changes, 'paragraph', `Paragraf Hal. ${entry.pageIndex + 1} (${entry.blockId})`, prevTxt, nextTxt);
         appliedCount++;
       } else if ((op === 'setIdentityRow' || op === 'addIdentityRow' || op === 'deleteIdentityRow') && entry.kind === 'identityTable') {
-        if (handleIdentityPatchAst(entry.node, patch)) appliedCount++;
+        const prevTxt = getNodePlainText(entry.node).replace(/\s+/g, ' ').trim();
+        if (handleIdentityPatchAst(entry.node, patch)) {
+          recordSurgicalChange(changes, 'identity', `Rincian Identitas Hal. ${entry.pageIndex + 1}`, prevTxt, getNodePlainText(entry.node).replace(/\s+/g, ' ').trim());
+          appliedCount++;
+        }
       } else if (op === 'setMetaRecipient' && entry.kind === 'metaRecipient') {
-        if (handleSetMetaRecipientAst(entry.node, patch)) appliedCount++;
+        const prevMeta = getNodePlainText(entry.node).replace(/\s+/g, ' ').trim();
+        if (handleSetMetaRecipientAst(entry.node, patch)) {
+          recordSurgicalChange(changes, 'meta', 'Perihal & Tujuan Surat', prevMeta, getNodePlainText(entry.node).replace(/\s+/g, ' ').trim());
+          appliedCount++;
+        }
       } else if (op === 'setTableCell' && entry.kind === 'table') {
         const rows = collectTableAstRows(entry.node);
-        const targetRow = rows[Number(patch.row)];
-        const targetCell = targetRow?.cells?.[Number(patch.col)];
+        const rIdx = Number(patch.row);
+        const cIdx = Number(patch.col);
+        const targetRow = rows[rIdx];
+        const targetCell = targetRow?.cells?.[cIdx];
+        const prevCell = targetCell ? getNodePlainText(targetCell).replace(/\u00a0/g, ' ').trim() : '';
         if (targetCell && updateTableCellNodePreservingLayout(targetCell, String(patch.text ?? ''), patch.paragraphIndex)) {
+          recordSurgicalChange(
+            changes,
+            'tableCell',
+            `Sel Tabel Hal. ${entry.pageIndex + 1} (Brs ${rIdx + 1}, Kol ${cIdx + 1})`,
+            prevCell,
+            String(patch.text ?? '')
+          );
           appliedCount++;
         } else {
           warnings.push(`Sel (${patch.row},${patch.col}) tidak ditemukan pada ${patch.blockId}`);
         }
       } else if (op === 'addTableRow' && entry.kind === 'table') {
-        if (handleAddTableRowAst(entry.node, Array.isArray(patch.cells) ? patch.cells : [], patch.insertAtRow)) {
+        const cells = Array.isArray(patch.cells) ? patch.cells : [];
+        if (handleAddTableRowAst(entry.node, cells, patch.insertAtRow)) {
+          recordSurgicalChange(changes, 'addRow', `Tambah Baris Tabel Hal. ${entry.pageIndex + 1}`, '(baris baru)', cells.join(' | '));
           appliedCount++;
         }
       } else if (op === 'deleteTableRow' && entry.kind === 'table') {
-        if (handleDeleteTableRowAst(entry.node, Number(patch.row))) appliedCount++;
+        const rIdx = Number(patch.row);
+        const prevRow = collectTableAstRows(entry.node)[rIdx]?.cells?.map(c => getNodePlainText(c).trim()).join(' | ') || `Baris ${rIdx + 1}`;
+        if (handleDeleteTableRowAst(entry.node, rIdx)) {
+          recordSurgicalChange(changes, 'deleteRow', `Hapus Baris Tabel Hal. ${entry.pageIndex + 1}`, prevRow, '(dihapus)');
+          appliedCount++;
+        }
       } else if (op === 'setSignature' && entry.kind === 'signature') {
-        if (handleSetSignatureAst(entry.node, patch, schoolProfile)) appliedCount++;
+        const prevSig = parseSignatureLinesFromAst(entry.node).join(' · ');
+        if (handleSetSignatureAst(entry.node, patch, schoolProfile)) {
+          recordSurgicalChange(changes, 'signature', `Blok TTD Hal. ${entry.pageIndex + 1}`, prevSig, parseSignatureLinesFromAst(entry.node).join(' · '));
+          appliedCount++;
+        }
       } else if ((op === 'setList' || op === 'setListItem') && entry.kind === 'list') {
         const liNodes = (entry.node.children || []).filter((c) => c.type === 'element' && c.tag === 'li');
         if (op === 'setListItem') {
           const itemIdx = Number(patch.itemIndex);
           if (liNodes[itemIdx]) {
+            const prevLi = getNodePlainText(liNodes[itemIdx]).trim();
             updateInlineElementTextPreservingStyle(liNodes[itemIdx], String(patch.text ?? ''));
+            recordSurgicalChange(changes, 'list', `Daftar Poin #${itemIdx + 1}`, prevLi, String(patch.text ?? ''));
             appliedCount++;
           }
         } else if (Array.isArray(patch.items) && patch.items.length > 0) {
+          const prevList = liNodes.map(li => getNodePlainText(li).trim()).join('; ');
           const tplLi = cloneAstNode(liNodes[0] || { type: 'element', tag: 'li', attrs: {}, children: [] });
           entry.node.children = patch.items.map((txt, i) => {
             const li = liNodes[i] || cloneAstNode(tplLi);
             updateInlineElementTextPreservingStyle(li, String(txt ?? ''));
             return li;
           });
+          recordSurgicalChange(changes, 'list', `Daftar Poin Hal. ${entry.pageIndex + 1}`, prevList, patch.items.join('; '));
           appliedCount++;
         }
       } else if (op === 'insertParagraphAfter' || op === 'insertParagraphBefore') {
@@ -1015,6 +1090,7 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
             children: textToInlineAst(String(patch.text))
           };
           entry.parentArray.splice(op === 'insertParagraphAfter' ? idxInParent + 1 : idxInParent, 0, newP);
+          recordSurgicalChange(changes, 'insertParagraph', `Sisip Paragraf Hal. ${entry.pageIndex + 1}`, '(baru)', String(patch.text));
           appliedCount++;
         }
       } else if (op === 'deleteBlock') {
@@ -1025,7 +1101,9 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
         }
         const idxInParent = entry.parentArray.indexOf(entry.node);
         if (idxInParent !== -1) {
+          const prevTxt = getNodePlainText(entry.node).trim();
           entry.parentArray.splice(idxInParent, 1);
+          recordSurgicalChange(changes, 'deleteBlock', `Hapus Paragraf Hal. ${entry.pageIndex + 1}`, prevTxt, '(dihapus)');
           appliedCount++;
         }
       }
@@ -1036,11 +1114,12 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
       mode: 'restructure_needed',
       pages,
       meta: null,
-      warnings
+      warnings,
+      changes
     };
   } else if (Array.isArray(editedJson?.blocks)) {
     mode = 'reconciled';
-    appliedCount = reconcileLegacyBlocksOntoAstPages(indexObj, editedJson, schoolProfile, warnings);
+    appliedCount = reconcileLegacyBlocksOntoAstPages(indexObj, editedJson, schoolProfile, warnings, changes);
   }
 
   const nextPages = astPages.map((p) => ({
@@ -1061,7 +1140,8 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
     mode,
     pages: nextPages,
     meta: { title: nextTitle, nomorSurat: nextNomor },
-    warnings
+    warnings,
+    changes
   };
 }
 
@@ -1256,6 +1336,7 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
   const cloned = JSON.parse(JSON.stringify(docModel));
   const { blockMap, titleBlock, metaBlock } = buildSurgicalIndexFromDocModel(cloned);
   const warnings = [];
+  const changes = [];
   let appliedCount = 0;
 
   const patches = Array.isArray(editedJson?.patches) ? editedJson.patches : null;
@@ -1267,13 +1348,17 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
       if (op === 'setField' && titleBlock) {
         const target = String(patch.target || '').toLowerCase();
         if (target === 'title' || target === 'lettertitle') {
+          const prev = titleBlock.title || '';
           titleBlock.title = String(patch.text || '').toUpperCase();
           if (cloned.meta) cloned.meta.title = titleBlock.title;
+          recordSurgicalChange(changes, 'field', 'Judul Surat', prev, titleBlock.title);
           appliedCount++;
         } else if (target === 'nomor' || target === 'nomorsurat') {
+          const prev = titleBlock.nomor || '';
           const clean = String(patch.text || '').trim().replace(/^Nomor\s*:\s*/i, '');
           titleBlock.nomor = `Nomor: ${clean}`;
           if (cloned.letterData?.formData) cloned.letterData.formData.nomorSurat = clean;
+          recordSurgicalChange(changes, 'field', 'Nomor Surat', prev, titleBlock.nomor);
           appliedCount++;
         }
         continue;
@@ -1283,19 +1368,29 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
         if (Array.isArray(metaBlock.metaRows)) {
           if (patch.sifat !== undefined) {
             const row = metaBlock.metaRows.find((r) => /sifat/i.test(r.label));
-            if (row) row.value = String(patch.sifat).trim();
+            if (row) {
+              recordSurgicalChange(changes, 'meta', 'Sifat Surat', row.value, patch.sifat);
+              row.value = String(patch.sifat).trim();
+            }
           }
           if (patch.hal !== undefined || patch.perihal !== undefined) {
             const row = metaBlock.metaRows.find((r) => /hal|perihal/i.test(r.label));
-            if (row) row.value = String(patch.hal ?? patch.perihal).trim();
+            if (row) {
+              recordSurgicalChange(changes, 'meta', 'Perihal', row.value, patch.hal ?? patch.perihal);
+              row.value = String(patch.hal ?? patch.perihal).trim();
+            }
           }
         }
         if (Array.isArray(patch.tujuanLines)) {
+          const prevT = (metaBlock.recipientLines || []).join(' ');
           metaBlock.recipientLines = patch.tujuanLines.map((l) => String(l).trim()).filter(Boolean);
+          recordSurgicalChange(changes, 'meta', 'Tujuan Surat', prevT, metaBlock.recipientLines.join(' '));
           delete metaBlock.customHtml;
         } else if (patch.tujuan !== undefined) {
+          const prevT = (metaBlock.recipientLines || []).join(' ');
           const tRaw = String(patch.tujuan).trim();
           metaBlock.recipientLines = ['Kepada', /^yth/i.test(tRaw) ? tRaw : `Yth. ${tRaw}`, 'Di Tempat'];
+          recordSurgicalChange(changes, 'meta', 'Tujuan Surat', prevT, metaBlock.recipientLines.join(' '));
           delete metaBlock.customHtml;
         }
         appliedCount++;
@@ -1309,35 +1404,43 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
       }
 
       if ((op === 'setParagraph' || op === 'setText' || op === 'replaceText') && entry.kind === 'paragraph') {
+        const prev = entry.block.text || (entry.block.runs || []).map(r => r.text).join('');
         const val = normalizeStr(patch.text ?? '');
         entry.block.text = val;
         const firstRun = Array.isArray(entry.block.runs) && entry.block.runs[0] ? entry.block.runs[0] : {};
         entry.block.runs = [{ ...firstRun, text: val }];
+        recordSurgicalChange(changes, 'paragraph', `Paragraf (${entry.blockId})`, prev, val);
         appliedCount++;
       } else if (op === 'setIdentityRow' && entry.kind === 'identityTable') {
         const row = entry.block.rows?.[Number(patch.row)];
         if (row) {
+          const prev = `${row.label} ${row.value}`;
           if (patch.label !== undefined) row.label = String(patch.label).trim();
           if (patch.value !== undefined) row.value = normalizeColonValue(patch.value, row.value);
+          recordSurgicalChange(changes, 'identity', `Identitas Baris ${Number(patch.row) + 1}`, prev, `${row.label} ${row.value}`);
           appliedCount++;
         }
       } else if (op === 'addIdentityRow' && entry.kind === 'identityTable') {
         entry.block.rows = entry.block.rows || [];
-        entry.block.rows.push({
-          label: String(patch.label || '').trim(),
-          value: normalizeColonValue(patch.value || '')
-        });
+        const newR = { label: String(patch.label || '').trim(), value: normalizeColonValue(patch.value || '') };
+        entry.block.rows.push(newR);
+        recordSurgicalChange(changes, 'identity', 'Tambah Baris Identitas', '-', `${newR.label} ${newR.value}`);
         appliedCount++;
       } else if (op === 'deleteIdentityRow' && entry.kind === 'identityTable') {
         const idx = Number(patch.row);
         if (Array.isArray(entry.block.rows) && idx >= 0 && idx < entry.block.rows.length) {
-          entry.block.rows.splice(idx, 1);
+          const rem = entry.block.rows.splice(idx, 1)[0];
+          recordSurgicalChange(changes, 'identity', 'Hapus Baris Identitas', `${rem.label} ${rem.value}`, '(dihapus)');
           appliedCount++;
         }
       } else if (op === 'setTableCell' && entry.kind === 'table') {
-        const rowEntry = entry.block.rows?.[Number(patch.row)];
+        const rIdx = Number(patch.row);
+        const cIdx = Number(patch.col);
+        const rowEntry = entry.block.rows?.[rIdx];
         const cells = Array.isArray(rowEntry) ? rowEntry : rowEntry?.cells;
-        if (cells && updateModelCellPreservingStyle(cells, Number(patch.col), patch.text ?? '', patch.paragraphIndex)) {
+        const prevTxt = cells?.[cIdx] ? extractModelCellText(cells[cIdx]) : '';
+        if (cells && updateModelCellPreservingStyle(cells, cIdx, patch.text ?? '', patch.paragraphIndex)) {
+          recordSurgicalChange(changes, 'tableCell', `Sel Tabel (${entry.blockId}, Brs ${rIdx + 1} Kol ${cIdx + 1})`, prevTxt, patch.text ?? '');
           appliedCount++;
         }
       } else if (op === 'addTableRow' && entry.kind === 'table') {
@@ -1349,19 +1452,24 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
         } else {
           rows.push(newCells);
         }
+        recordSurgicalChange(changes, 'addRow', `Tambah Baris Tabel (${entry.blockId})`, '-', newCells.join(' | '));
         appliedCount++;
       } else if (op === 'deleteTableRow' && entry.kind === 'table') {
         const idx = Number(patch.row);
         if (Array.isArray(entry.block.rows) && idx >= 0 && idx < entry.block.rows.length && entry.block.rows.length > 1) {
           entry.block.rows.splice(idx, 1);
+          recordSurgicalChange(changes, 'deleteRow', `Hapus Baris (${entry.blockId}, Brs ${idx + 1})`, `Baris ${idx + 1}`, '(dihapus)');
           appliedCount++;
         }
       } else if (op === 'setSignature' && entry.kind === 'signature') {
+        const prevSig = `${entry.block.city || ''}, ${entry.block.date || ''} · ${entry.block.name || ''}`;
         if (patch.city !== undefined) entry.block.city = String(patch.city).trim();
         if (patch.date !== undefined) entry.block.date = String(patch.date).trim();
         if (patch.title !== undefined) entry.block.title = String(patch.title).trim();
         if (patch.name !== undefined) entry.block.name = String(patch.name).trim();
         if (patch.nip !== undefined) entry.block.nip = String(patch.nip).trim();
+        const nextSig = `${entry.block.city || ''}, ${entry.block.date || ''} · ${entry.block.name || ''}`;
+        recordSurgicalChange(changes, 'signature', 'Blok TTD', prevSig, nextSig);
         appliedCount++;
       } else if ((op === 'insertParagraphAfter' || op === 'insertParagraphBefore') && patch.text !== undefined) {
         const curIdx = cloned.blocks.indexOf(entry.block);
@@ -1369,6 +1477,7 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
           const val = String(patch.text).trim();
           const newBlock = { type: 'paragraph', style: 'letterBody', text: val, runs: [{ text: val }] };
           cloned.blocks.splice(op === 'insertParagraphAfter' ? curIdx + 1 : curIdx, 0, newBlock);
+          recordSurgicalChange(changes, 'insertParagraph', 'Sisip Paragraf Baru', '(baru)', val);
           appliedCount++;
         }
       } else if (op === 'deleteBlock') {
@@ -1378,29 +1487,35 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
         }
         const curIdx = cloned.blocks.indexOf(entry.block);
         if (curIdx !== -1) {
+          const remTxt = entry.block?.text || '(blok)';
           cloned.blocks.splice(curIdx, 1);
+          recordSurgicalChange(changes, 'deleteBlock', `Hapus Blok (${entry.blockId})`, remTxt, '(dihapus)');
           appliedCount++;
         }
       }
     }
 
-    return { appliedCount, mode: 'surgical', docModel: cloned, warnings };
+    return { appliedCount, mode: 'surgical', docModel: cloned, warnings, changes };
   }
 
   if (editedJson?.editScope === 'restructure' && allowLayoutRestructure) {
-    return { appliedCount: 0, mode: 'restructure_needed', docModel: cloned, warnings };
+    return { appliedCount: 0, mode: 'restructure_needed', docModel: cloned, warnings, changes };
   }
 
   // Fallback reconciler untuk DocumentModel bila LLM mengirim blocks lama
   const legacyBlocks = Array.isArray(editedJson?.blocks) ? editedJson.blocks : [];
   if (titleBlock) {
     if (editedJson.letterTitle) {
+      const prev = titleBlock.title || '';
       titleBlock.title = String(editedJson.letterTitle).trim().toUpperCase();
+      recordSurgicalChange(changes, 'field', 'Judul Surat', prev, titleBlock.title);
       appliedCount++;
     }
     if (editedJson.nomorSurat) {
+      const prev = titleBlock.nomor || '';
       const clean = String(editedJson.nomorSurat).replace(/^Nomor\s*:\s*/i, '').trim();
       titleBlock.nomor = `Nomor: ${clean}`;
+      recordSurgicalChange(changes, 'field', 'Nomor Surat', prev, titleBlock.nomor);
       appliedCount++;
     }
   }
@@ -1425,7 +1540,9 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
       const commonC = Math.min(dstCells.length, srcCells.length);
       for (let c = 0; c < commonC; c++) {
         const txt = extractModelCellText(srcCells[c]);
-        if (txt !== extractModelCellText(dstCells[c]) && updateModelCellPreservingStyle(dstCells, c, txt)) {
+        const prev = extractModelCellText(dstCells[c]);
+        if (txt !== prev && updateModelCellPreservingStyle(dstCells, c, txt)) {
+          recordSurgicalChange(changes, 'tableCell', `Sel Tabel (${entry.blockId}, Brs ${r + 1} Kol ${c + 1})`, prev, txt);
           appliedCount++;
         }
       }
@@ -1439,8 +1556,10 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
     if (!src) return;
     const commonR = Math.min((entry.block.rows || []).length, src.rows.length);
     for (let r = 0; r < commonR; r++) {
+      const prev = `${entry.block.rows[r].label} ${entry.block.rows[r].value}`;
       entry.block.rows[r].label = String(src.rows[r].label || entry.block.rows[r].label).trim();
       entry.block.rows[r].value = normalizeColonValue(src.rows[r].value, entry.block.rows[r].value);
+      recordSurgicalChange(changes, 'identity', `Identitas Baris ${r + 1}`, prev, `${entry.block.rows[r].label} ${entry.block.rows[r].value}`);
       appliedCount++;
     }
   });
@@ -1450,14 +1569,16 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
   if (existingParas.length === legacyParas.length) {
     existingParas.forEach((entry, pIdx) => {
       const val = String(legacyParas[pIdx].text).trim();
-      if (val) {
+      const prev = entry.block.text || '';
+      if (val && val !== prev) {
         entry.block.text = val;
         const firstRun = Array.isArray(entry.block.runs) && entry.block.runs[0] ? entry.block.runs[0] : {};
         entry.block.runs = [{ ...firstRun, text: val }];
+        recordSurgicalChange(changes, 'paragraph', `Paragraf (${entry.blockId})`, prev, val);
         appliedCount++;
       }
     });
   }
 
-  return { appliedCount, mode: 'reconciled', docModel: cloned, warnings };
+  return { appliedCount, mode: 'reconciled', docModel: cloned, warnings, changes };
 }

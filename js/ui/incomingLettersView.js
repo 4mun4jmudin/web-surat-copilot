@@ -25,10 +25,22 @@ import {
   syncIncomingDriveCloud
 } from '../sync/workspaceClient.js';
 import { setLastKnownSyncRev } from '../sync/liveSync.js';
+import { scanIncomingLetterWithAi } from '../ai/client.js';
+import { downloadFile } from '../utils/download.js';
+import {
+  AGENDA_MONTH_LABELS,
+  filterLettersByPeriod,
+  collectAvailableAgendaYears,
+  formatPeriodLabel,
+  exportIncomingLettersCsv,
+  buildPrintableAgendaHtml
+} from '../letters/agenda.js';
 
 let incomingSearchQuery = '';
 let incomingKindFilter = 'all';
 let incomingDriveFilter = 'all';
+let incomingMonthFilter = 'all';
+let incomingYearFilter = 'all';
 let incomingSortMode = 'newest';
 let activeCameraStream = null;
 
@@ -85,7 +97,13 @@ function getFilteredIncomingLetters() {
   const list = store.getIncomingLetters();
   const q = incomingSearchQuery.trim();
 
-  let filtered = list.filter(item => {
+  const periodFiltered = filterLettersByPeriod(list, {
+    month: incomingMonthFilter,
+    year: incomingYearFilter,
+    getDateValue: (item) => item.tanggalSurat || item.receivedAt || item.createdAt
+  });
+
+  let filtered = periodFiltered.filter(item => {
     if (incomingKindFilter !== 'all') {
       const k = item.fileKind || (item.captureSource === 'camera_photo' ? 'photo' : 'image');
       if (k !== incomingKindFilter) return false;
@@ -129,7 +147,8 @@ export function renderIncomingLettersView(container) {
     return d && !Number.isNaN(d.getTime()) && d.getMonth() === curMonth && d.getFullYear() === curYear;
   }).length;
 
-  const SVG_INBOX = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`;
+  const yearsInUse = collectAvailableAgendaYears(allIncoming, (item) => item.tanggalSurat || item.receivedAt || item.createdAt);
+  const SVG_INBOX = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`;
   const SVG_SEARCH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
 
   container.innerHTML = `
@@ -139,8 +158,7 @@ export function renderIncomingLettersView(container) {
         <!-- HEADER DASHBOARD SURAT MASUK -->
         <div class="view-page-header" style="margin-bottom: 18px;">
           <div class="view-header-lead">
-            <span style="margin-top: 2px;">${SVG_INBOX}</span>
-            <span class="view-header-divider"></span>
+            <div class="view-header-badge">${SVG_INBOX}</div>
             <div>
               <h2 class="view-title">
                 <span>Arsip &amp; Daftar Surat Masuk</span>
@@ -166,6 +184,12 @@ export function renderIncomingLettersView(container) {
                 🔄 Kirim Semua (${pendingDriveCount}) ke Drive
               </button>
             ` : ''}
+            <button type="button" id="btn-in-export-csv" class="btn btn-sm btn-secondary" title="Unduh Buku Agenda Surat Masuk ke Excel/CSV">
+              📊 Ekspor Excel/CSV
+            </button>
+            <button type="button" id="btn-in-print-rekap" class="btn btn-sm btn-secondary" title="Cetak Rekap Buku Agenda Surat Masuk resmi">
+              🖨️ Cetak Rekap
+            </button>
             <button type="button" id="btn-in-open-gas-guide" class="btn btn-sm btn-secondary" title="Panduan &amp; Kode Google Apps Script (archive_incoming)">
               ⚙️ Script Drive
             </button>
@@ -175,7 +199,9 @@ export function renderIncomingLettersView(container) {
         <!-- KARTU STATISTIK DASHBOARD -->
         <div class="kpi-grid-4">
           <div class="kpi-card accent-left-green">
-            <div class="kpi-icon-box kpi-icon-green">📥</div>
+            <div class="kpi-icon-box kpi-icon-green">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+            </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Total Surat Masuk</div>
               <div style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 3px;">${allIncoming.length}</div>
@@ -184,7 +210,9 @@ export function renderIncomingLettersView(container) {
           </div>
 
           <div class="kpi-card accent-left-blue">
-            <div class="kpi-icon-box kpi-icon-blue">☁️</div>
+            <div class="kpi-icon-box kpi-icon-blue">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Tersimpan di Google Drive</div>
               <div style="font-size: 26px; font-weight: 800; color: #1d4ed8; line-height: 1.2; margin-top: 3px;">${syncedCount}</div>
@@ -195,7 +223,9 @@ export function renderIncomingLettersView(container) {
           </div>
 
           <div class="kpi-card accent-left-amber">
-            <div class="kpi-icon-box kpi-icon-amber">🗓️</div>
+            <div class="kpi-icon-box kpi-icon-amber">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Surat Masuk Bulan Ini</div>
               <div style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 3px;">${monthCount}</div>
@@ -204,7 +234,9 @@ export function renderIncomingLettersView(container) {
           </div>
 
           <div class="kpi-card accent-left-purple">
-            <div class="kpi-icon-box kpi-icon-purple">🗂️</div>
+            <div class="kpi-icon-box kpi-icon-purple">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Komposisi Berkas</div>
               <div style="font-size: 22px; font-weight: 800; color: #6d28d9; line-height: 1.25; margin-top: 3px;">${photoImgCount} <span style="font-size:12px;font-weight:600;color:#64748b;">Foto/Img</span> · ${pdfCount} <span style="font-size:12px;font-weight:600;color:#64748b;">PDF</span></div>
@@ -236,6 +268,23 @@ export function renderIncomingLettersView(container) {
               <option value="all" ${incomingDriveFilter === 'all' ? 'selected' : ''}>Semua Status Drive</option>
               <option value="synced" ${incomingDriveFilter === 'synced' ? 'selected' : ''}>✓ Tersimpan di Drive</option>
               <option value="pending" ${incomingDriveFilter === 'pending' ? 'selected' : ''}>⏳ Belum Sync Drive</option>
+            </select>
+          </div>
+          <div class="icon-input-wrap filter-ctrl-sm">
+            <span class="icon-input-leading">🗓️</span>
+            <select id="select-incoming-month" class="icon-input-control" style="cursor: pointer;">
+              <option value="all" ${incomingMonthFilter === 'all' ? 'selected' : ''}>Semua Bulan</option>
+              ${AGENDA_MONTH_LABELS.map((mName, idx) => {
+                const mVal = String(idx + 1).padStart(2, '0');
+                return `<option value="${mVal}" ${incomingMonthFilter === mVal ? 'selected' : ''}>${mName}</option>`;
+              }).join('')}
+            </select>
+          </div>
+          <div class="icon-input-wrap filter-ctrl-xs">
+            <span class="icon-input-leading">#</span>
+            <select id="select-incoming-year" class="icon-input-control" style="cursor: pointer;">
+              <option value="all" ${incomingYearFilter === 'all' ? 'selected' : ''}>Semua Tahun</option>
+              ${yearsInUse.map(y => `<option value="${escapeHtml(y)}" ${incomingYearFilter === y ? 'selected' : ''}>${escapeHtml(y)}</option>`).join('')}
             </select>
           </div>
           <div class="icon-input-wrap" style="width: 195px;">
@@ -304,8 +353,10 @@ export function renderIncomingLettersView(container) {
               <div style="flex: 1; min-width: 0;">
                 <div id="in-preview-filename" style="font-weight: 700; color: #0f172a; font-size: 13px; word-break: break-word;">-</div>
                 <div id="in-preview-filemeta" style="font-size: 11.5px; color: #475569; margin-top: 2px;">-</div>
+                <div id="in-ocr-status" style="font-size: 11.5px; color: #15803d; margin-top: 3px; font-weight: 600;" class="hidden"></div>
               </div>
               <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                <button type="button" id="btn-in-ai-scan" class="btn btn-sm btn-primary" title="Baca isi foto/PDF dengan AI OCR &amp; isi otomatis">✨ Scan AI (OCR)</button>
                 <button type="button" id="btn-in-retake-change" class="btn btn-sm btn-secondary">🔄 Ganti / Foto Ulang</button>
               </div>
             </div>
@@ -570,7 +621,11 @@ function bindIncomingViewEvents(container) {
   const searchInput = container.querySelector('#input-incoming-search');
   const kindSelect = container.querySelector('#select-incoming-kind');
   const driveSelect = container.querySelector('#select-incoming-drive');
+  const monthSelect = container.querySelector('#select-incoming-month');
+  const yearSelect = container.querySelector('#select-incoming-year');
   const sortSelect = container.querySelector('#select-incoming-sort');
+  const btnExportCsv = container.querySelector('#btn-in-export-csv');
+  const btnPrintRekap = container.querySelector('#btn-in-print-rekap');
 
   searchInput?.addEventListener('input', () => {
     incomingSearchQuery = searchInput.value;
@@ -584,9 +639,54 @@ function bindIncomingViewEvents(container) {
     incomingDriveFilter = driveSelect.value;
     updateIncomingListInPlace(container);
   });
+  monthSelect?.addEventListener('change', () => {
+    incomingMonthFilter = monthSelect.value;
+    updateIncomingListInPlace(container);
+  });
+  yearSelect?.addEventListener('change', () => {
+    incomingYearFilter = yearSelect.value;
+    updateIncomingListInPlace(container);
+  });
   sortSelect?.addEventListener('change', () => {
     incomingSortMode = sortSelect.value;
     updateIncomingListInPlace(container);
+  });
+
+  btnExportCsv?.addEventListener('click', () => {
+    const filteredItems = getFilteredIncomingLetters();
+    if (filteredItems.length === 0) {
+      showToast('Tidak ada data Surat Masuk pada filter periode yang dipilih.', 'warning');
+      return;
+    }
+    const periodLabel = formatPeriodLabel(incomingMonthFilter, incomingYearFilter);
+    const schoolName = store.getSchoolProfile()?.schoolName || 'SMK IT Al-Hawari';
+    const csv = exportIncomingLettersCsv(filteredItems, { schoolName, periodLabel });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const suffix = `${incomingYearFilter === 'all' ? 'semua' : incomingYearFilter}${incomingMonthFilter !== 'all' ? `-${incomingMonthFilter}` : ''}`;
+    downloadFile(blob, `buku-agenda-surat-masuk-${suffix}.csv`);
+    showToast(`✓ Buku Agenda Surat Masuk (${filteredItems.length} baris) berhasil diekspor ke CSV!`, 'success');
+  });
+
+  btnPrintRekap?.addEventListener('click', () => {
+    const filteredItems = getFilteredIncomingLetters();
+    const periodLabel = formatPeriodLabel(incomingMonthFilter, incomingYearFilter);
+    const html = buildPrintableAgendaHtml({
+      kind: 'incoming',
+      school: store.getSchoolProfile(),
+      periodLabel,
+      items: filteredItems
+    });
+    const win = window.open('', '_blank', 'width=1024,height=720');
+    if (!win) {
+      showToast('Popup diblokir browser — izinkan popup untuk mencetak rekap Buku Agenda.', 'warning');
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => {
+      try { win.focus(); win.print(); } catch {}
+    }, 280);
   });
 
   // Modal Tambah Surat Masuk (Upload / Kamera)
@@ -605,6 +705,8 @@ function bindIncomingViewEvents(container) {
   const previewThumbWrap = container.querySelector('#in-preview-thumb-wrap');
   const previewNameEl = container.querySelector('#in-preview-filename');
   const previewMetaEl = container.querySelector('#in-preview-filemeta');
+  const ocrStatusEl = container.querySelector('#in-ocr-status');
+  const btnAiScan = container.querySelector('#btn-in-ai-scan');
   const dropIconEl = container.querySelector('#in-drop-icon');
   const dropTitleEl = container.querySelector('#in-drop-title');
   const dropSubEl = container.querySelector('#in-drop-sub');
@@ -621,6 +723,87 @@ function bindIncomingViewEvents(container) {
   let activeSourceMode = 'upload_image';
   let currentFacingMode = 'environment';
   let preparedFilePayload = null;
+  let ocrAbortController = null;
+
+  const runIncomingAiScan = async (payload, { silentError = false, overwriteExisting = false } = {}) => {
+    if (!payload?.localDataUrl && !payload?.fileBase64) return;
+    if (ocrAbortController) {
+      try { ocrAbortController.abort(); } catch {}
+    }
+    ocrAbortController = new AbortController();
+    const myCtrl = ocrAbortController;
+
+    if (btnAiScan) {
+      btnAiScan.disabled = true;
+      btnAiScan.textContent = '⏳ Memindai AI...';
+    }
+    if (ocrStatusEl) {
+      ocrStatusEl.classList.remove('hidden');
+      ocrStatusEl.style.color = '#1d4ed8';
+      ocrStatusEl.textContent = '✨ AI OCR sedang membaca pengirim, nomor asli, tanggal & perihal surat...';
+    }
+
+    try {
+      const dataUrl = payload.localDataUrl || `data:${payload.mimeType || 'application/octet-stream'};base64,${payload.fileBase64}`;
+      const scanned = await scanIncomingLetterWithAi({
+        dataUrl,
+        mimeType: payload.mimeType,
+        fileName: payload.fileName,
+        signal: myCtrl.signal
+      });
+      if (myCtrl.signal.aborted || preparedFilePayload !== payload) return;
+
+      const defaultFromFile = deriveDefaultTitleFromFilename(payload.fileName);
+      if (scanned.namaSurat && (overwriteExisting || !namaInput.value.trim() || namaInput.value.trim() === defaultFromFile)) {
+        namaInput.value = scanned.namaSurat;
+      }
+      if (scanned.pengirim && (overwriteExisting || !pengirimInput.value.trim())) {
+        pengirimInput.value = scanned.pengirim;
+      }
+      if (scanned.nomorSuratAsli && (overwriteExisting || !nomorAsliInput.value.trim())) {
+        nomorAsliInput.value = scanned.nomorSuratAsli;
+      }
+      if (scanned.tanggalSurat && (overwriteExisting || !tanggalInput.value || tanggalInput.value === new Date().toISOString().slice(0, 10))) {
+        tanggalInput.value = scanned.tanggalSurat;
+      }
+      if (scanned.kategori && kategoriSelect) {
+        kategoriSelect.value = scanned.kategori;
+      }
+      if (scanned.catatan && (overwriteExisting || !catatanInput.value.trim())) {
+        catatanInput.value = scanned.catatan;
+      }
+
+      if (ocrStatusEl) {
+        ocrStatusEl.style.color = '#15803d';
+        ocrStatusEl.textContent = '✓ AI OCR berhasil mengisi kolom metadata. Silakan periksa & simpan!';
+      }
+      if (!silentError) {
+        showToast('✓ AI OCR selesai membaca isi surat masuk!', 'success');
+      }
+    } catch (err) {
+      if (myCtrl.signal.aborted) return;
+      if (ocrStatusEl) {
+        ocrStatusEl.style.color = '#b45309';
+        ocrStatusEl.textContent = silentError
+          ? 'ℹ️ Pemindaian AI dilewati (silakan isi manual atau klik Scan AI).'
+          : `⚠️ Gagal Scan AI: ${err.message}`;
+      }
+      if (!silentError) {
+        showToast(`Gagal Scan AI: ${err.message}`, 'warning');
+      }
+    } finally {
+      if (btnAiScan) {
+        btnAiScan.disabled = false;
+        btnAiScan.textContent = '✨ Scan AI (OCR)';
+      }
+    }
+  };
+
+  btnAiScan?.addEventListener('click', () => {
+    if (preparedFilePayload) {
+      runIncomingAiScan(preparedFilePayload, { silentError: false, overwriteExisting: true });
+    }
+  });
 
   const setSelectedFileUi = (payload) => {
     preparedFilePayload = payload;
@@ -645,6 +828,8 @@ function bindIncomingViewEvents(container) {
         namaInput.value = guessed;
       }
     }
+
+    runIncomingAiScan(payload, { silentError: true, overwriteExisting: false });
   };
 
   const startLiveCamera = async () => {
@@ -720,6 +905,10 @@ function bindIncomingViewEvents(container) {
   };
 
   const closeAddModal = () => {
+    if (ocrAbortController) {
+      try { ocrAbortController.abort(); } catch {}
+    }
+    ocrStatusEl?.classList.add('hidden');
     stopActiveCameraStream();
     addModal?.classList.add('hidden');
   };

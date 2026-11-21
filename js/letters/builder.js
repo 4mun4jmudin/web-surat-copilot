@@ -3,7 +3,7 @@
  * Mendukung Kop Surat Gambar Banner, Kop Surat Tabel Profil, Judul Surat, Tabel Identitas, dan Blok TTD.
  */
 
-import { escapeXml } from '../utils/xml.js';
+import { escapeXml, buildTextElement } from '../utils/xml.js';
 
 /**
  * Mengonversi base64 data URL menjadi Uint8Array
@@ -370,7 +370,7 @@ export function buildIdentityTableXml(rows = [], colWidthsPct = null) {
         </w:tcPr>
         <w:p>
           <w:pPr><w:spacing w:after="0" w:line="260" w:lineRule="auto"/></w:pPr>
-          <w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${escapeXml(r.label)}</w:t></w:r>
+          <w:r><w:rPr><w:sz w:val="24"/></w:rPr>${buildTextElement(r.label)}</w:r>
         </w:p>
       </w:tc>
       <w:tc>
@@ -380,7 +380,7 @@ export function buildIdentityTableXml(rows = [], colWidthsPct = null) {
         </w:tcPr>
         <w:p>
           <w:pPr><w:spacing w:after="0" w:line="260" w:lineRule="auto"/></w:pPr>
-          <w:r><w:rPr><w:sz w:val="24"/><w:b/></w:rPr><w:t>${escapeXml(r.value)}</w:t></w:r>
+          <w:r><w:rPr><w:sz w:val="24"/><w:b/></w:rPr>${buildTextElement(r.value)}</w:r>
         </w:p>
       </w:tc>
     </w:tr>

@@ -68,7 +68,11 @@ function renderRuns(runs = []) {
     if (run.color) rPrParts.push(`<w:color w:val="${escapeXml(String(run.color).replace(/^#/, ''))}"/>`);
 
     const rPrXml = rPrParts.length > 0 ? `<w:rPr>${rPrParts.join('')}</w:rPr>` : '';
-    const textXml = buildTextElement(run.text || '');
+    const rawText = String(run.text || '');
+    const tabParts = rawText.split('\t');
+    const textXml = tabParts.length > 1
+      ? tabParts.map(seg => (seg ? buildTextElement(seg) : '')).join('<w:tab/>')
+      : buildTextElement(rawText);
 
     let runXml = `<w:r>${rPrXml}${textXml}</w:r>`;
 

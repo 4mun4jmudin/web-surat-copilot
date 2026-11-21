@@ -290,8 +290,11 @@ export async function executeAiRequest({
   stream = false,
   onChunk,
   signal,
-  timeoutMs = 12000 // Batas maksimal 12 detik per panggilan agar tidak hang/muter terus
+  timeoutMs,
+  attachments = null
 }) {
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  const effectiveTimeoutMs = timeoutMs || (hasAttachments ? 26000 : 12000);
   const provider = config.provider || 'gemini';
   const apiKey = (config.apiKey || '').trim();
 
@@ -304,7 +307,7 @@ export async function executeAiRequest({
       const res = await fetch(DEFAULT_PROXY_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, systemPrompt, stream, model: normalizeGeminiModel(config.model) }),
+        body: JSON.stringify({ prompt, systemPrompt, stream, model: normalizeGeminiModel(config.model), attachments }),
         signal
       });
       if (!res.ok) {
@@ -336,8 +339,21 @@ export async function executeAiRequest({
       if (String(targetModel).startsWith('gemini-2.5')) {
         generationConfig.thinkingConfig = { thinkingBudget: 0 };
       }
+      const userParts = [{ text: prompt }];
+      if (hasAttachments) {
+        attachments.forEach((att) => {
+          if (att?.base64Data && att?.mimeType) {
+            userParts.push({
+              inlineData: {
+                mimeType: att.mimeType,
+                data: att.base64Data
+              }
+            });
+          }
+        });
+      }
       const nextPayload = {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: userParts }],
         generationConfig
       };
       if (systemPrompt) {
@@ -352,8 +368,8 @@ export async function executeAiRequest({
       let timeoutId = null;
       const attemptController = new AbortController();
       timeoutId = setTimeout(() => {
-        attemptController.abort(new Error(`Timeout: Model ${targetModel} tidak merespons dalam ${timeoutMs / 1000} detik.`));
-      }, timeoutMs);
+        attemptController.abort(new Error(`Timeout: Model ${targetModel} tidak merespons dalam ${effectiveTimeoutMs / 1000} detik.`));
+      }, effectiveTimeoutMs);
 
       const abortHandler = () => attemptController.abort();
       if (signal) {
@@ -463,7 +479,25 @@ export async function executeAiRequest({
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
-  messages.push({ role: 'user', content: prompt });
+  if (hasAttachments) {
+    const hasPdf = attachments.some((a) => String(a?.mimeType || '').includes('pdf'));
+    const imageAtts = attachments.filter((a) => String(a?.mimeType || '').startsWith('image/') && a?.base64Data);
+    if (hasPdf || imageAtts.length === 0) {
+      throw new Error(`Provider ${provider.toUpperCase()} tidak mendukung OCR PDF langsung; memutar ke Gemini Vision.`);
+    }
+    messages.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        ...imageAtts.map((a) => ({
+          type: 'image_url',
+          image_url: { url: `data:${a.mimeType};base64,${a.base64Data}` }
+        }))
+      ]
+    });
+  } else {
+    messages.push({ role: 'user', content: prompt });
+  }
 
   const headers = {
     'Content-Type': 'application/json'
@@ -482,8 +516,8 @@ export async function executeAiRequest({
 
   const attemptController = new AbortController();
   const timeoutId = setTimeout(() => {
-    attemptController.abort(new Error(`Timeout (${timeoutMs / 1000}s) saat memanggil ${provider.toUpperCase()}`));
-  }, timeoutMs);
+    attemptController.abort(new Error(`Timeout (${effectiveTimeoutMs / 1000}s) saat memanggil ${provider.toUpperCase()}`));
+  }, effectiveTimeoutMs);
 
   const abortHandler = () => attemptController.abort();
   if (signal) {
@@ -562,7 +596,16 @@ export async function executeAiRequest({
 /**
  * Panggilan AI Terpusat dengan Gudang API & Otomatis Fallback Antar-Kunci
  */
-export async function callAiApi({ prompt, systemPrompt, stream = false, onChunk, signal, preferredApiId }) {
+export async function callAiApi({
+  prompt,
+  systemPrompt,
+  stream = false,
+  onChunk,
+  signal,
+  preferredApiId,
+  attachments = null,
+  preferGeminiForMultimodal = false
+}) {
   const vault = store.getApiVault();
   const candidateConfigs = [];
   const seenKeys = new Set();
@@ -587,6 +630,11 @@ export async function callAiApi({ prompt, systemPrompt, stream = false, onChunk,
 
   if (preferredApiId) {
     pushIfUsable(vault.find(v => v.id === preferredApiId));
+  }
+
+  if (preferGeminiForMultimodal) {
+    vault.filter(v => (v.provider || '').toLowerCase() === 'gemini').forEach(pushIfUsable);
+    getBuiltinFallbackConfigs().filter(v => (v.provider || '').toLowerCase() === 'gemini').forEach(pushIfUsable);
   }
 
   pushIfUsable(store.getActiveApi());
@@ -625,7 +673,8 @@ export async function callAiApi({ prompt, systemPrompt, stream = false, onChunk,
         systemPrompt,
         stream,
         onChunk,
-        signal
+        signal,
+        attachments
       });
       return result;
     } catch (err) {
@@ -960,4 +1009,97 @@ export async function editDocumentWithAi(currentSnapshot, userInstruction, optio
   }
 
   return parsed;
+}
+
+const VALID_INCOMING_KATEGORI = [
+  'Undangan',
+  'Dinas / Edaran',
+  'Permohonan',
+  'Laporan',
+  'SK / Keputusan',
+  'Lainnya'
+];
+
+function normalizeScannedDateIso(rawDate = '') {
+  const s = String(rawDate || '').trim();
+  if (!s) return '';
+  const iso = s.match(/\b(20\d{2}|19\d{2})-(\d{1,2})-(\d{1,2})\b/);
+  if (iso) {
+    return `${iso[1]}-${String(Number(iso[2])).padStart(2, '0')}-${String(Number(iso[3])).padStart(2, '0')}`;
+  }
+  const dmy = s.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](20\d{2}|19\d{2})\b/);
+  if (dmy) {
+    return `${dmy[3]}-${String(Number(dmy[2])).padStart(2, '0')}-${String(Number(dmy[1])).padStart(2, '0')}`;
+  }
+  const months = {
+    januari: '01', jan: '01', februari: '02', feb: '02', maret: '03', mar: '03',
+    april: '04', apr: '04', mei: '05', juni: '06', jun: '06', juli: '07', jul: '07',
+    agustus: '08', agu: '08', september: '09', sep: '09', oktober: '10', okt: '10',
+    november: '11', nov: '11', desember: '12', des: '12'
+  };
+  const idMatch = s.toLowerCase().match(/(\d{1,2})\s+([a-z]+)\s+(20\d{2}|19\d{2})/);
+  if (idMatch && months[idMatch[2]]) {
+    return `${idMatch[3]}-${months[idMatch[2]]}-${String(Number(idMatch[1])).padStart(2, '0')}`;
+  }
+  return '';
+}
+
+function matchIncomingCategory(rawCat = '') {
+  const c = String(rawCat || '').toLowerCase();
+  if (c.includes('undangan')) return 'Undangan';
+  if (c.includes('edaran') || c.includes('dinas') || c.includes('pemberitahuan')) return 'Dinas / Edaran';
+  if (c.includes('permohonan') || c.includes('izin') || c.includes('bantuan')) return 'Permohonan';
+  if (c.includes('laporan')) return 'Laporan';
+  if (c.includes('keputusan') || /\bsk\b/.test(c)) return 'SK / Keputusan';
+  return VALID_INCOMING_KATEGORI.find(k => k.toLowerCase() === c) || 'Lainnya';
+}
+
+/**
+ * Memindai foto / gambar / berkas PDF Surat Masuk menggunakan AI Vision (OCR)
+ * dan mengekstrak metadata terstruktur siap pakai ke form Surat Masuk.
+ */
+export async function scanIncomingLetterWithAi({ dataUrl = '', mimeType = '', fileName = '', signal } = {}) {
+  const raw = String(dataUrl || '');
+  const base64Idx = raw.indexOf(';base64,');
+  const base64Data = base64Idx >= 0 ? raw.slice(base64Idx + 8) : raw;
+  const resolvedMime = mimeType || (base64Idx >= 0 ? raw.slice(5, base64Idx) : 'image/jpeg');
+
+  if (!base64Data) {
+    throw new Error('Berkas kosong atau belum dimuat untuk pemindaian AI.');
+  }
+
+  const systemPrompt = `
+Kamu adalah mesin OCR administrasi persuratan sekolah Indonesia yang sangat teliti.
+Tugasmu membaca gambar atau PDF surat masuk yang dilampirkan lalu mengembalikan HANYA objek JSON murni tanpa markdown.
+Skema wajib:
+{
+  "namaSurat": "Judul/perihal singkat resmi dari surat masuk (maks 100 karakter)",
+  "pengirim": "Nama instansi / dinas / lembaga / orang pengirim surat",
+  "nomorSuratAsli": "Nomor surat persis seperti tertulis di kop/kepala surat, atau kosong jika tidak terbaca",
+  "tanggalSurat": "YYYY-MM-DD (tanggal yang tertulis di surat, kosong jika tidak terbaca)",
+  "kategori": "Undangan | Dinas / Edaran | Permohonan | Laporan | SK / Keputusan | Lainnya",
+  "catatan": "Ringkasan isi utama / tanggal kegiatan / tindak lanjut yang diminta (1 kalimat singkat)"
+}
+Jangan mengarang data yang tidak terlihat di dokumen; kosongkan string jika tidak ada.
+`.trim();
+
+  const prompt = `Pindai dokumen surat masuk berikut (${fileName || 'dokumen'}) dan ekstrak metadata sesuai skema JSON.`.trim();
+
+  const rawJson = await callAiApi({
+    prompt,
+    systemPrompt,
+    signal,
+    attachments: [{ mimeType: resolvedMime, base64Data }],
+    preferGeminiForMultimodal: true
+  });
+
+  const parsed = JSON.parse(cleanJsonOutput(rawJson) || '{}');
+  return {
+    namaSurat: String(parsed.namaSurat || '').trim().slice(0, 180),
+    pengirim: String(parsed.pengirim || '').trim().slice(0, 160),
+    nomorSuratAsli: String(parsed.nomorSuratAsli || '').trim().slice(0, 120),
+    tanggalSurat: normalizeScannedDateIso(parsed.tanggalSurat || ''),
+    kategori: matchIncomingCategory(parsed.kategori || ''),
+    catatan: String(parsed.catatan || '').trim().slice(0, 280)
+  };
 }

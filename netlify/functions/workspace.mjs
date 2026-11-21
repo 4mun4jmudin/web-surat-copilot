@@ -923,8 +923,25 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
 
   const signerInfo = buildSignerSelectionInfo(schoolProfile || {}, requestedRole);
   const nowIso = new Date().toISOString();
+  const nextTitle = body.title ? String(body.title).trim().slice(0, 200) : target.title;
+  const nextNomor = body.nomorSurat ? String(body.nomorSurat).trim().slice(0, 120) : target.nomorSurat;
+  const nextRecipient = body.recipientName ? String(body.recipientName).trim().slice(0, 180) : target.recipientName;
+  const nextPerihal = body.perihal ? String(body.perihal).trim().slice(0, 200) : target.perihal;
+  const nextTanggal = body.tanggalSurat ? String(body.tanggalSurat).trim().slice(0, 80) : target.tanggalSurat;
+  const nextSummary = body.summary !== undefined ? String(body.summary).trim().slice(0, 260) : target.summary;
+  const nextSnapshot = body.documentSnapshot && typeof body.documentSnapshot === 'object'
+    ? body.documentSnapshot
+    : target.documentSnapshot;
+
   const updatedItem = {
     ...target,
+    title: nextTitle,
+    nomorSurat: nextNomor,
+    recipientName: nextRecipient,
+    perihal: nextPerihal,
+    tanggalSurat: nextTanggal,
+    summary: nextSummary,
+    documentSnapshot: nextSnapshot,
     signerRole: signerInfo.signerRole,
     signerTitle: signerInfo.signerTitle || target.signerTitle,
     signerName: signerInfo.signerName || target.signerName,

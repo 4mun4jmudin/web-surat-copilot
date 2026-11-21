@@ -446,3 +446,58 @@ test('Word Pro: Unwrap container <div> agar tabel di dalam blok contenteditable 
   assert.deepEqual(tbl.colWidthsPct, [10, 50, 40]);
   assert.equal(blocks.filter(b => b.type === 'paragraph').length, 2);
 });
+
+test('Preservasi Spasi, &nbsp;, dan Tab saat Simpan ke Gudang -> Buka Ulang -> Ekspor .docx (Identitas Rapi)', async () => {
+  const editedHtml = `
+    <h2 class="smart-doc-title" data-smart-role="title" style="text-align: center;"><u>SURAT TUGAS</u></h2>
+    <p class="smart-doc-nomor" data-smart-role="nomor" style="text-align: center;">Nomor: 800/013/ST.SMKITA/XI/2026</p>
+    <p>Yang bertanda tangan dibawah ini:</p>
+    <p>Nama&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: Dian Nurhamdani, S.Pd.</p>
+    <p>Jabatan    : Kepala Sekolah</p>
+    <p>Unit Kerja : SMKS IT AL-HAWARI</p>
+    <p>Alamat\t: Kp. Curug RT/RW 002/006 Garut</p>
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;Dengan hormat, disampaikan surat tugas resmi.</p>
+    <table class="smart-identity-table" data-smart-role="identity-table" data-col-widths="32,68"><colgroup><col style="width: 32%;"><col style="width: 68%;"></colgroup><tbody><tr><td>Nama   </td><td>   : Siti Aminah</td></tr></tbody></table>
+  `;
+
+  // 1. Konversi saat Klik Simpan (HTML -> DocumentModel)
+  const savedDocModel = buildDocModelFromSmartPagesData({
+    pages: [{ id: 'p-1', html: editedHtml, isManualBreak: false }],
+    schoolProfile: DEFAULT_SCHOOL_PROFILE,
+    letterOptions: { paperSize: 'f4', showKop: true }
+  });
+
+  // 2. Simpan ke Gudang Surat & Buka kembali ke Word Pro
+  const entry = store.addLetterVaultEntry({
+    title: 'Uji Preservasi Tab Identitas',
+    category: 'Surat Tugas',
+    document: savedDocModel,
+    preferSmartCanvas: true
+  });
+
+  try {
+    assert.equal(store.loadLetterToCanvas(entry.id), true);
+    const pending = store.getState().smartDocument?.pendingDocModel;
+    assert.ok(pending, 'Pending DocModel harus tersedia saat dibuka dari Gudang');
+
+    const reopened = docModelToSmartPages(pending, DEFAULT_SCHOOL_PROFILE);
+    const reopenedHtml = reopened.pages[0].html;
+
+    // Pastikan seluruh spasi/tab tidak ikut menciut jadi spasi tunggal
+    assert.ok(reopenedHtml.includes('Nama&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: Dian Nurhamdani, S.Pd.'), '7x &nbsp; harus terjaga penuh');
+    assert.ok(reopenedHtml.includes('Jabatan&nbsp;&nbsp;&nbsp; : Kepala Sekolah'), '4x spasi berturut-turut harus terjaga sebagai spasi non-collapsing');
+    assert.ok(reopenedHtml.includes('Alamat\t: Kp. Curug'), 'Karakter tab literal harus tetap utuh');
+    assert.ok(reopenedHtml.includes('&nbsp;&nbsp;&nbsp;&nbsp;Dengan hormat,'), 'Indentasi awal paragraf harus tetap terjaga');
+    assert.ok(reopenedHtml.includes('Nama&nbsp;&nbsp; ') && reopenedHtml.includes('&nbsp;&nbsp; : Siti Aminah'), 'Spasi manual dalam identityTable harus terjaga');
+
+    // 3. Pastikan ekspor .docx menyertakan xml:space="preserve" dan <w:tab/>
+    const docxBytes = await renderDocx(pending, 'uint8array');
+    const zip = await readZipPackage(docxBytes);
+    const xmlStr = await zip.file('word/document.xml').async('string');
+    assert.ok(xmlStr.includes('xml:space="preserve"'), 'Multiple spaces wajib memakai xml:space="preserve"');
+    assert.ok(xmlStr.includes('<w:tab/>'), 'Karakter tab wajib menjadi <w:tab/> di OOXML');
+  } finally {
+    store.removeLetterVaultEntry(entry.id);
+    store.setActiveVaultId(null, 'smart');
+  }
+});

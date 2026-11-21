@@ -23,6 +23,7 @@ import {
   promptOutgoingActionWithChoice,
   renderReadOnlyDocumentHtml
 } from './outgoingLettersView.js';
+import { docModelToSmartPages } from './smartWordCanvas.js';
 
 let activeFilterTab = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all'
 let accSearchQuery = '';
@@ -210,7 +211,11 @@ function renderAccCardsListHtml(items, { canApprove, allPendingCount }) {
                 <button type="button" class="btn btn-sm btn-primary btn-acc-print-qr" data-id="${escHtml(item.id)}">🖨️ Cetak QR</button>
                 <button type="button" class="btn btn-sm btn-success btn-acc-docx-qr" data-id="${escHtml(item.id)}">⬇️ .docx QR</button>
               ` : rejected ? `
-                <button type="button" class="btn btn-sm btn-primary btn-acc-resubmit" data-id="${escHtml(item.id)}">📨 Ajukan Ulang</button>
+                ${!isCanvasLockedForUser(store.getState().authUser) && item.documentSnapshot ? `
+                  <button type="button" class="btn btn-sm btn-primary btn-acc-ai-fix" data-id="${escHtml(item.id)}">🤖 Perbaiki AI (Surgical)</button>
+                  <button type="button" class="btn btn-sm btn-secondary btn-acc-open-edit" data-id="${escHtml(item.id)}">✏️ Edit di Kanvas</button>
+                ` : ''}
+                <button type="button" class="btn btn-sm btn-secondary btn-acc-resubmit" data-id="${escHtml(item.id)}">📨 Ajukan Ulang</button>
               ` : ''}
             </div>
           </article>
@@ -691,6 +696,64 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
     btn.onclick = () => {
       const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
       if (item) downloadOutgoingItem(item, { mode: 'qr' });
+    };
+  });
+
+  const openRejectedInEditor = (item, { autoRunAi = false } = {}) => {
+    const snap = item?.documentSnapshot;
+    if (!snap) {
+      showToast('Snapshot isi surat tidak tersedia untuk diedit.', 'warning');
+      return;
+    }
+    const clonedSnap = JSON.parse(JSON.stringify(snap));
+    store.setPendingKepsekRevision({
+      outgoingId: item.id,
+      nomorSurat: item.nomorSurat || '-',
+      title: item.title || 'Surat Dinas',
+      reason: item.rejectedReason || 'Perlu penyesuaian data sebelum pengesahan QR.',
+      rejectedByName: item.rejectedByName || 'Kepala Sekolah',
+      rejectedAt: item.rejectedAt || '',
+      signerRole: item.signerRole || 'kepala_sekolah',
+      autoRunAi
+    });
+
+    const isSmartDoc = Boolean(
+      Array.isArray(clonedSnap.pages) ||
+      String(clonedSnap?.letterData?.templateId || '').startsWith('smart_')
+    );
+    if (isSmartDoc) {
+      const smartPages = Array.isArray(clonedSnap.pages)
+        ? clonedSnap.pages
+        : docModelToSmartPages(clonedSnap, store.getSchoolProfile()).pages;
+      store.setState({
+        smartDocument: {
+          pages: smartPages,
+          meta: clonedSnap.meta || { title: item.title, nomorSurat: item.nomorSurat }
+        },
+        activeSmartVaultId: null
+      }, false);
+      onNavigateTab?.('smart-canvas');
+    } else {
+      store.setState({
+        document: clonedSnap,
+        docxViewMode: 'canvas',
+        activeVaultId: null
+      }, false);
+      onNavigateTab?.('canvas');
+    }
+  };
+
+  container.querySelectorAll('.btn-acc-ai-fix').forEach(btn => {
+    btn.onclick = () => {
+      const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
+      if (item) openRejectedInEditor(item, { autoRunAi: true });
+    };
+  });
+
+  container.querySelectorAll('.btn-acc-open-edit').forEach(btn => {
+    btn.onclick = () => {
+      const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
+      if (item) openRejectedInEditor(item, { autoRunAi: false });
     };
   });
 

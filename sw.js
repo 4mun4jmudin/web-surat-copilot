@@ -3,7 +3,7 @@
  * Menyediakan caching offline untuk antarmuka, aset Word (.docx) generator, dan pustaka lokal.
  */
 
-const CACHE_NAME = 'ai-docbuilder-pwa-v29-20261120';
+const CACHE_NAME = 'ai-docbuilder-pwa-v31-20261121';
 
 const PRECACHE_ASSETS = [
   './',

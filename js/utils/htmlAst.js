@@ -23,9 +23,9 @@ export function escapeHtmlTextContent(str = '') {
     .replace(/>/g, '&gt;');
 }
 
-export function decodeHtmlEntities(str = '') {
+export function decodeHtmlEntities(str = '', { preserveNbsp = false } = {}) {
   return String(str)
-    .replace(/&nbsp;/gi, ' ')
+    .replace(/&nbsp;/gi, preserveNbsp ? '\u00a0' : ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
@@ -59,7 +59,7 @@ export function parseHtmlNodes(html = '') {
 
   while ((match = tokenRe.exec(String(html))) !== null) {
     if (match[3] !== undefined) {
-      const txt = decodeHtmlEntities(match[3]);
+      const txt = decodeHtmlEntities(match[3], { preserveNbsp: true });
       if (txt) {
         stack[stack.length - 1].children.push({ type: 'text', text: txt });
       }

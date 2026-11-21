@@ -26,7 +26,7 @@ export function escapeXml(unsafe) {
 export function buildTextElement(text) {
   if (!text) return '<w:t></w:t>';
   const escaped = escapeXml(text);
-  const needsPreserve = /^\s|\s$/.test(text) || text.length === 0;
+  const needsPreserve = /^\s|\s$| {2,}|\u00a0/.test(text) || text.length === 0;
   return needsPreserve
     ? `<w:t xml:space="preserve">${escaped}</w:t>`
     : `<w:t>${escaped}</w:t>`;
