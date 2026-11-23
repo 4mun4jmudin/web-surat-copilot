@@ -24,6 +24,7 @@ import {
   renderReadOnlyDocumentHtml
 } from './outgoingLettersView.js';
 import { docModelToSmartPages } from './smartWordCanvas.js';
+import { uiIcon } from './icons.js';
 
 let activeFilterTab = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all'
 let accSearchQuery = '';
@@ -169,9 +170,9 @@ function renderAccCardsListHtml(items, { canApprove, allPendingCount }) {
               ? '<span class="acc-pro-status status-glow"><span class="acc-glow-dot"></span> Perlu ACC</span>'
               : '<span class="acc-pro-status status-waiting"><span class="acc-live-spinner acc-spinner-sm"></span> Menunggu ACC</span>')
           : approved
-          ? '<span class="acc-pro-status status-approved">✓ Disetujui</span>'
+          ? `<span class="acc-pro-status status-approved">${uiIcon('check', 11)}<span>Disetujui</span></span>`
           : rejected
-          ? '<span class="acc-pro-status status-rejected">✕ Ditolak</span>'
+          ? `<span class="acc-pro-status status-rejected">${uiIcon('x', 11)}<span>Ditolak</span></span>`
           : '<span class="acc-pro-status status-neutral">Manual</span>';
 
         return `
@@ -188,34 +189,34 @@ function renderAccCardsListHtml(items, { canApprove, allPendingCount }) {
                 </div>
                 <div class="acc-pro-card-nomor">No: ${escHtml(item.nomorSurat || '-')}</div>
                 <div class="acc-pro-card-meta">
-                  <span>👤 ${escHtml(item.requestedByName || item.recordedBy || 'Tata Usaha')}</span>
-                  <span>📅 ${escHtml(formatShortDateTime(item.requestedAt || item.approvedAt || item.recordedAt))}</span>
-                  <span>🎯 ${escHtml(item.recipientName || '-')}</span>
-                  <span>✍️ ${escHtml(roleLabels[item.signerRole] || 'Kepala Sekolah')}</span>
+                  <span>${uiIcon('user', 12)}<span>${escHtml(item.requestedByName || item.recordedBy || 'Tata Usaha')}</span></span>
+                  <span>${uiIcon('calendar', 12)}<span>${escHtml(formatShortDateTime(item.requestedAt || item.approvedAt || item.recordedAt))}</span></span>
+                  <span>${uiIcon('target', 12)}<span>${escHtml(item.recipientName || '-')}</span></span>
+                  <span>${uiIcon('penTool', 12)}<span>${escHtml(roleLabels[item.signerRole] || 'Kepala Sekolah')}</span></span>
                 </div>
               </div>
             </div>
 
-            ${item.requestNote ? `<div class="acc-card-note">📝 Catatan TU: ${escHtml(item.requestNote)}</div>` : ''}
-            ${rejected && item.rejectedReason ? `<div class="acc-card-note acc-note-danger">❌ Alasan Penolakan: ${escHtml(item.rejectedReason)}</div>` : ''}
+            ${item.requestNote ? `<div class="acc-card-note">${uiIcon('docClean', 13)}<span>Catatan TU: ${escHtml(item.requestNote)}</span></div>` : ''}
+            ${rejected && item.rejectedReason ? `<div class="acc-card-note acc-note-danger">${uiIcon('xCircle', 13)}<span>Alasan Penolakan: ${escHtml(item.rejectedReason)}</span></div>` : ''}
 
             <div class="acc-pro-card-actions">
-              <button type="button" class="btn btn-sm btn-secondary btn-acc-preview" data-id="${escHtml(item.id)}">👁️ Pratinjau</button>
+              <button type="button" class="btn btn-sm btn-secondary btn-acc-preview" data-id="${escHtml(item.id)}">${uiIcon('eye', 13)}<span>Pratinjau</span></button>
               ${pending && canApprove ? `
-                <button type="button" class="btn btn-sm btn-primary acc-glow-btn btn-acc-approve" data-id="${escHtml(item.id)}">✅ ACC &amp; Terbitkan QR</button>
-                <button type="button" class="btn btn-sm btn-danger btn-acc-reject" data-id="${escHtml(item.id)}">❌ Tolak</button>
+                <button type="button" class="btn btn-sm btn-primary acc-glow-btn btn-acc-approve" data-id="${escHtml(item.id)}">${uiIcon('checkCircle', 13)}<span>ACC &amp; Terbitkan QR</span></button>
+                <button type="button" class="btn btn-sm btn-danger btn-acc-reject" data-id="${escHtml(item.id)}">${uiIcon('xCircle', 13)}<span>Tolak</span></button>
               ` : pending ? `
-                <button type="button" class="btn btn-sm btn-secondary btn-acc-print-manual" data-id="${escHtml(item.id)}">✍️ TTD Manual</button>
+                <button type="button" class="btn btn-sm btn-secondary btn-acc-print-manual" data-id="${escHtml(item.id)}">${uiIcon('penTool', 13)}<span>TTD Manual</span></button>
                 <button type="button" class="btn btn-sm btn-secondary btn-acc-cancel" data-id="${escHtml(item.id)}">Batalkan</button>
               ` : approved ? `
-                <button type="button" class="btn btn-sm btn-primary btn-acc-print-qr" data-id="${escHtml(item.id)}">🖨️ Cetak QR</button>
-                <button type="button" class="btn btn-sm btn-success btn-acc-docx-qr" data-id="${escHtml(item.id)}">⬇️ .docx QR</button>
+                <button type="button" class="btn btn-sm btn-primary btn-acc-print-qr" data-id="${escHtml(item.id)}">${uiIcon('printer', 13)}<span>Cetak QR</span></button>
+                <button type="button" class="btn btn-sm btn-success btn-acc-docx-qr" data-id="${escHtml(item.id)}">${uiIcon('download', 13)}<span>.docx QR</span></button>
               ` : rejected ? `
                 ${!isCanvasLockedForUser(store.getState().authUser) && item.documentSnapshot ? `
-                  <button type="button" class="btn btn-sm btn-primary btn-acc-ai-fix" data-id="${escHtml(item.id)}">🤖 Perbaiki AI (Surgical)</button>
-                  <button type="button" class="btn btn-sm btn-secondary btn-acc-open-edit" data-id="${escHtml(item.id)}">✏️ Edit di Kanvas</button>
+                  <button type="button" class="btn btn-sm btn-primary btn-acc-ai-fix" data-id="${escHtml(item.id)}">${uiIcon('bot', 13)}<span>Perbaiki AI (Surgical)</span></button>
+                  <button type="button" class="btn btn-sm btn-secondary btn-acc-open-edit" data-id="${escHtml(item.id)}">${uiIcon('edit', 13)}<span>Edit di Kanvas</span></button>
                 ` : ''}
-                <button type="button" class="btn btn-sm btn-secondary btn-acc-resubmit" data-id="${escHtml(item.id)}">📨 Ajukan Ulang</button>
+                <button type="button" class="btn btn-sm btn-secondary btn-acc-resubmit" data-id="${escHtml(item.id)}">${uiIcon('sendOut', 13)}<span>Ajukan Ulang</span></button>
               ` : ''}
             </div>
           </article>
@@ -268,9 +269,9 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
           <div class="acc-pro-status-strip">
             <span class="acc-live-badge"><span class="acc-live-dot"></span> Sinkron Live SPA</span>
             <span class="acc-pill-badge ${canvasLocked ? 'is-amber' : 'is-green'}">
-              ${canvasLocked ? '🔒 Kanvas Terkunci (HP)' : '🛡️ Akses Penuh'}
+              ${canvasLocked ? `${uiIcon('lock', 12)}<span>Kanvas Terkunci (HP)</span>` : `${uiIcon('shieldCheck', 12)}<span>Akses Penuh</span>`}
             </span>
-            <span class="acc-pill-badge is-green">📱 Akses Aktif</span>
+            <span class="acc-pill-badge is-green">${uiIcon('smartphone', 12)}<span>Akses Aktif</span></span>
           </div>
 
           <!-- 3 STAT CARDS (MENUNGGU ACC, DISETUJUI, TOTAL) -->
@@ -313,10 +314,11 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
                 : 'Buat Surat Baru'}</span>
             </button>
             <button type="button" id="btn-acc-sync-now" class="btn btn-secondary acc-pro-btn-sec">
-              <span>⟳ Cek Update</span>
+              ${uiIcon('refresh', 14)}
+              <span>Cek Update</span>
             </button>
             <button type="button" id="btn-acc-secondary-cta" class="btn btn-secondary acc-pro-btn-sec">
-              <span>${canApprove ? '⚙️ Setelan' : '📤 Surat Keluar'}</span>
+              ${canApprove ? `${uiIcon('settings', 14)}<span>Setelan</span>` : `${uiIcon('sendOut', 14)}<span>Surat Keluar</span>`}
             </button>
           </div>
         </div>
@@ -331,7 +333,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
             <div class="acc-pro-panel-right">
               <span class="acc-count-pill-green">${visibleItems.length} Surat</span>
               <button type="button" id="btn-acc-sort-toggle" class="btn btn-sm btn-secondary acc-sort-btn" title="Ubah urutan terbaru / terlama">
-                ${accSortDesc ? '↓ Terbaru' : '↑ Terlama'}
+                ${accSortDesc ? `${uiIcon('arrowDown', 13)}<span>Terbaru</span>` : `${uiIcon('arrowUp', 13)}<span>Terlama</span>`}
               </button>
             </div>
           </div>
@@ -355,10 +357,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
           <!-- PENCARIAN CEPAT -->
           <div class="acc-search-toolbar">
             <div class="acc-search-input-wrap">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2">
-                <circle cx="11" cy="11" r="8" />
-                <line x1="21" y1="21" x2="16.65" y2="16.65" />
-              </svg>
+              ${uiIcon('search', 15)}
               <input type="text" id="input-acc-search" value="${escHtml(accSearchQuery)}" placeholder="Cari nomor, judul, atau penerima..." autocomplete="off" />
             </div>
           </div>
@@ -381,7 +380,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
             </div>
             <div style="margin-bottom: 10px;">
               <span class="acc-pill-badge ${perms.allowTuSignPrincipal ? 'is-green' : 'is-amber'}">
-                ${perms.allowTuSignPrincipal ? '🔓 Delegasi Kepsek ke TU: Aktif' : '🔒 Delegasi Kepsek ke TU: Terkunci (Mode Antrean ACC)'}
+                ${perms.allowTuSignPrincipal ? `${uiIcon('unlock', 12)}<span>Delegasi Kepsek ke TU: Aktif</span>` : `${uiIcon('lock', 12)}<span>Delegasi Kepsek ke TU: Terkunci (Mode Antrean ACC)</span>`}
               </span>
             </div>
             ${recentResolved.length === 0 ? `
@@ -405,13 +404,13 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
                           <div class="acc-pro-card-title-row">
                             <h4 class="acc-pro-card-title">${escHtml(item.title)}</h4>
                             <span class="acc-pro-status ${approved ? 'status-approved' : 'status-rejected'}">
-                              ${approved ? '✓ Disetujui' : '✕ Ditolak'}
+                              ${approved ? `${uiIcon('check', 11)}<span>Disetujui</span>` : `${uiIcon('x', 11)}<span>Ditolak</span>`}
                             </span>
                           </div>
                           <div class="acc-pro-card-nomor">No: ${escHtml(item.nomorSurat)}</div>
                           <div class="acc-pro-card-meta">
-                            <span>📅 ${escHtml(formatShortDateTime(item.approvedAt || item.rejectedAt || item.recordedAt))}</span>
-                            <span>🎯 ${escHtml(item.recipientName || '-')}</span>
+                            <span>${uiIcon('calendar', 12)}<span>${escHtml(formatShortDateTime(item.approvedAt || item.rejectedAt || item.recordedAt))}</span></span>
+                            <span>${uiIcon('target', 12)}<span>${escHtml(item.recipientName || '-')}</span></span>
                           </div>
                         </div>
                       </div>
@@ -427,7 +426,10 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
         ${!mobileInfoDismissed ? `
           <div class="acc-pro-footer-banner" id="acc-mobile-info-banner">
             <div class="acc-pro-footer-banner-text">
-              <div class="acc-pro-footer-kicker">✨ ${canvasLocked ? 'Akses Kepala Sekolah di HP' : 'Akses ACC Kapan Saja, di Mana Saja'}</div>
+              <div class="acc-pro-footer-kicker" style="display:flex;align-items:center;gap:6px;">
+                ${uiIcon('sparkle', 13)}
+                <span>${canvasLocked ? 'Akses Kepala Sekolah di HP' : 'Akses ACC Kapan Saja, di Mana Saja'}</span>
+              </div>
               <p>
                 ${canvasLocked
                   ? 'Kelola persetujuan QR, lihat Surat Keluar, dan atur Setelan Delegasi langsung dari HP. Edit kanvas tetap dikunci khusus Komputer / Laptop / PC.'
@@ -439,7 +441,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
               alt="Verifikasi QR Mobile"
               class="acc-footer-banner-art"
             />
-            <button type="button" id="btn-dismiss-mobile-banner" class="acc-pro-dismiss-btn" title="Tutup info">✕</button>
+            <button type="button" id="btn-dismiss-mobile-banner" class="acc-pro-dismiss-btn" title="Tutup info" aria-label="Tutup">${uiIcon('x', 13)}</button>
           </div>
         ` : ''}
 
@@ -454,7 +456,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
             <h3 id="modal-acc-preview-title" style="margin:0;font-size:16px;">Pratinjau Surat</h3>
             <p id="modal-acc-preview-sub" style="margin:3px 0 0 0;font-size:12px;color:#64748b;"></p>
           </div>
-          <button type="button" id="btn-close-acc-preview" class="btn btn-sm btn-secondary">✕ Tutup</button>
+          <button type="button" id="btn-close-acc-preview" class="btn btn-sm btn-secondary">${uiIcon('x', 13)}<span>Tutup</span></button>
         </div>
         <div id="modal-acc-preview-body" style="max-height:70dvh;overflow-y:auto;background:#e2e8f0;padding:14px;border-radius:10px;"></div>
       </div>
@@ -464,7 +466,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
     <div id="modal-acc-reject" class="modal-overlay hidden">
       <div class="modal-card" style="max-width:460px;">
         <div class="modal-header">
-          <h3>❌ Tolak Permintaan ACC Surat</h3>
+          <h3 style="color:#b91c1c;">${uiIcon('xCircle', 16)}<span>Tolak Permintaan ACC Surat</span></h3>
         </div>
         <p id="reject-acc-target-info" style="font-size:12.5px;color:#475569;margin:8px 0 12px 0;"></p>
         <div class="form-group">
@@ -531,7 +533,7 @@ export function renderAccApprovalView(container, { onNavigateTab } = {}) {
       const changed = await forcePollNow();
       btnSync.disabled = false;
       renderAccApprovalView(container, { onNavigateTab });
-      showToast(changed ? '✅ Data antrean ACC diperbarui dari server.' : '✓ Data antrean sudah paling baru.', 'info');
+      showToast(changed ? 'Data antrean ACC diperbarui dari server.' : 'Data antrean sudah paling baru.', 'info');
     };
   }
 
@@ -612,7 +614,7 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
       const item = store.getOutgoingLetters().find(x => x.id === btn.dataset.id);
       if (!item) return;
       btn.disabled = true;
-      btn.textContent = '⟳ Meng-ACC & QR...';
+      btn.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Meng-ACC &amp; QR...</span>`;
       const res = await approveAccCloud({
         outgoingId: item.id,
         signerRole: item.signerRole || 'kepala_sekolah',
@@ -620,13 +622,13 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
       });
       if (!res.ok || !res.item) {
         btn.disabled = false;
-        btn.textContent = '✅ ACC & Terbitkan QR';
+        btn.innerHTML = `${uiIcon('checkCircle', 13)}<span>ACC &amp; Terbitkan QR</span>`;
         showToast(res.error || 'Gagal menyetujui ACC.', 'error');
         return;
       }
       store.upsertOutgoingLetterFromCloud(res.item);
       if (res.syncRev) setLastKnownSyncRev(res.syncRev);
-      showToast(`✅ Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} di-ACC! Barcode QR aktif & tersinkron ke TU.`, 'success');
+      showToast(`Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} di-ACC! Barcode QR aktif & tersinkron ke TU.`, 'success');
       renderAccApprovalView(container, { onNavigateTab });
     };
   });
@@ -653,7 +655,7 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
           store.upsertOutgoingLetterFromCloud(res.item);
           if (res.syncRev) setLastKnownSyncRev(res.syncRev);
           rejectModal.classList.add('hidden');
-          showToast('❌ Pengajuan ACC ditolak dan catatan revisi dikirim ke TU.', 'info');
+          showToast('Pengajuan ACC ditolak dan catatan revisi dikirim ke TU.', 'info');
           renderAccApprovalView(container, { onNavigateTab });
         };
       }
@@ -721,13 +723,16 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
       Array.isArray(clonedSnap.pages) ||
       String(clonedSnap?.letterData?.templateId || '').startsWith('smart_')
     );
+    const itemSchool = store.getEffectiveSchoolForDocument(clonedSnap || item);
     if (isSmartDoc) {
       const smartPages = Array.isArray(clonedSnap.pages)
         ? clonedSnap.pages
-        : docModelToSmartPages(clonedSnap, store.getSchoolProfile()).pages;
+        : docModelToSmartPages(clonedSnap, itemSchool).pages;
       store.setState({
         smartDocument: {
           pages: smartPages,
+          targetUnitId: itemSchool.unitId,
+          schoolProfile: itemSchool,
           meta: clonedSnap.meta || { title: item.title, nomorSurat: item.nomorSurat }
         },
         activeSmartVaultId: null
@@ -770,13 +775,13 @@ function bindAccCardActions(container, { onNavigateTab } = {}) {
       });
       if (!res.ok || !res.item) {
         btn.disabled = false;
-        btn.textContent = '📨 Ajukan Ulang';
+        btn.innerHTML = `${uiIcon('sendOut', 13)}<span>Ajukan Ulang</span>`;
         showToast(res.error || 'Gagal mengajukan ulang ACC.', 'error');
         return;
       }
       store.upsertOutgoingLetterFromCloud(res.item);
       if (res.syncRev) setLastKnownSyncRev(res.syncRev);
-      showToast('📨 Pengajuan ulang dikirim ke antrean ACC Kepala Sekolah!', 'success');
+      showToast('Pengajuan ulang dikirim ke antrean ACC Kepala Sekolah!', 'success');
       renderAccApprovalView(container, { onNavigateTab });
     };
   });

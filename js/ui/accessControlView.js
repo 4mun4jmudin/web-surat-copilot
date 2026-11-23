@@ -8,6 +8,7 @@ import {
   canManageDelegation,
   canManageUsers,
   getRoleLabel,
+  getUnitDisplayName,
   isAdminUser
 } from '../auth/permissions.js';
 import {
@@ -21,6 +22,7 @@ import {
 } from '../sync/workspaceClient.js';
 import { showToast } from './notification.js';
 import { APPS_SCRIPT_INCOMING_SNIPPET } from '../letters/incoming.js';
+import { uiIcon } from './icons.js';
 
 function escapeHtml(value) {
   const div = document.createElement('div');
@@ -33,6 +35,8 @@ export function renderAccessControlView(container) {
 
   const state = store.getState();
   const user = state.authUser;
+  const activeUnitId = store.getActiveUnitId();
+  const activeUnitName = getUnitDisplayName(activeUnitId);
   const perms = state.authPermissions || {};
   const drive = state.driveStatus || {};
   const managedUsers = Array.isArray(state.managedUsers) ? state.managedUsers : [];
@@ -53,32 +57,41 @@ export function renderAccessControlView(container) {
         <div class="view-page-header" style="margin-bottom: 18px;">
           <div class="view-header-lead">
             <div class="view-header-badge">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              ${uiIcon('shieldCheck', 22)}
             </div>
             <div>
               <h2 class="view-title">
                 <span>Hak Akses, Akun Pengguna &amp; Google Drive</span>
+                <span class="status-chip status-chip-green">${escapeHtml(activeUnitName)}</span>
                 <span class="status-chip ${roleBadgeClass}">${escapeHtml(getRoleLabel(user?.role))}</span>
               </h2>
               <p class="view-subtitle">
-                Pengaturan persetujuan delegasi pengesahan surat legal Kepala Sekolah kepada TU, kontrol akun Administrator, serta sinkronisasi arsip ke Google Drive (<code>tuancraf1@gmail.com</code>).
+                Pengaturan delegasi pengesahan surat legal unit <strong>${escapeHtml(activeUnitName)}</strong>, kontrol akun multi-unit Yayasan (SMP &amp; SMK), ruang kerja pribadi terenkapsulasi per akun, serta backup Google Drive.
               </p>
             </div>
           </div>
-          <button type="button" id="btn-refresh-access-bootstrap" class="btn btn-sm btn-secondary">🔄 Muat Ulang Status Cloud</button>
+          <div class="view-header-actions">
+            <button type="button" id="btn-refresh-access-bootstrap" class="btn btn-sm btn-secondary">
+              ${uiIcon('refresh', 13)}
+              <span>Muat Ulang Status Cloud</span>
+            </button>
+          </div>
         </div>
 
         <!-- KARTU 1: PERSETUJUAN DELEGASI PENGESAHAN KEPALA SEKOLAH -> TU -->
         <div class="ui-card" style="padding: 20px; margin-bottom: 18px;">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
-            <div>
-              <h3 style="margin:0; font-size:16px; color:#0f172a;">✍️ Persetujuan Pengesahan Legal Kepala Sekolah untuk TU</h3>
-              <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
-                Mengatur apakah staf <strong>Tata Usaha (TU)</strong> diperbolehkan menerbitkan pengesahan Barcode QR atas nama <strong>Kepala Sekolah</strong>. Pengaturan ini dapat dibuka/tutup oleh <strong>Kepala Sekolah</strong> maupun <strong>Administrator</strong>.
-              </p>
+          <div class="view-section-head">
+            <div class="view-section-title-group" style="align-items:flex-start;">
+              <span class="view-section-icon">${uiIcon('penTool', 16)}</span>
+              <div>
+                <h3 style="margin:0; font-size:16px; color:#0f172a;">Persetujuan Pengesahan Legal Kepala Sekolah untuk TU</h3>
+                <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
+                  Mengatur apakah staf <strong>Tata Usaha (TU)</strong> diperbolehkan menerbitkan pengesahan Barcode QR atas nama <strong>Kepala Sekolah</strong>. Pengaturan ini dapat dibuka/tutup oleh <strong>Kepala Sekolah</strong> maupun <strong>Administrator</strong>.
+                </p>
+              </div>
             </div>
             <span class="status-chip ${perms.allowTuSignPrincipal ? 'status-chip-green' : 'status-chip-amber'}">
-              ${perms.allowTuSignPrincipal ? '✓ Delegasi a.n. Kepsek AKTIF' : '🔒 Delegasi a.n. Kepsek TERKUNCI'}
+              ${perms.allowTuSignPrincipal ? `${uiIcon('check', 12)}<span>Delegasi a.n. Kepsek AKTIF</span>` : `${uiIcon('lock', 12)}<span>Delegasi a.n. Kepsek TERKUNCI</span>`}
             </span>
           </div>
 
@@ -144,7 +157,7 @@ export function renderAccessControlView(container) {
               <div style="font-size:11.5px; color:#64748b;">
                 ${perms.updatedAt ? `Pembaruan terakhir: <strong>${escapeHtml(perms.updatedBy || '-')}</strong> (${escapeHtml(getRoleLabel(perms.updatedByRole))}) • ${new Date(perms.updatedAt).toLocaleString('id-ID')}` : 'Menggunakan kebijakan awal sistem'}
               </div>
-              ${canDelegate ? `<button type="submit" class="btn btn-primary">💾 Simpan Persetujuan Hak Akses</button>` : ''}
+              ${canDelegate ? `<button type="submit" class="btn btn-primary">${uiIcon('save', 14)}<span>Simpan Persetujuan Hak Akses</span></button>` : ''}
             </div>
           </form>
         </div>
@@ -152,49 +165,59 @@ export function renderAccessControlView(container) {
         <!-- KARTU 2: KHUSUS ADMINISTRATOR — MANAJEMEN AKUN PENGGUNA -->
         ${isAdmin ? `
           <div class="ui-card" style="padding: 20px; margin-bottom: 18px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
-              <div>
-                <h3 style="margin:0; font-size:16px; color:#0f172a;">👥 Manajemen Akun Pengguna (Kontrol Administrator)</h3>
-                <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
-                  Tambah, ubah peran (Administrator / Kepala Sekolah / TU), nonaktifkan akun, atau atur ulang password/PIN pengguna.
-                </p>
+            <div class="view-section-head">
+              <div class="view-section-title-group" style="align-items:flex-start;">
+                <span class="view-section-icon">${uiIcon('users', 16)}</span>
+                <div>
+                  <h3 style="margin:0; font-size:16px; color:#0f172a;">Manajemen Akun Pengguna (Kontrol Administrator)</h3>
+                  <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
+                    Tambah, ubah peran (Administrator / Kepala Sekolah / TU), nonaktifkan akun, atau atur ulang password/PIN pengguna.
+                  </p>
+                </div>
               </div>
-              <button type="button" id="btn-open-add-user" class="btn btn-primary btn-sm">+ Tambah Akun Pengguna</button>
+              <button type="button" id="btn-open-add-user" class="btn btn-primary btn-sm">${uiIcon('plus', 13)}<span>Tambah Akun Pengguna</span></button>
             </div>
 
-            <div style="overflow-x:auto;">
-              <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <div style="overflow-x:auto; border: 1px solid #e2e8f0; border-radius: 10px;">
+              <table class="enterprise-table">
                 <thead>
-                  <tr style="background:#f8fafc; border-bottom:1px solid #e2e8f0; text-align:left; color:#334155; font-size:12px;">
-                    <th style="padding:10px 12px;">Username</th>
-                    <th style="padding:10px 12px;">Nama Tampilan</th>
-                    <th style="padding:10px 12px;">Peran</th>
-                    <th style="padding:10px 12px;">Status</th>
-                    <th style="padding:10px 12px;">Login Terakhir</th>
-                    <th style="padding:10px 12px; text-align:right;">Tindakan</th>
+                  <tr>
+                    <th>Username</th>
+                    <th>Nama Tampilan</th>
+                    <th>Unit Sekolah</th>
+                    <th>Peran</th>
+                    <th>Status</th>
+                    <th>Login Terakhir</th>
+                    <th style="text-align:right;">Tindakan</th>
                   </tr>
                 </thead>
                 <tbody>
                   ${managedUsers.map(u => {
                     const isSelf = u.id === user?.id;
                     const rChip = u.role === 'admin' ? 'status-chip-purple' : u.role === 'kepsek' ? 'status-chip-green' : 'status-chip-blue';
+                    const uScope = String(u.unitId || 'smk').toLowerCase();
+                    const uUnitLabel = uScope === 'all' ? 'Yayasan (SMP & SMK)' : (uScope === 'smp' ? 'SMP IT Al-Hawari' : 'SMK IT Al-Hawari');
+                    const uUnitChip = uScope === 'all' ? 'status-chip-purple' : (uScope === 'smp' ? 'status-chip-blue' : 'status-chip-green');
                     return `
-                      <tr style="border-bottom:1px solid #f1f5f9;">
-                        <td style="padding:10px 12px; font-family:Consolas,monospace; font-weight:700;">${escapeHtml(u.username)}${isSelf ? ' <span style="font-size:10px;color:#15803d;">(Anda)</span>' : ''}</td>
-                        <td style="padding:10px 12px;">${escapeHtml(u.displayName)}</td>
-                        <td style="padding:10px 12px;"><span class="status-chip ${rChip}" style="font-size:11px;">${escapeHtml(getRoleLabel(u.role))}</span></td>
-                        <td style="padding:10px 12px;">
+                      <tr>
+                        <td style="font-family:Consolas,monospace; font-weight:700;">${escapeHtml(u.username)}${isSelf ? ' <span style="font-size:10px;color:#15803d;">(Anda)</span>' : ''}</td>
+                        <td>${escapeHtml(u.displayName)}</td>
+                        <td><span class="status-chip ${uUnitChip}" style="font-size:11px;">${escapeHtml(uUnitLabel)}</span></td>
+                        <td><span class="status-chip ${rChip}" style="font-size:11px;">${escapeHtml(getRoleLabel(u.role))}</span></td>
+                        <td>
                           <span class="status-chip ${u.active !== false ? 'status-chip-green' : 'status-chip-red'}" style="font-size:11px;">
-                            ${u.active !== false ? '✓ Aktif' : '⛔ Nonaktif'}
+                            ${u.active !== false ? `${uiIcon('check', 11)}<span>Aktif</span>` : `${uiIcon('ban', 11)}<span>Nonaktif</span>`}
                           </span>
                         </td>
-                        <td style="padding:10px 12px; font-size:11.5px; color:#64748b;">
+                        <td style="font-size:11.5px; color:#64748b;">
                           ${u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString('id-ID') : 'Belum pernah'}
                         </td>
-                        <td style="padding:10px 12px; text-align:right; white-space:nowrap;">
-                          <button type="button" class="btn btn-sm btn-secondary btn-edit-user" data-id="${escapeHtml(u.id)}">✏️ Edit / Password</button>
-                          <button type="button" class="btn btn-sm btn-secondary btn-toggle-user-active" data-id="${escapeHtml(u.id)}">${u.active !== false ? 'Nonaktifkan' : 'Aktifkan'}</button>
-                          ${!isSelf ? `<button type="button" class="btn btn-sm btn-danger btn-delete-user" data-id="${escapeHtml(u.id)}">🗑️</button>` : ''}
+                        <td style="text-align:right; white-space:nowrap;">
+                          <div class="table-action-group">
+                            <button type="button" class="btn btn-sm btn-secondary btn-edit-user" data-id="${escapeHtml(u.id)}">${uiIcon('edit', 13)}<span>Edit / Password</span></button>
+                            <button type="button" class="btn btn-sm btn-secondary btn-toggle-user-active" data-id="${escapeHtml(u.id)}">${u.active !== false ? 'Nonaktifkan' : 'Aktifkan'}</button>
+                            ${!isSelf ? `<button type="button" class="btn btn-sm btn-danger btn-square-sm btn-delete-user" data-id="${escapeHtml(u.id)}" title="Hapus Akun">${uiIcon('trash', 13)}</button>` : ''}
+                          </div>
                         </td>
                       </tr>
                     `;
@@ -207,33 +230,39 @@ export function renderAccessControlView(container) {
 
         <!-- KARTU 3: GOOGLE DRIVE & MIGRASI DATA -->
         <div class="ui-card" style="padding: 20px; margin-bottom: 18px;">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
-            <div>
-              <h3 style="margin:0; font-size:16px; color:#0f172a;">📁 Penyimpanan &amp; Backup Google Drive (${escapeHtml(drive.accountEmail || 'tuancraf1@gmail.com')})</h3>
-              <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
-                Arsip fisik <code>.docx</code> Surat Keluar, template Gudang Surat, aset Kop, dan Google Sheet master otomatis disinkronkan ke folder sekolah Anda.
-              </p>
+          <div class="view-section-head">
+            <div class="view-section-title-group" style="align-items:flex-start;">
+              <span class="view-section-icon">${uiIcon('folder', 16)}</span>
+              <div>
+                <h3 style="margin:0; font-size:16px; color:#0f172a;">Penyimpanan &amp; Backup Google Drive (${escapeHtml(drive.accountEmail || 'tuancraf1@gmail.com')})</h3>
+                <p style="margin:4px 0 0; font-size:12.5px; color:#475569;">
+                  Arsip fisik <code>.docx</code> Surat Keluar, template Gudang Surat, aset Kop, dan Google Sheet master otomatis disinkronkan ke folder sekolah Anda.
+                </p>
+              </div>
             </div>
             <span class="status-chip ${drive.configured ? 'status-chip-green' : 'status-chip-amber'}">
-              ${drive.configured ? '☁️ Bridge Drive Terhubung' : '🕒 Menunggu Webhook Apps Script'}
+              ${drive.configured ? `${uiIcon('cloudCheck', 12)}<span>Bridge Drive Terhubung</span>` : `${uiIcon('clock', 12)}<span>Menunggu Webhook Apps Script</span>`}
             </span>
           </div>
 
-          <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; font-size:12.5px; display:grid; gap:6px; margin-bottom:14px;">
-            <div><strong>Folder Root Drive:</strong> <a href="${escapeHtml(drive.rootFolderUrl || `https://drive.google.com/drive/folders/${drive.rootFolderId}`)}" target="_blank" rel="noopener">Persuratan SMKS IT Al-Hawari (${escapeHtml(drive.rootFolderId)}) ↗</a></div>
-            ${drive.sheetUrl ? `<div><strong>Google Sheet Master:</strong> <a href="${escapeHtml(drive.sheetUrl)}" target="_blank" rel="noopener">Buka DB_Persuratan_SMKS_IT_AlHawari ↗</a></div>` : ''}
+          <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; font-size:12.5px; display:grid; gap:6px; margin-bottom:14px;">
+            <div><strong>Folder Root Drive:</strong> <a href="${escapeHtml(drive.rootFolderUrl || `https://drive.google.com/drive/folders/${drive.rootFolderId}`)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;color:#156c3b;font-weight:600;text-decoration:none;"><span>Persuratan Yayasan Al-Hawari — ${escapeHtml(activeUnitName)} (${escapeHtml(drive.rootFolderId)})</span>${uiIcon('externalLink', 12)}</a></div>
+            ${drive.sheetUrl ? `<div><strong>Google Sheet Master:</strong> <a href="${escapeHtml(drive.sheetUrl)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;color:#156c3b;font-weight:600;text-decoration:none;"><span>Buka DB_Persuratan_AlHawari</span>${uiIcon('externalLink', 12)}</a></div>` : ''}
             <div><strong>Sinkron Terakhir:</strong> ${drive.lastSyncAt ? new Date(drive.lastSyncAt).toLocaleString('id-ID') : 'Belum pernah'}</div>
             ${drive.lastError ? `<div style="color:#b91c1c;"><strong>Catatan Terakhir:</strong> ${escapeHtml(drive.lastError)}</div>` : ''}
           </div>
 
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:${isAdmin ? '14px' : '0'};">
-            <button type="button" id="btn-sync-drive-backup" class="btn btn-primary btn-sm">☁️ Backup &amp; Sync ke Google Drive Sekarang</button>
-            <button type="button" id="btn-migrate-local-to-cloud" class="btn btn-secondary btn-sm">📤 Unggah Data Lokal Browser Ini ke Server</button>
+            <button type="button" id="btn-sync-drive-backup" class="btn btn-primary btn-sm">${uiIcon('cloudUpload', 14)}<span>Backup &amp; Sync ke Google Drive Sekarang</span></button>
+            <button type="button" id="btn-migrate-local-to-cloud" class="btn btn-secondary btn-sm">${uiIcon('upload', 14)}<span>Unggah Data Lokal Browser Ini ke Server</span></button>
           </div>
 
           ${isAdmin ? `
             <details style="margin-top:8px; border-top:1px dashed #cbd5e1; padding-top:12px;">
-              <summary style="cursor:pointer; font-size:12.5px; font-weight:700; color:#334155;">⚙️ Pengaturan Bridge Apps Script Google Drive (Khusus Admin)</summary>
+              <summary style="cursor:pointer; font-size:12.5px; font-weight:700; color:#334155; display:inline-flex; align-items:center; gap:6px;">
+                ${uiIcon('settings', 14)}
+                <span>Pengaturan Bridge Apps Script Google Drive (Khusus Admin)</span>
+              </summary>
               <form id="form-configure-drive" style="display:grid; gap:10px; margin-top:12px;">
                 <div class="form-group" style="margin:0;">
                   <label style="font-size:12px;">URL Web App Google Apps Script (<code>/exec</code>)</label>
@@ -244,8 +273,8 @@ export function renderAccessControlView(container) {
                   <input type="password" id="input-drive-webhook-secret" class="form-control" placeholder="Kosongkan jika sudah terpasang di Environment Variable Netlify" />
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                  <button type="button" id="btn-copy-gas-incoming-access" class="btn btn-sm btn-secondary">📋 Salin Handler Surat Masuk (archive_incoming) ke Code.gs</button>
-                  <button type="submit" class="btn btn-sm btn-secondary">🔌 Simpan &amp; Uji Koneksi Drive</button>
+                  <button type="button" id="btn-copy-gas-incoming-access" class="btn btn-sm btn-secondary">${uiIcon('clipboard', 13)}<span>Salin Handler Surat Masuk (archive_incoming) ke Code.gs</span></button>
+                  <button type="submit" class="btn btn-sm btn-secondary">${uiIcon('plug', 13)}<span>Simpan &amp; Uji Koneksi Drive</span></button>
                 </div>
               </form>
             </details>
@@ -254,7 +283,10 @@ export function renderAccessControlView(container) {
 
         <!-- KARTU 4: UBAH PASSWORD AKUN SENDIRI -->
         <div class="ui-card" style="padding: 20px;">
-          <h3 style="margin:0 0 8px; font-size:15.5px; color:#0f172a;">🔑 Ubah Password / PIN Akun Anda (${escapeHtml(user?.username || '-')})</h3>
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom: 12px;">
+            <span class="view-section-icon">${uiIcon('key', 16)}</span>
+            <h3 style="margin:0; font-size:15.5px; color:#0f172a;">Ubah Password / PIN Akun Anda (${escapeHtml(user?.username || '-')})</h3>
+          </div>
           <form id="form-change-own-password" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap:10px; align-items:end;">
             <div class="form-group" style="margin:0;">
               <label style="font-size:12px;">Password Lama</label>
@@ -264,7 +296,7 @@ export function renderAccessControlView(container) {
               <label style="font-size:12px;">Password Baru (min. 6 karakter)</label>
               <input type="password" id="input-own-new-pass" class="form-control" minlength="6" required />
             </div>
-            <button type="submit" class="btn btn-secondary" style="height:38px;">Perbarui Password</button>
+            <button type="submit" class="btn btn-secondary" style="height:38px;">${uiIcon('check', 13)}<span>Perbarui Password</span></button>
           </form>
         </div>
 
@@ -276,7 +308,7 @@ export function renderAccessControlView(container) {
       <div class="modal-card" style="max-width:460px; width:92%;">
         <div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:10px; border-bottom:1px solid #e2e8f0; margin-bottom:14px;">
           <h3 id="modal-admin-user-title" style="margin:0; font-size:16px;">Tambah Akun Pengguna</h3>
-          <button type="button" id="btn-close-admin-user" class="btn btn-sm btn-secondary">&times;</button>
+          <button type="button" id="btn-close-admin-user" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 15)}</button>
         </div>
         <form id="form-admin-user" style="display:grid; gap:12px;">
           <input type="hidden" id="input-admin-user-id" value="" />
@@ -287,6 +319,14 @@ export function renderAccessControlView(container) {
           <div class="form-group" style="margin:0;">
             <label style="font-size:12px;">Nama Lengkap / Jabatan</label>
             <input type="text" id="input-admin-user-display" class="form-control" placeholder="mis: Operator TU 2" required />
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label style="font-size:12px;">Unit Sekolah</label>
+            <select id="select-admin-user-unit" class="form-control">
+              <option value="smk">SMK IT Al-Hawari</option>
+              <option value="smp">SMP IT Al-Hawari - Cibiuk</option>
+              <option value="all">Yayasan / Semua Unit (Khusus Admin)</option>
+            </select>
           </div>
           <div class="form-group" style="margin:0;">
             <label style="font-size:12px;">Peran Akses</label>
@@ -355,12 +395,12 @@ function bindAccessControlEvents(container) {
   container.querySelector('#btn-sync-drive-backup')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
-    btn.textContent = '⏳ Menyinkronkan ke Drive...';
+    btn.innerHTML = `${uiIcon('loader', 14, 'spin-icon')}<span>Menyinkronkan ke Drive...</span>`;
     try {
       const res = await syncDriveCloud({ mode: 'full_backup' });
       if (res.driveStatus) store.setAuthSessionData({ driveStatus: res.driveStatus });
       if (res.ok) {
-        showToast('✓ Backup lengkap & indeks Google Sheet berhasil disinkronkan ke Google Drive!', 'success');
+        showToast('Backup lengkap & indeks Google Sheet berhasil disinkronkan ke Google Drive!', 'success');
         renderAccessControlView(container);
       } else {
         showToast(res.error || 'Gagal menyinkronkan ke Google Drive.', 'warning');
@@ -368,7 +408,7 @@ function bindAccessControlEvents(container) {
     } finally {
       if (document.body.contains(btn)) {
         btn.disabled = false;
-        btn.textContent = '☁️ Backup & Sync ke Google Drive Sekarang';
+        btn.innerHTML = `${uiIcon('cloudUpload', 14)}<span>Backup &amp; Sync ke Google Drive Sekarang</span>`;
       }
     }
   });
@@ -386,7 +426,7 @@ function bindAccessControlEvents(container) {
     if (res.ok) {
       const boot = await fetchWorkspaceBootstrap();
       if (boot.ok) store.applyRemoteBootstrap(boot);
-      showToast(`✓ Data lokal digabungkan ke server (${res.counts?.outgoingLetters || 0} surat keluar, ${res.counts?.apiVault || 0} API AI).`, 'success');
+      showToast(`Data lokal digabungkan ke server (${res.counts?.outgoingLetters || 0} surat keluar, ${res.counts?.apiVault || 0} API AI).`, 'success');
       renderAccessControlView(container);
     } else {
       showToast(res.error || 'Gagal migrasi data lokal.', 'error');
@@ -397,9 +437,9 @@ function bindAccessControlEvents(container) {
   container.querySelector('#btn-copy-gas-incoming-access')?.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(APPS_SCRIPT_INCOMING_SNIPPET);
-      showToast('✓ Kode handler Google Apps Script Surat Masuk (archive_incoming) berhasil disalin!', 'success');
+      showToast('Kode handler Google Apps Script Surat Masuk (archive_incoming) berhasil disalin!', 'success');
     } catch {
-      showToast('Buka tab Surat Masuk → ⚙️ Script Drive untuk menyalin kode manual.', 'info');
+      showToast('Buka tab Surat Masuk → Script Drive untuk menyalin kode manual.', 'info');
     }
   });
 
@@ -442,6 +482,7 @@ function bindAccessControlEvents(container) {
   const idInput = container.querySelector('#input-admin-user-id');
   const usernameInput = container.querySelector('#input-admin-user-username');
   const displayInput = container.querySelector('#input-admin-user-display');
+  const unitSelect = container.querySelector('#select-admin-user-unit');
   const roleSelect = container.querySelector('#select-admin-user-role');
   const passInput = container.querySelector('#input-admin-user-pass');
   const passLabel = container.querySelector('#label-admin-user-pass');
@@ -457,6 +498,7 @@ function bindAccessControlEvents(container) {
     usernameInput.value = '';
     usernameInput.disabled = false;
     displayInput.value = '';
+    if (unitSelect) unitSelect.value = store.getActiveUnitId() || 'smk';
     roleSelect.value = 'tu';
     passInput.value = '';
     passInput.required = true;
@@ -473,6 +515,7 @@ function bindAccessControlEvents(container) {
       usernameInput.value = target.username;
       usernameInput.disabled = true;
       displayInput.value = target.displayName || '';
+      if (unitSelect) unitSelect.value = target.unitId || (target.role === 'admin' ? 'all' : 'smk');
       roleSelect.value = target.role || 'tu';
       passInput.value = '';
       passInput.required = false;
@@ -489,6 +532,7 @@ function bindAccessControlEvents(container) {
           op: 'update',
           targetUserId: targetId,
           displayName: displayInput.value.trim(),
+          assignedUnitId: unitSelect?.value || 'smk',
           role: roleSelect.value,
           ...(passInput.value.trim() ? { newPassword: passInput.value } : {})
         }
@@ -496,6 +540,7 @@ function bindAccessControlEvents(container) {
           op: 'create',
           username: usernameInput.value.trim(),
           displayName: displayInput.value.trim(),
+          assignedUnitId: unitSelect?.value || 'smk',
           role: roleSelect.value,
           password: passInput.value
         };

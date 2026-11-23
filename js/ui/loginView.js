@@ -4,11 +4,14 @@
 
 import { store } from '../state.js';
 import {
+  clearActiveWorkspaceUnitId,
   fetchWorkspaceBootstrap,
   loginWorkspace,
+  setActiveWorkspaceUnitId,
   setStoredAuthToken
 } from '../sync/workspaceClient.js';
 import { showToast } from './notification.js';
+import { uiIcon } from './icons.js';
 
 function escapeHtml(value) {
   const div = document.createElement('div');
@@ -29,22 +32,28 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
   overlay.innerHTML = `
     <div class="auth-gate-card">
       <div class="auth-gate-brand">
-        <img src="img/logo.png" alt="Logo SMK IT Al-Hawari" class="auth-gate-logo" />
+        <img src="img/logo.png" alt="Logo Al-Hawari" class="auth-gate-logo" />
         <div>
           <div class="auth-gate-title">AI DocBuilder Persuratan</div>
-          <div class="auth-gate-subtitle">SMK IT Al-Hawari • Portal Kerja &amp; Arsip Drive</div>
+          <div class="auth-gate-subtitle">Yayasan Nunuk Kartini Al-Irsyad • SMP &amp; SMK IT Al-Hawari</div>
         </div>
       </div>
 
       <div class="auth-role-hints" id="auth-role-hints">
         <button type="button" class="auth-role-pill active" data-username="admin">
-          <span>🛡️</span> Administrator
+          ${uiIcon('shieldCheck', 13)}<span>Admin Yayasan</span>
         </button>
         <button type="button" class="auth-role-pill" data-username="kepsek">
-          <span>🎓</span> Kepala Sekolah
+          ${uiIcon('school', 13)}<span>Kepsek SMK</span>
         </button>
         <button type="button" class="auth-role-pill" data-username="tu">
-          <span>📋</span> Tata Usaha (TU)
+          ${uiIcon('docClean', 13)}<span>TU SMK</span>
+        </button>
+        <button type="button" class="auth-role-pill" data-username="kepsek_smp">
+          ${uiIcon('school', 13)}<span>Kepsek SMP</span>
+        </button>
+        <button type="button" class="auth-role-pill" data-username="tu_smp">
+          ${uiIcon('docClean', 13)}<span>TU SMP</span>
         </button>
       </div>
 
@@ -54,7 +63,7 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
       <form id="form-workspace-login" class="auth-login-form">
         <div class="form-group">
           <label for="login-username">Username Akun</label>
-          <input type="text" id="login-username" class="form-control" value="admin" placeholder="Masukkan username (admin / kepsek / tu)" autocomplete="username" required />
+          <input type="text" id="login-username" class="form-control" value="admin" placeholder="Masukkan username (admin / kepsek / tu / kepsek_smp / tu_smp)" autocomplete="username" required />
         </div>
 
         <div class="form-group">
@@ -65,13 +74,13 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
           </div>
         </div>
 
-        <button type="submit" id="btn-login-submit" class="btn btn-primary" style="width: 100%; padding: 11px 16px; font-size: 14px; font-weight: 700;">
-          🔓 Masuk ke Sistem Persuratan
+        <button type="submit" id="btn-login-submit" class="btn btn-primary" style="width: 100%; padding: 11px 16px; font-size: 14px; font-weight: 700; display:inline-flex; align-items:center; justify-content:center; gap:8px;">
+          ${uiIcon('key', 15)}<span>Masuk ke Ruang Kerja Akun</span>
         </button>
       </form>
 
       <div class="auth-gate-footer">
-        <div>🔒 Terlindungi kontrol akses berbasis peran (Admin / Kepsek / TU) &amp; sinkron cloud.</div>
+        <div>${uiIcon('lock', 12)} Setiap akun &amp; unit sekolah (SMP / SMK) memiliki ruang kerja &amp; percakapan AI terpisah.</div>
         <div>Scan QR Verifikasi keaslian surat tetap terbuka publik lewat tautan <code>?v=...</code></div>
       </div>
     </div>
@@ -110,9 +119,10 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
 
     errorBox.classList.add('hidden');
     submitBtn.disabled = true;
-    submitBtn.textContent = '⏳ Memverifikasi akun & menyinkronkan data...';
+    submitBtn.textContent = 'Memverifikasi akun & menyinkronkan ruang kerja...';
 
     try {
+      clearActiveWorkspaceUnitId();
       const loginRes = await loginWorkspace({ username, password });
       if (!loginRes.ok || !loginRes.token) {
         errorBox.textContent = loginRes.error || 'Gagal masuk. Periksa kembali username dan password.';
@@ -120,14 +130,17 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
         return;
       }
 
+      const initialUnitId = loginRes.unitId || (loginRes.user?.unitId === 'smp' ? 'smp' : 'smk');
       setStoredAuthToken(loginRes.token);
+      setActiveWorkspaceUnitId(initialUnitId);
       store.setAuthSessionData({
         user: loginRes.user,
+        unitId: initialUnitId,
         permissions: loginRes.permissions,
         driveStatus: loginRes.driveStatus
       });
 
-      const bootRes = await fetchWorkspaceBootstrap();
+      const bootRes = await fetchWorkspaceBootstrap(initialUnitId);
       if (bootRes.ok) {
         store.applyRemoteBootstrap(bootRes);
       }
@@ -140,7 +153,7 @@ export function renderLoginView(rootContainer, { onAuthenticated, statusMessage 
     } finally {
       if (document.body.contains(submitBtn)) {
         submitBtn.disabled = false;
-        submitBtn.textContent = '🔓 Masuk ke Sistem Persuratan';
+        submitBtn.innerHTML = `${uiIcon('key', 15)}<span>Masuk ke Ruang Kerja Akun</span>`;
       }
     }
   });

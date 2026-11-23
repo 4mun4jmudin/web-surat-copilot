@@ -3,7 +3,7 @@
  * Menyediakan caching offline untuk antarmuka, aset Word (.docx) generator, dan pustaka lokal.
  */
 
-const CACHE_NAME = 'ai-docbuilder-pwa-v31-20261121';
+const CACHE_NAME = 'ai-docbuilder-pwa-v42-20261123';
 
 const PRECACHE_ASSETS = [
   './',
@@ -38,6 +38,7 @@ const PRECACHE_ASSETS = [
   './js/sync/workspaceClient.js',
   './js/sync/liveSync.js',
   './js/ai/client.js',
+  './js/ai/chatEngine.js',
   './js/ai/knowledgeBase.js',
   './js/ai/prompts.js',
   './js/ai/surgicalEdit.js',
@@ -59,13 +60,16 @@ const PRECACHE_ASSETS = [
   './js/letters/incoming.js',
   './js/letters/numbering.js',
   './js/letters/schoolProfile.js',
+  './js/letters/smartNaming.js',
   './js/letters/verification.js',
+  './js/letters/wordFormat.js',
   './js/model/sample.js',
   './js/model/schema.js',
   './js/ui/accApprovalView.js',
   './js/ui/accQueueWidget.js',
   './js/ui/accessControlView.js',
   './js/ui/aiView.js',
+  './js/ui/aiChatWorkspace.js',
   './js/ui/consistencyView.js',
   './js/ui/editor.js',
   './js/ui/icons.js',

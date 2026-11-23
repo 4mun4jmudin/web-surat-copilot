@@ -4,22 +4,42 @@
  * Gudang Galeri Kop Surat, Skala Zoom Kanvas, dan Riwayat Undo/Redo.
  */
 
-import { DEFAULT_SCHOOL_PROFILE, normalizeSchoolProfileNaming, normalizeSmkText } from './letters/schoolProfile.js';
+import {
+  DEFAULT_SCHOOL_PROFILE,
+  adaptDocumentModelForUnit,
+  adaptTextForSchoolUnit,
+  getDefaultSchoolProfileForUnit,
+  getSchoolCodeFromProfile,
+  normalizeSchoolProfileNaming,
+  normalizeSmkText,
+  normalizeUnitId,
+  resolveDocumentSchoolProfile,
+  resolveSchoolProfileForUnit
+} from './letters/schoolProfile.js';
 import { suratKeteranganTemplate } from './letters/templates/suratKeterangan.js';
 import { buildSuratTugasSppdDocModel } from './letters/templates/suratTugasSppd.js';
 import { selectRelevantAiReferences } from './ai/knowledgeBase.js';
-import { DEFAULT_KOP_GALLERY, DEFAULT_KOP_DATA_URL } from './letters/defaultKop.js';
+import { DEFAULT_KOP_GALLERY, DEFAULT_KOP_DATA_URL, getDefaultKopGalleryForUnit } from './letters/defaultKop.js';
 import { detectLetterTypeCode, formatSequenceNumber, toRomanMonth, buildOrderedNomorSurat, LETTER_TYPE_CODES } from './letters/numbering.js';
 import { formatIncomingCode, getNextIncomingSequence, sortIncomingLetters } from './letters/incoming.js';
+import { PAGE_NUMBERING_DEFAULT, normalizePageSetupOptions } from './letters/wordFormat.js';
+import {
+  createChatSession,
+  createChatMessage,
+  deriveChatTitleFromMessage
+} from './ai/chatEngine.js';
 import { DEFAULT_ACCESS_PERMISSIONS } from './auth/permissions.js';
 import {
   clearStoredAuthToken,
+  getActiveWorkspaceUnitId,
   getStoredAuthToken,
-  saveWorkspaceStatePatch
+  savePrivateWorkspaceCloud,
+  saveWorkspaceStatePatch,
+  setActiveWorkspaceUnitId
 } from './sync/workspaceClient.js';
 
 const DB_NAME = 'ai_school_doc_builder_db';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 const STORE_PROJECTS = 'projects';
 const STORE_SCHOOL = 'school_profile';
 const STORE_AGENDA = 'agenda_book';
@@ -29,6 +49,10 @@ const STORE_LETTER_VAULT = 'letter_vault';
 const STORE_OUTGOING_LETTERS = 'outgoing_letters';
 const STORE_INCOMING_LETTERS = 'incoming_letters';
 const STORE_INCOMING_FILES = 'incoming_files';
+const STORE_CHAT_SESSIONS = 'chat_sessions';
+const CHAT_SESSIONS_LS_KEY = 'ai_chat_sessions_v1';
+const ACTIVE_CHAT_LS_KEY = 'ai_active_chat_id_v1';
+const CHAT_AUTO_APPLY_LS_KEY = 'ai_chat_auto_apply_v1';
 
 // Nilai awal form surat keterangan (SMK IT Al-Hawari)
 const INITIAL_FORM_DATA = {
@@ -96,9 +120,9 @@ export const DEFAULT_LETTER_VAULT = [
     nomorSurat: '800 / 042 / ST.SMKITA / XI / 2026',
     tanggalSurat: '10 November 2026',
     category: 'Surat Tugas',
-    targetPerson: 'Dian Nurhadian, S.Pd. & Tim Guru Kejuruan',
+    targetPerson: 'Dian Nurhamdani, S.Pd. & Tim Guru Kejuruan',
     perihal: 'Penugasan Pelatihan Implementasi Kurikulum Merdeka',
-    summary: 'Menugaskan Kepala Sekolah dan guru kejuruan Multimedia dan ATPH mengikuti Bimbingan Teknis Implementasi Kurikulum Merdeka di Balai Penjaminan Mutu Pendidikan (BPMP).',
+    summary: 'Menugaskan Kepala Sekolah dan guru kejuruan mengikuti Bimbingan Teknis Implementasi Kurikulum Merdeka di Balai Penjaminan Mutu Pendidikan (BPMP).',
     isAiReference: true,
     isMasterTemplate: false,
     isLockedTemplate: false,
@@ -144,13 +168,26 @@ export const DEFAULT_LETTER_VAULT = [
       tujuanLokasi: 'DRAGON MOTION PICTURE ASIA',
       tempatTiba: 'Dragon Motion Picture',
       maksudSppd: 'Penjemputan siswa kelas 12 Multimedia ke tempat PKL',
-      kendaraan: 'Mobil',
+      Kendaraan: 'Mobil',
       kendaraanSingkat: 'Roda 4',
       lamaHari: '1'
     }, DEFAULT_SCHOOL_PROFILE, { paperSize: 'f4' }),
     createdAt: '2026-11-18T08:00:00Z'
   }
 ];
+
+function buildDefaultVaultForUnit(unitId = 'smk') {
+  const unit = normalizeUnitId(unitId);
+  const rawList = JSON.parse(JSON.stringify(DEFAULT_LETTER_VAULT));
+  if (unit === 'smk') return rawList;
+  return rawList.map(item => ({
+    ...item,
+    nomorSurat: adaptTextForSchoolUnit(item.nomorSurat || '', unit).replace(/\b421\.3\b/g, '421.2'),
+    targetPerson: adaptTextForSchoolUnit(item.targetPerson || '', unit).replace(/Tim Guru Kejuruan/gi, 'Tim Guru SMP'),
+    summary: adaptTextForSchoolUnit(item.summary || '', unit),
+    ...(item.document ? { document: adaptDocumentModelForUnit(item.document, unit) } : {})
+  }));
+}
 
 // Kunci AI Bawaan Sistem (Fallback otomatis bila pengguna belum mengisi API Key sendiri)
 const SYSTEM_API_SEEDS = {
@@ -283,6 +320,21 @@ class StateStore {
       initialVault[0].apiKey = legacyKey;
     }
 
+    let savedChatSessions = [];
+    let savedActiveChatId = '';
+    let savedChatAutoApply = false;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const rawChats = localStorage.getItem(CHAT_SESSIONS_LS_KEY);
+        if (rawChats) {
+          const parsedChats = JSON.parse(rawChats);
+          if (Array.isArray(parsedChats)) savedChatSessions = parsedChats;
+        }
+        savedActiveChatId = localStorage.getItem(ACTIVE_CHAT_LS_KEY) || '';
+        savedChatAutoApply = localStorage.getItem(CHAT_AUTO_APPLY_LS_KEY) === 'true';
+      } catch (e) {}
+    }
+
     this.state = {
       activeTab: 'letter',
       schoolProfile: initialSchool,
@@ -303,10 +355,14 @@ class StateStore {
       activeSmartVaultId: null,
       outgoingLetters: [],
       incomingLetters: [],
+      chatSessions: savedChatSessions,
+      activeChatId: savedActiveChatId,
+      chatAutoApply: savedChatAutoApply,
       smartDocument: null,
       activeUploadedDocx: null,
       pendingKepsekRevision: null,
       authUser: null,
+      activeUnitId: typeof getActiveWorkspaceUnitId === 'function' ? getActiveWorkspaceUnitId() : 'smk',
       authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
       driveStatus: {
         configured: false,
@@ -319,16 +375,53 @@ class StateStore {
       },
       managedUsers: [],
       cloudSyncState: 'local',
+      privateSyncState: 'local',
       cloudLastSyncAt: '',
       syncRev: 1
     };
 
     this.cloudSyncQueue = {};
     this.cloudSyncTimer = null;
+    this.privateSyncTimer = null;
     this.suppressCloudSync = false;
 
     this.db = null;
     this.initIndexedDb();
+  }
+
+  getActiveUnitId() {
+    return normalizeUnitId(this.state.activeUnitId || 'smk');
+  }
+
+  getPrivateStorageScope() {
+    const unit = this.getActiveUnitId();
+    const uid = this.state.authUser?.id || '';
+    return uid ? `u_${unit}__usr_${uid}` : `u_${unit}__guest`;
+  }
+
+  _unitKey(baseKey) {
+    return `${baseKey}__u_${this.getActiveUnitId()}`;
+  }
+
+  _projectKey(baseKey) {
+    return `${baseKey}__${this.getPrivateStorageScope()}`;
+  }
+
+  _getChatStorageKeys() {
+    const uid = this.state.authUser?.id || '';
+    if (!uid) {
+      return {
+        sessions: CHAT_SESSIONS_LS_KEY,
+        activeId: ACTIVE_CHAT_LS_KEY,
+        autoApply: CHAT_AUTO_APPLY_LS_KEY
+      };
+    }
+    const scope = this.getPrivateStorageScope();
+    return {
+      sessions: `ai_chat_sessions_v2__${scope}`,
+      activeId: `ai_active_chat_id_v2__${scope}`,
+      autoApply: `ai_chat_auto_apply_v2__${scope}`
+    };
   }
 
   getState() {
@@ -365,28 +458,47 @@ class StateStore {
     this.notify();
 
     if (nextState.document) {
-      this.saveToIndexedDb(STORE_PROJECTS, 'active_document', this.state.document);
+      this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_document'), this.state.document);
     }
-    if (nextState.smartDocument) {
-      this.saveToIndexedDb(STORE_PROJECTS, 'active_smart_document', this.state.smartDocument);
+    if (nextState.smartDocument !== undefined) {
+      this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_smart_document'), this.state.smartDocument);
     }
     if (nextState.schoolProfile) {
-      this.saveToIndexedDb(STORE_SCHOOL, 'profile', this.state.schoolProfile);
+      this.saveToIndexedDb(STORE_SCHOOL, this._unitKey('profile'), this.state.schoolProfile);
     }
     if (nextState.agendaBook) {
-      this.saveToIndexedDb(STORE_AGENDA, 'agenda_list', this.state.agendaBook);
+      this.saveToIndexedDb(STORE_AGENDA, this._unitKey('agenda_list'), this.state.agendaBook);
     }
     if (nextState.apiVault) {
       this.saveToIndexedDb(STORE_API_VAULT, 'vault_list', this.state.apiVault);
     }
     if (nextState.kopGallery) {
-      this.saveToIndexedDb(STORE_KOP_GALLERY, 'gallery_list', this.state.kopGallery);
+      this.saveToIndexedDb(STORE_KOP_GALLERY, this._unitKey('gallery_list'), this.state.kopGallery);
+    }
+
+    const touchedPrivate = (
+      nextState.document !== undefined ||
+      nextState.smartDocument !== undefined ||
+      nextState.chatSessions !== undefined ||
+      nextState.activeChatId !== undefined ||
+      nextState.chatAutoApply !== undefined ||
+      nextState.letterOptions !== undefined ||
+      nextState.activeVaultId !== undefined ||
+      nextState.activeSmartVaultId !== undefined
+    );
+    if (touchedPrivate && !this.suppressCloudSync && this.state.authUser?.id && getStoredAuthToken()) {
+      this.queuePrivateWorkspaceSync(false);
     }
   }
 
   // --- PEMBARUAN PROFIL SEKOLAH ---
   getSchoolProfile() {
     return this.state.schoolProfile || DEFAULT_SCHOOL_PROFILE;
+  }
+
+  getEffectiveSchoolForDocument(docOrItem = null) {
+    const targetDoc = docOrItem || this.state.document || this.state.smartDocument?.pendingDocModel || this.state.smartDocument;
+    return resolveDocumentSchoolProfile(targetDoc, this.getSchoolProfile(), this.state.kopGallery || []);
   }
 
   updateSchoolProfile(newProfile) {
@@ -410,16 +522,23 @@ class StateStore {
   }
 
   saveSchoolProfile(profile) {
-    this.saveToIndexedDb(STORE_SCHOOL, 'profile', profile);
+    this.saveToIndexedDb(STORE_SCHOOL, this._unitKey('profile'), profile);
   }
 
   saveKopGallery(gallery) {
-    this.saveToIndexedDb(STORE_KOP_GALLERY, 'gallery_list', gallery);
+    this.saveToIndexedDb(STORE_KOP_GALLERY, this._unitKey('gallery_list'), gallery);
   }
 
-  setAuthSessionData({ user = null, permissions = null, driveStatus = null, users = null } = {}) {
+  setAuthSessionData({ user = null, permissions = null, driveStatus = null, users = null, unitId = '' } = {}) {
     const patch = {};
     if (user !== undefined) patch.authUser = user;
+    const resolvedUnit = unitId
+      || (user?.unitId === 'smp' ? 'smp' : (user?.unitId === 'smk' ? 'smk' : (user?.defaultUnit || '')));
+    if (resolvedUnit) {
+      const cleanUnit = normalizeUnitId(resolvedUnit);
+      patch.activeUnitId = cleanUnit;
+      setActiveWorkspaceUnitId(cleanUnit);
+    }
     if (permissions) patch.authPermissions = { ...DEFAULT_ACCESS_PERMISSIONS, ...permissions };
     if (driveStatus) patch.driveStatus = { ...this.state.driveStatus, ...driveStatus };
     if (Array.isArray(users)) patch.managedUsers = users;
@@ -433,12 +552,36 @@ class StateStore {
       clearTimeout(this.cloudSyncTimer);
       this.cloudSyncTimer = null;
     }
-    this.setState({
-      authUser: null,
-      authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
-      managedUsers: [],
-      cloudSyncState: 'local'
-    }, false);
+    if (this.privateSyncTimer) {
+      clearTimeout(this.privateSyncTimer);
+      this.privateSyncTimer = null;
+    }
+    this.undoStack = [];
+    this.redoStack = [];
+    const defaultSchool = getDefaultSchoolProfileForUnit(this.getActiveUnitId());
+    this.suppressCloudSync = true;
+    try {
+      this.setState({
+        authUser: null,
+        authPermissions: { ...DEFAULT_ACCESS_PERMISSIONS },
+        managedUsers: [],
+        cloudSyncState: 'local',
+        privateSyncState: 'local',
+        chatSessions: [],
+        activeChatId: '',
+        chatAutoApply: false,
+        smartDocument: null,
+        activeUploadedDocx: null,
+        activeVaultId: null,
+        activeSmartVaultId: null,
+        outgoingLetters: [],
+        incomingLetters: [],
+        pendingKepsekRevision: null,
+        document: createEmptyDocumentModel(defaultSchool, this.getLetterOptions())
+      }, false);
+    } finally {
+      this.suppressCloudSync = false;
+    }
   }
 
   mergeApiVaultWithRemote(localVault = [], remoteVaultObj = null) {
@@ -477,54 +620,124 @@ class StateStore {
   applyRemoteBootstrap(payload = {}) {
     if (!payload || !payload.ok) return;
     this.suppressCloudSync = true;
+    this.undoStack = [];
+    this.redoStack = [];
     try {
       const ws = payload.workspace || {};
+      const resolvedUser = payload.user || this.state.authUser;
+      const unitId = normalizeUnitId(
+        payload.unitId || ws.unitId || (resolvedUser?.unitId === 'smp' ? 'smp' : (resolvedUser?.defaultUnit || this.state.activeUnitId || 'smk'))
+      );
+      setActiveWorkspaceUnitId(unitId);
+
+      const defaultSchool = getDefaultSchoolProfileForUnit(unitId);
+      const normalizedSchool = normalizeSchoolProfileNaming({
+        ...defaultSchool,
+        ...(ws.schoolProfile || {}),
+        unitId
+      });
+
+      const resolvedGallery = (Array.isArray(ws.kopGallery) && ws.kopGallery.length > 0)
+        ? ws.kopGallery.map(k => (unitId === 'smk' ? {
+            ...k,
+            name: normalizeSmkText(k.name),
+            description: normalizeSmkText(k.description),
+            dataUrl: typeof k.dataUrl === 'string' && k.dataUrl.startsWith('data:image/svg+xml')
+              ? k.dataUrl.replace(/SMKS(?=(%20|\s))/g, 'SMK')
+              : k.dataUrl
+          } : { ...k }))
+        : getDefaultKopGalleryForUnit(unitId);
+
+      const resolvedVault = (Array.isArray(ws.letterVault) && ws.letterVault.length > 0)
+        ? ws.letterVault
+        : buildDefaultVaultForUnit(unitId);
+
+      // Pulihkan Ruang Kerja Pribadi & Chat AI eksklusif untuk akun + unit ini saja
+      const priv = payload.privateWorkspace && typeof payload.privateWorkspace === 'object'
+        ? payload.privateWorkspace
+        : null;
+
+      let scopedOpts = priv?.letterOptions
+        ? normalizePageSetupOptions(priv.letterOptions)
+        : null;
+      let scopedChatSessions = Array.isArray(priv?.chatSessions) ? priv.chatSessions : null;
+      let scopedActiveChatId = priv?.activeChatId !== undefined ? String(priv.activeChatId || '') : null;
+      let scopedAutoApply = priv?.chatAutoApply !== undefined ? Boolean(priv.chatAutoApply) : null;
+
+      if (typeof localStorage !== 'undefined' && resolvedUser?.id) {
+        const scope = `u_${unitId}__usr_${resolvedUser.id}`;
+        try {
+          if (!scopedOpts) {
+            const rawOpt = localStorage.getItem(`letter_options__${scope}`);
+            if (rawOpt) scopedOpts = normalizePageSetupOptions(JSON.parse(rawOpt));
+          }
+          if (!scopedChatSessions) {
+            const rawChats = localStorage.getItem(`ai_chat_sessions_v2__${scope}`);
+            if (rawChats) {
+              const parsedChats = JSON.parse(rawChats);
+              if (Array.isArray(parsedChats)) scopedChatSessions = parsedChats;
+            }
+          }
+          if (scopedActiveChatId === null) {
+            scopedActiveChatId = localStorage.getItem(`ai_active_chat_id_v2__${scope}`) || '';
+          }
+          if (scopedAutoApply === null) {
+            scopedAutoApply = localStorage.getItem(`ai_chat_auto_apply_v2__${scope}`) === 'true';
+          }
+        } catch {}
+      }
+
+      const finalOpts = scopedOpts || {
+        paperSize: 'a4',
+        orientation: 'portrait',
+        margins: { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 },
+        fontFamily: 'Times New Roman',
+        fontSize: '12',
+        lineSpacing: '1.15',
+        paragraphSpacing: '6',
+        showKop: true,
+        pageNumbering: { ...PAGE_NUMBERING_DEFAULT }
+      };
+
+      const nextDoc = priv?.document && typeof priv.document === 'object'
+        ? (!priv.document.isBlankDraft
+            ? {
+                ...priv.document,
+                blocks: (priv.document.blocks || []).map(b => (
+                  b?.type === 'letterKop' ? { ...b, school: normalizedSchool, image: normalizedSchool.kopImage || b.image } : b
+                ))
+              }
+            : createEmptyDocumentModel(normalizedSchool, finalOpts))
+        : createEmptyDocumentModel(normalizedSchool, finalOpts);
+
       const nextPatch = {
-        authUser: payload.user || this.state.authUser,
+        authUser: resolvedUser,
+        activeUnitId: unitId,
         authPermissions: payload.permissions ? { ...DEFAULT_ACCESS_PERMISSIONS, ...payload.permissions } : this.state.authPermissions,
         driveStatus: payload.driveStatus ? { ...this.state.driveStatus, ...payload.driveStatus } : this.state.driveStatus,
         cloudSyncState: 'synced',
+        privateSyncState: priv ? 'synced' : 'local',
         cloudLastSyncAt: payload.syncedAt || new Date().toISOString(),
-        syncRev: Number(payload.syncRev || payload.rev) || this.state.syncRev || 1
+        syncRev: Number(payload.syncRev || payload.rev) || this.state.syncRev || 1,
+        schoolProfile: normalizedSchool,
+        kopGallery: resolvedGallery,
+        letterVault: resolvedVault,
+        agendaBook: Array.isArray(ws.agendaBook) ? ws.agendaBook : [],
+        outgoingLetters: Array.isArray(ws.outgoingLetters) ? ws.outgoingLetters : [],
+        incomingLetters: Array.isArray(ws.incomingLetters) ? ws.incomingLetters : [],
+        letterOptions: finalOpts,
+        document: nextDoc,
+        smartDocument: priv?.smartDocument || null,
+        activeUploadedDocx: null,
+        activeVaultId: priv?.activeVaultId || null,
+        activeSmartVaultId: priv?.activeSmartVaultId || null,
+        pendingKepsekRevision: null,
+        chatSessions: scopedChatSessions || [],
+        activeChatId: scopedActiveChatId || '',
+        chatAutoApply: Boolean(scopedAutoApply)
       };
       if (Array.isArray(payload.users)) {
         nextPatch.managedUsers = payload.users;
-      }
-      if (ws.schoolProfile) {
-        const normalizedSchool = normalizeSchoolProfileNaming(ws.schoolProfile);
-        nextPatch.schoolProfile = normalizedSchool;
-        if (!this.state.document || this.state.document.isBlankDraft) {
-          nextPatch.document = createEmptyDocumentModel(normalizedSchool, this.getLetterOptions());
-        } else {
-          nextPatch.document = {
-            ...this.state.document,
-            blocks: (this.state.document.blocks || []).map(b => (
-              b.type === 'letterKop' ? { ...b, school: normalizedSchool, image: normalizedSchool.kopImage || b.image } : b
-            ))
-          };
-        }
-      }
-      if (Array.isArray(ws.kopGallery) && ws.kopGallery.length > 0) {
-        nextPatch.kopGallery = ws.kopGallery.map(k => ({
-          ...k,
-          name: normalizeSmkText(k.name),
-          description: normalizeSmkText(k.description),
-          dataUrl: typeof k.dataUrl === 'string' && k.dataUrl.startsWith('data:image/svg+xml')
-            ? k.dataUrl.replace(/SMKS(?=(%20|\s))/g, 'SMK')
-            : k.dataUrl
-        }));
-      }
-      if (Array.isArray(ws.letterVault) && ws.letterVault.length > 0) {
-        nextPatch.letterVault = ws.letterVault;
-      }
-      if (Array.isArray(ws.agendaBook)) {
-        nextPatch.agendaBook = ws.agendaBook;
-      }
-      if (Array.isArray(ws.outgoingLetters)) {
-        nextPatch.outgoingLetters = ws.outgoingLetters;
-      }
-      if (Array.isArray(ws.incomingLetters)) {
-        nextPatch.incomingLetters = ws.incomingLetters;
       }
       if (ws.apiVault?.items) {
         const mergedApi = this.mergeApiVaultWithRemote(this.state.apiVault, ws.apiVault);
@@ -533,15 +746,21 @@ class StateStore {
       }
 
       this.setState(nextPatch, false);
-      if (nextPatch.outgoingLetters) {
-        this.saveOutgoingLetters(nextPatch.outgoingLetters);
-        this.syncActiveDocumentNumberToNextOutgoing(false);
+      this.saveOutgoingLetters(nextPatch.outgoingLetters);
+      this.saveIncomingLetters(nextPatch.incomingLetters);
+      this.saveLetterVault(nextPatch.letterVault);
+      this._persistChatSessions(nextPatch.chatSessions, nextPatch.activeChatId);
+      if (typeof localStorage !== 'undefined' && resolvedUser?.id) {
+        try {
+          const scope = `u_${unitId}__usr_${resolvedUser.id}`;
+          localStorage.setItem(`letter_options__${scope}`, JSON.stringify(finalOpts));
+        } catch {}
       }
-      if (nextPatch.incomingLetters) {
-        this.saveIncomingLetters(nextPatch.incomingLetters);
-      }
-      if (nextPatch.letterVault) {
-        this.saveLetterVault(nextPatch.letterVault);
+      this.syncActiveDocumentNumberToNextOutgoing(false);
+
+      // Bila cloud pribadi masih kosong, cek cadangan lokal akun+unit ini di IndexedDB
+      if (!priv && resolvedUser?.id) {
+        this._restorePrivateWorkspaceFromIdbIfEmpty(unitId, resolvedUser.id, normalizedSchool, finalOpts);
       }
     } finally {
       this.suppressCloudSync = false;
@@ -549,10 +768,13 @@ class StateStore {
   }
 
   /**
-   * Menerapkan perubahan live SPA dari polling latar belakang tanpa mereset kanvas/draf yang sedang diketik.
+   * Menerapkan perubahan ringan ACC Kepala Sekolah / TU saja tanpa menyentuh ruang kerja, kanvas, profil, maupun chat AI user lain.
    */
   applyLiveWorkspaceDelta(payload = {}) {
     if (!payload || !payload.ok || !payload.changed) return false;
+    if (payload.unitId && normalizeUnitId(payload.unitId) !== this.getActiveUnitId()) {
+      return false;
+    }
     this.suppressCloudSync = true;
     try {
       const ws = payload.workspace || {};
@@ -565,46 +787,24 @@ class StateStore {
       if (payload.permissions) {
         nextPatch.authPermissions = { ...DEFAULT_ACCESS_PERMISSIONS, ...payload.permissions };
       }
-      if (payload.driveStatus) {
-        nextPatch.driveStatus = { ...this.state.driveStatus, ...payload.driveStatus };
-      }
       if (Array.isArray(ws.outgoingLetters)) {
         nextPatch.outgoingLetters = ws.outgoingLetters;
       }
       if (Array.isArray(ws.incomingLetters)) {
         nextPatch.incomingLetters = ws.incomingLetters;
       }
-      if (Array.isArray(ws.letterVault)) {
-        nextPatch.letterVault = ws.letterVault;
-      }
-      if (Array.isArray(ws.kopGallery)) {
-        nextPatch.kopGallery = ws.kopGallery.map(k => ({
-          ...k,
-          name: normalizeSmkText(k.name),
-          description: normalizeSmkText(k.description)
-        }));
-      }
-      if (ws.schoolProfile) {
-        const normalizedSchool = normalizeSchoolProfileNaming(ws.schoolProfile);
-        nextPatch.schoolProfile = normalizedSchool;
-        if (this.state.document?.isBlankDraft) {
-          nextPatch.document = createEmptyDocumentModel(normalizedSchool, this.getLetterOptions());
-        }
-      }
-      if (ws.apiVault?.items) {
-        const mergedApi = this.mergeApiVaultWithRemote(this.state.apiVault, ws.apiVault);
-        nextPatch.apiVault = mergedApi.items;
-        nextPatch.activeApiId = mergedApi.activeId;
-      }
 
       this.setState(nextPatch, false);
+
+      if (nextPatch.incomingLetters) {
+        this.saveIncomingLetters(nextPatch.incomingLetters);
+      }
 
       if (nextPatch.outgoingLetters) {
         this.saveOutgoingLetters(nextPatch.outgoingLetters);
         let verificationUpdated = false;
-        // Sinkronkan hanya metadata .verification dokumen aktif jika surat tersebut baru di-ACC / ditolak (tanpa mereset ketikan/kursor)
         const stdOutId = this.state.document?.verification?.outgoingId;
-        if (stdOutId && !nextPatch.document) {
+        if (stdOutId) {
           const matchedStd = nextPatch.outgoingLetters.find(x => x.id === stdOutId);
           if (matchedStd && (
             matchedStd.verificationStatus !== this.state.document.verification.verificationStatus ||
@@ -646,15 +846,6 @@ class StateStore {
         if (verificationUpdated && typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
           window.dispatchEvent(new CustomEvent('docbuilder:verification-updated'));
         }
-        if (this.state.document?.isBlankDraft) {
-          this.syncActiveDocumentNumberToNextOutgoing(false);
-        }
-      }
-      if (nextPatch.letterVault) {
-        this.saveLetterVault(nextPatch.letterVault);
-      }
-      if (nextPatch.incomingLetters) {
-        this.saveIncomingLetters(nextPatch.incomingLetters);
       }
       return true;
     } finally {
@@ -664,6 +855,9 @@ class StateStore {
 
   upsertOutgoingLetterFromCloud(item) {
     if (!item?.id) return item;
+    if (item.unitId && normalizeUnitId(item.unitId) !== this.getActiveUnitId()) {
+      return item;
+    }
     const list = this.getOutgoingLetters();
     const exists = list.some(x => x.id === item.id);
     const updated = (exists ? list.map(x => (x.id === item.id ? item : x)) : [item, ...list]).sort((a, b) => {
@@ -674,6 +868,70 @@ class StateStore {
     this.setState({ outgoingLetters: updated }, false);
     this.saveOutgoingLetters(updated);
     return item;
+  }
+
+  buildPrivateWorkspaceSnapshot() {
+    const cleanChats = (Array.isArray(this.state.chatSessions) ? this.state.chatSessions : []).slice(0, 60).map((s) => ({
+      ...s,
+      messages: (s.messages || []).map((m) => ({
+        ...m,
+        attachments: (m.attachments || []).map(({ base64Data, dataUrl, ...meta }) => meta)
+      }))
+    }));
+    return {
+      unitId: this.getActiveUnitId(),
+      document: this.state.document || null,
+      smartDocument: this.state.smartDocument || null,
+      currentLetterForm: this.state.currentLetterForm || null,
+      letterOptions: this.getLetterOptions(),
+      activeVaultId: this.state.activeVaultId || null,
+      activeSmartVaultId: this.state.activeSmartVaultId || null,
+      chatSessions: cleanChats,
+      activeChatId: this.state.activeChatId || '',
+      chatAutoApply: Boolean(this.state.chatAutoApply),
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  queuePrivateWorkspaceSync(immediate = false) {
+    if (this.suppressCloudSync || typeof window === 'undefined') return;
+    if (!this.state.authUser?.id || !getStoredAuthToken()) return;
+    if (this.privateSyncTimer) clearTimeout(this.privateSyncTimer);
+    if (immediate) {
+      this.flushPrivateWorkspaceNow();
+      return;
+    }
+    this.privateSyncTimer = setTimeout(() => {
+      this.flushPrivateWorkspaceNow();
+    }, 1600);
+  }
+
+  async flushPrivateWorkspaceNow() {
+    if (this.privateSyncTimer) {
+      clearTimeout(this.privateSyncTimer);
+      this.privateSyncTimer = null;
+    }
+    if (!this.state.authUser?.id || !getStoredAuthToken()) return false;
+    const unitId = this.getActiveUnitId();
+    const snapshot = this.buildPrivateWorkspaceSnapshot();
+    this.setState({ privateSyncState: 'saving' }, false);
+    const res = await savePrivateWorkspaceCloud(snapshot, unitId);
+    if (res.ok) {
+      this.suppressCloudSync = true;
+      try {
+        this.setState({ privateSyncState: 'saved' }, false);
+      } finally {
+        this.suppressCloudSync = false;
+      }
+      return true;
+    }
+    this.suppressCloudSync = true;
+    try {
+      this.setState({ privateSyncState: 'error' }, false);
+    } finally {
+      this.suppressCloudSync = false;
+    }
+    return false;
   }
 
   queueCloudSyncPatch(patch = {}, immediate = false) {
@@ -698,7 +956,7 @@ class StateStore {
     if (Object.keys(payload).length === 0 || !getStoredAuthToken()) return;
 
     this.setState({ cloudSyncState: 'syncing' }, false);
-    const res = await saveWorkspaceStatePatch(payload);
+    const res = await saveWorkspaceStatePatch({ ...payload, activeUnitId: this.getActiveUnitId() });
     if (res.ok) {
       this.setState({
         cloudSyncState: 'synced',
@@ -721,20 +979,24 @@ class StateStore {
   }
 
   getLetterOptions() {
-    return this.state.letterOptions || {
-      paperSize: 'a4',
-      orientation: 'portrait',
-      margins: { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 },
-      fontFamily: 'Times New Roman',
-      fontSize: '12',
-      lineSpacing: '1.15',
-      paragraphSpacing: '10',
-      showKop: true
+    const cur = this.state.letterOptions || {};
+    return {
+      paperSize: cur.paperSize || 'a4',
+      orientation: cur.orientation || 'portrait',
+      margins: cur.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 },
+      fontFamily: cur.fontFamily || 'Times New Roman',
+      fontSize: String(cur.fontSize || '12'),
+      lineSpacing: String(cur.lineSpacing || '1.15'),
+      paragraphSpacing: String(cur.paragraphSpacing || '6'),
+      showKop: cur.showKop !== undefined ? Boolean(cur.showKop) : true,
+      pageNumbering: cur.pageNumbering && typeof cur.pageNumbering === 'object'
+        ? { ...PAGE_NUMBERING_DEFAULT, ...cur.pageNumbering }
+        : { ...PAGE_NUMBERING_DEFAULT }
     };
   }
 
   updateLetterOptions(opts) {
-    const updatedOpts = { ...this.getLetterOptions(), ...opts };
+    const updatedOpts = normalizePageSetupOptions(opts, this.getLetterOptions());
     let currentDoc = this.state.document;
     if (currentDoc) {
       currentDoc = {
@@ -742,7 +1004,8 @@ class StateStore {
         profile: updatedOpts.paperSize === 'f4' ? 'suratDinasF4' : 'suratDinas',
         customMargins: updatedOpts.margins,
         paperSize: updatedOpts.paperSize,
-        orientation: updatedOpts.orientation || 'portrait'
+        orientation: updatedOpts.orientation || 'portrait',
+        pageSetup: updatedOpts
       };
     } else {
       currentDoc = this.regenerateActiveDocument(this.state.currentLetterForm, this.state.schoolProfile, updatedOpts);
@@ -755,7 +1018,9 @@ class StateStore {
 
     if (typeof localStorage !== 'undefined') {
       try {
-        localStorage.setItem('letter_options', JSON.stringify(updatedOpts));
+        const uid = this.state.authUser?.id || '';
+        const optKey = uid ? `letter_options__${this.getPrivateStorageScope()}` : 'letter_options';
+        localStorage.setItem(optKey, JSON.stringify(updatedOpts));
       } catch (e) {}
     }
   }
@@ -981,7 +1246,7 @@ class StateStore {
       ? { activeSmartVaultId: id || null }
       : { activeVaultId: id || null };
     this.setState(patch, false);
-    this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+    this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_vault_refs'), {
       activeVaultId: this.state.activeVaultId || null,
       activeSmartVaultId: this.state.activeSmartVaultId || null
     });
@@ -1169,18 +1434,61 @@ class StateStore {
     );
   }
 
-  loadLetterToCanvas(id) {
+  loadLetterToCanvas(id, { targetUnitId = '' } = {}) {
     const vault = this.getLetterVault();
     const target = vault.find(v => v.id === id);
     if (!target) return false;
 
+    const effectiveUnit = targetUnitId ? normalizeUnitId(targetUnitId) : this.getActiveUnitId();
+    const targetSchool = resolveSchoolProfileForUnit(effectiveUnit, this.state.schoolProfile, this.state.kopGallery || []);
+
     if (target.uploadedDocx) {
+      const clonedUpload = JSON.parse(JSON.stringify(target.uploadedDocx));
+      if (targetUnitId) {
+        if (clonedUpload.parsedMeta) {
+          clonedUpload.parsedMeta = {
+            ...clonedUpload.parsedMeta,
+            title: adaptTextForSchoolUnit(clonedUpload.parsedMeta.title || '', effectiveUnit),
+            nomor: adaptTextForSchoolUnit(clonedUpload.parsedMeta.nomor || '', effectiveUnit),
+            signer: targetSchool.principalName
+          };
+        }
+        if (Array.isArray(clonedUpload.paragraphs)) {
+          clonedUpload.paragraphs = clonedUpload.paragraphs.map(p => ({
+            ...p,
+            currentText: adaptTextForSchoolUnit(p.currentText ?? p.originalText ?? '', effectiveUnit)
+          }));
+        }
+        if (clonedUpload.structured?.signature) {
+          clonedUpload.structured.signature = {
+            ...clonedUpload.structured.signature,
+            title: targetSchool.principalTitle || 'Kepala Sekolah',
+            signer: targetSchool.principalName,
+            nip: targetSchool.principalNip || '-'
+          };
+        }
+        clonedUpload.targetUnitId = effectiveUnit;
+        clonedUpload.targetSchoolProfile = targetSchool;
+      }
+
+      const nextDoc = target.document
+        ? adaptDocumentModelForUnit(target.document, effectiveUnit, {
+            activeSchoolProfile: this.state.schoolProfile,
+            kopGallery: this.state.kopGallery || []
+          })
+        : (this.state.document && targetUnitId
+            ? adaptDocumentModelForUnit(this.state.document, effectiveUnit, {
+                activeSchoolProfile: this.state.schoolProfile,
+                kopGallery: this.state.kopGallery || []
+              })
+            : this.state.document);
+
       this.setState({
-        activeUploadedDocx: target.uploadedDocx,
+        activeUploadedDocx: clonedUpload,
         activeVaultId: id,
-        document: target.document || this.state.document
+        document: nextDoc
       }, true);
-      this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+      this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_vault_refs'), {
         activeVaultId: id,
         activeSmartVaultId: this.state.activeSmartVaultId || null
       });
@@ -1188,17 +1496,21 @@ class StateStore {
     }
 
     if (target.document) {
-      const cloned = JSON.parse(JSON.stringify(target.document));
-      delete cloned.verification;
+      const titleRaw = (target.document.blocks || []).find(b => b.type === 'letterTitle');
+      const nextInfo = titleRaw
+        ? this.getNextFormattedOutgoingNomor({
+            title: titleRaw.title || target.title,
+            perihal: target.perihal,
+            currentNomor: titleRaw.nomor || target.nomorSurat,
+            schoolProfile: targetSchool
+          })
+        : null;
+      const cloned = adaptDocumentModelForUnit(target.document, effectiveUnit, {
+        activeSchoolProfile: this.state.schoolProfile,
+        kopGallery: this.state.kopGallery || [],
+        nextNomorSurat: nextInfo?.nomorSurat || ''
+      });
       const titleBlock = (cloned.blocks || []).find(b => b.type === 'letterTitle');
-      if (titleBlock) {
-        const nextInfo = this.getNextFormattedOutgoingNomor({
-          title: titleBlock.title || target.title,
-          perihal: target.perihal,
-          currentNomor: titleBlock.nomor || target.nomorSurat
-        });
-        titleBlock.nomor = `Nomor: ${nextInfo.nomorSurat}`;
-      }
       if (target.preferSmartCanvas || this.isSmartTemplateDocument(cloned)) {
         this.setState({
           activeUploadedDocx: null,
@@ -1207,13 +1519,15 @@ class StateStore {
           smartDocument: {
             pages: [],
             pendingDocModel: cloned,
+            targetUnitId: effectiveUnit,
+            schoolProfile: targetSchool,
             meta: {
               title: cloned.meta?.title || target.title || 'Dokumen Word Pro',
               nomorSurat: titleBlock ? (titleBlock.nomor || '').replace(/^Nomor\s*:\s*/i, '').trim() : (target.nomorSurat || '')
             }
           }
         }, true);
-        this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+        this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_vault_refs'), {
           activeVaultId: this.state.activeVaultId || null,
           activeSmartVaultId: id
         });
@@ -1224,24 +1538,37 @@ class StateStore {
         activeVaultId: id,
         document: cloned
       }, true);
-      this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+      this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_vault_refs'), {
         activeVaultId: id,
         activeSmartVaultId: this.state.activeSmartVaultId || null
       });
       return true;
     }
 
-    // Jika surat tidak memiliki model docx terpisah, adaptasi ke dokumen kanvas saat ini
-    const doc = JSON.parse(JSON.stringify(this.state.document || {}));
-    if (!doc.metadata) doc.metadata = {};
-    doc.metadata.title = target.title || 'SURAT DINAS';
-    doc.metadata.nomorSurat = target.nomorSurat || '';
+    // Jika surat tidak memiliki model docx terpisah, adaptasi ke dokumen kanvas saat ini dengan identitas & Kepsek unit terpilih
+    const adaptedDoc = adaptDocumentModelForUnit(
+      JSON.parse(JSON.stringify(this.state.document || createEmptyDocumentModel(targetSchool, this.getLetterOptions()))),
+      effectiveUnit,
+      {
+        activeSchoolProfile: this.state.schoolProfile,
+        kopGallery: this.state.kopGallery || [],
+        nextNomorSurat: this.getNextFormattedOutgoingNomor({
+          title: target.title,
+          perihal: target.perihal,
+          currentNomor: target.nomorSurat,
+          schoolProfile: targetSchool
+        }).nomorSurat
+      }
+    );
+    if (!adaptedDoc.metadata) adaptedDoc.metadata = {};
+    adaptedDoc.metadata.title = adaptTextForSchoolUnit(target.title || 'SURAT DINAS', effectiveUnit);
+    adaptedDoc.metadata.nomorSurat = adaptTextForSchoolUnit(target.nomorSurat || '', effectiveUnit);
     this.setState({
       activeUploadedDocx: null,
       activeVaultId: id,
-      document: doc
+      document: adaptedDoc
     }, true);
-    this.saveToIndexedDb(STORE_PROJECTS, 'active_vault_refs', {
+    this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_vault_refs'), {
       activeVaultId: id,
       activeSmartVaultId: this.state.activeSmartVaultId || null
     });
@@ -1257,7 +1584,7 @@ class StateStore {
   }
 
   saveLetterVault(vaultList) {
-    this.saveToIndexedDb(STORE_LETTER_VAULT, 'vault_list', vaultList);
+    this.saveToIndexedDb(STORE_LETTER_VAULT, this._unitKey('vault_list'), vaultList);
   }
 
   // --- SURAT KELUAR (ARSIP TETAP / TERKUNCI DENGAN PENOMORAN BERURUTAN) ---
@@ -1274,16 +1601,19 @@ class StateStore {
     return maxSeq + 1;
   }
 
-  getNextFormattedOutgoingNomor({ title = '', perihal = '', currentNomor = '', forcedTypeCode = '', date = new Date() } = {}) {
+  getNextFormattedOutgoingNomor({ title = '', perihal = '', currentNomor = '', forcedTypeCode = '', date = new Date(), schoolProfile = null, unitId = '' } = {}) {
     const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
     const year = d.getFullYear().toString();
     const seqNum = this.getNextOutgoingSequence(year);
     const typeCode = (forcedTypeCode || detectLetterTypeCode(`${title} ${perihal} ${currentNomor}`)).toUpperCase();
+    const effectiveProfile = schoolProfile || this.state.schoolProfile;
+    const schoolCode = getSchoolCodeFromProfile(effectiveProfile, unitId || effectiveProfile?.unitId || this.getActiveUnitId());
     return {
       sequenceNumber: seqNum,
       typeCode,
       year,
-      nomorSurat: buildOrderedNomorSurat({ typeCode, sequenceNumber: seqNum, date: d })
+      schoolCode,
+      nomorSurat: buildOrderedNomorSurat({ typeCode, sequenceNumber: seqNum, schoolCode, date: d })
     };
   }
 
@@ -1513,7 +1843,7 @@ class StateStore {
   }
 
   saveOutgoingLetters(list) {
-    this.saveToIndexedDb(STORE_OUTGOING_LETTERS, 'outgoing_list', list);
+    this.saveToIndexedDb(STORE_OUTGOING_LETTERS, this._unitKey('outgoing_list'), list);
   }
 
   /**
@@ -1567,7 +1897,7 @@ class StateStore {
   }
 
   saveIncomingLetters(list) {
-    this.saveToIndexedDb(STORE_INCOMING_LETTERS, 'incoming_list', Array.isArray(list) ? list : []);
+    this.saveToIndexedDb(STORE_INCOMING_LETTERS, this._unitKey('incoming_list'), Array.isArray(list) ? list : []);
   }
 
   upsertIncomingLetterLocal(entry = {}) {
@@ -1625,6 +1955,179 @@ class StateStore {
     });
   }
 
+  // --- PERCAKAPAN AI COPILOT MULTI-TURN (TERISOLASI PER AKUN + UNIT) ---
+  _persistChatSessions(sessions = this.state.chatSessions, activeId = this.state.activeChatId) {
+    const cleanList = Array.isArray(sessions) ? sessions.slice(0, 60) : [];
+    const keys = this._getChatStorageKeys();
+    this.saveToIndexedDb(STORE_CHAT_SESSIONS, this._projectKey('sessions_list'), cleanList);
+    this.saveToIndexedDb(STORE_CHAT_SESSIONS, this._projectKey('active_chat_id'), activeId || '');
+    if (typeof localStorage !== 'undefined') {
+      try {
+        // Simpan tanpa data base64 lampiran besar di localStorage agar kuota 5MB aman
+        const compactForLs = cleanList.map((s) => ({
+          ...s,
+          messages: (s.messages || []).map((m) => ({
+            ...m,
+            attachments: (m.attachments || []).map(({ base64Data, dataUrl, ...meta }) => meta)
+          }))
+        }));
+        localStorage.setItem(keys.sessions, JSON.stringify(compactForLs));
+        localStorage.setItem(keys.activeId, activeId || '');
+      } catch (e) {}
+    }
+  }
+
+  getChatSessions() {
+    return Array.isArray(this.state.chatSessions) ? this.state.chatSessions : [];
+  }
+
+  getActiveChatId() {
+    return this.state.activeChatId || '';
+  }
+
+  getActiveChatSession() {
+    const sessions = this.getChatSessions();
+    let active = sessions.find(s => s.id === this.state.activeChatId && !s.trashed);
+    if (!active) {
+      active = sessions.find(s => !s.trashed && !s.archived);
+    }
+    if (!active) {
+      return this.createChatSession();
+    }
+    if (active.id !== this.state.activeChatId) {
+      this.setState({ activeChatId: active.id }, false);
+      this._persistChatSessions(sessions, active.id);
+    }
+    return active;
+  }
+
+  createChatSession({ title = 'Percakapan Baru', targetWorkspace = 'smart-canvas', activeModelId = '' } = {}) {
+    const sessions = this.getChatSessions();
+    const newSession = createChatSession({
+      title,
+      targetWorkspace,
+      activeModelId: activeModelId || this.state.activeApiId || ''
+    });
+    const nextList = [newSession, ...sessions].slice(0, 60);
+    this.setState({ chatSessions: nextList, activeChatId: newSession.id }, false);
+    this._persistChatSessions(nextList, newSession.id);
+    return newSession;
+  }
+
+  setActiveChatSession(sessionId) {
+    const exists = this.getChatSessions().find(s => s.id === sessionId);
+    if (!exists) return null;
+    this.setState({ activeChatId: sessionId }, false);
+    this._persistChatSessions(this.getChatSessions(), sessionId);
+    return exists;
+  }
+
+  updateChatSession(sessionId, patch = {}) {
+    const sessions = this.getChatSessions();
+    let updatedSession = null;
+    const nextList = sessions.map((s) => {
+      if (s.id !== sessionId) return s;
+      updatedSession = {
+        ...s,
+        ...patch,
+        updatedAt: new Date().toISOString()
+      };
+      return updatedSession;
+    });
+    if (!updatedSession) return null;
+    this.setState({ chatSessions: nextList }, false);
+    this._persistChatSessions(nextList, this.state.activeChatId);
+    return updatedSession;
+  }
+
+  appendChatMessage(sessionId, messageInput = {}) {
+    let sessions = this.getChatSessions();
+    let target = sessions.find(s => s.id === sessionId);
+    if (!target) {
+      target = this.createChatSession({ targetWorkspace: 'smart-canvas' });
+      sessions = this.getChatSessions();
+    }
+    const msg = createChatMessage(messageInput);
+    const shouldRetitle = msg.role === 'user' && (target.isAutoTitle !== false || target.title === 'Percakapan Baru') && (target.messages || []).length === 0;
+    const nextTitle = shouldRetitle ? deriveChatTitleFromMessage(msg.text) : target.title;
+    const nowIso = new Date().toISOString();
+    const nextList = sessions.map((s) => {
+      if (s.id !== target.id) return s;
+      return {
+        ...s,
+        title: nextTitle,
+        updatedAt: nowIso,
+        messages: [...(s.messages || []), msg]
+      };
+    });
+    this.setState({ chatSessions: nextList, activeChatId: target.id }, false);
+    this._persistChatSessions(nextList, target.id);
+    return msg;
+  }
+
+  updateChatMessage(sessionId, messageId, patch = {}) {
+    const sessions = this.getChatSessions();
+    const nextList = sessions.map((s) => {
+      if (s.id !== sessionId) return s;
+      return {
+        ...s,
+        messages: (s.messages || []).map(m => (m.id === messageId ? { ...m, ...patch } : m))
+      };
+    });
+    this.setState({ chatSessions: nextList }, false);
+    this._persistChatSessions(nextList, this.state.activeChatId);
+  }
+
+  togglePinChatSession(sessionId) {
+    const cur = this.getChatSessions().find(s => s.id === sessionId);
+    if (!cur) return null;
+    return this.updateChatSession(sessionId, { pinned: !cur.pinned, archived: false });
+  }
+
+  archiveChatSession(sessionId, archived = true) {
+    return this.updateChatSession(sessionId, { archived: Boolean(archived), pinned: false, trashed: false });
+  }
+
+  trashChatSession(sessionId, trashed = true) {
+    const updated = this.updateChatSession(sessionId, {
+      trashed: Boolean(trashed),
+      ...(trashed ? { pinned: false } : {})
+    });
+    if (trashed && this.state.activeChatId === sessionId) {
+      const nextActive = this.getChatSessions().find(s => !s.trashed && !s.archived && s.id !== sessionId);
+      if (nextActive) {
+        this.setActiveChatSession(nextActive.id);
+      }
+    }
+    return updated;
+  }
+
+  deleteChatSessionPermanent(sessionId) {
+    const nextList = this.getChatSessions().filter(s => s.id !== sessionId);
+    let nextActiveId = this.state.activeChatId;
+    if (nextActiveId === sessionId) {
+      nextActiveId = nextList.find(s => !s.trashed && !s.archived)?.id || '';
+    }
+    this.setState({ chatSessions: nextList, activeChatId: nextActiveId }, false);
+    this._persistChatSessions(nextList, nextActiveId);
+    return nextList;
+  }
+
+  getChatAutoApply() {
+    return Boolean(this.state.chatAutoApply);
+  }
+
+  setChatAutoApply(enabled) {
+    const val = Boolean(enabled);
+    this.setState({ chatAutoApply: val }, false);
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const keys = this._getChatStorageKeys();
+        localStorage.setItem(keys.autoApply, String(val));
+      } catch (e) {}
+    }
+  }
+
   // --- UNDO / REDO ---
   canUndo() { return this.undoStack.length > 0; }
   canRedo() { return this.redoStack.length > 0; }
@@ -1635,7 +2138,8 @@ class StateStore {
     this.redoStack.push(JSON.parse(JSON.stringify(this.state.document)));
     this.state = { ...this.state, document: prevDoc };
     this.notify();
-    this.saveToIndexedDb(STORE_PROJECTS, 'active_document', prevDoc);
+    this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_document'), prevDoc);
+    this.queuePrivateWorkspaceSync(false);
   }
 
   redo() {
@@ -1644,7 +2148,8 @@ class StateStore {
     this.undoStack.push(JSON.parse(JSON.stringify(this.state.document)));
     this.state = { ...this.state, document: nextDoc };
     this.notify();
-    this.saveToIndexedDb(STORE_PROJECTS, 'active_document', nextDoc);
+    this.saveToIndexedDb(STORE_PROJECTS, this._projectKey('active_document'), nextDoc);
+    this.queuePrivateWorkspaceSync(false);
   }
 
   // --- INDEXEDDB STORAGE ---
@@ -1681,6 +2186,9 @@ class StateStore {
       if (!db.objectStoreNames.contains(STORE_INCOMING_FILES)) {
         db.createObjectStore(STORE_INCOMING_FILES);
       }
+      if (!db.objectStoreNames.contains(STORE_CHAT_SESSIONS)) {
+        db.createObjectStore(STORE_CHAT_SESSIONS);
+      }
     };
     req.onsuccess = (e) => {
       this.db = e.target.result;
@@ -1702,26 +2210,89 @@ class StateStore {
     }
   }
 
+  readFromIndexedDb(storeName, key) {
+    return new Promise((resolve) => {
+      if (!this.db || !key) {
+        resolve(null);
+        return;
+      }
+      try {
+        const tx = this.db.transaction([storeName], 'readonly');
+        const req = tx.objectStore(storeName).get(key);
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  async _restorePrivateWorkspaceFromIdbIfEmpty(unitId, userId, schoolProfile, fallbackOpts) {
+    if (!this.db || !unitId || !userId) return;
+    const scope = `u_${normalizeUnitId(unitId)}__usr_${userId}`;
+    if (this.getPrivateStorageScope() !== scope) return;
+
+    const [docRec, smartRec, refsRec, chatsRec, activeChatRec] = await Promise.all([
+      this.readFromIndexedDb(STORE_PROJECTS, `active_document__${scope}`),
+      this.readFromIndexedDb(STORE_PROJECTS, `active_smart_document__${scope}`),
+      this.readFromIndexedDb(STORE_PROJECTS, `active_vault_refs__${scope}`),
+      this.readFromIndexedDb(STORE_CHAT_SESSIONS, `sessions_list__${scope}`),
+      this.readFromIndexedDb(STORE_CHAT_SESSIONS, `active_chat_id__${scope}`)
+    ]);
+
+    if (this.getPrivateStorageScope() !== scope) return;
+
+    const patch = {};
+    if (docRec && typeof docRec === 'object' && !docRec.isBlankDraft) {
+      patch.document = {
+        ...docRec,
+        blocks: (docRec.blocks || []).map(b => (
+          b?.type === 'letterKop' ? { ...b, school: schoolProfile, image: schoolProfile.kopImage || b.image } : b
+        ))
+      };
+    }
+    if (smartRec && Array.isArray(smartRec.pages)) {
+      patch.smartDocument = smartRec;
+    }
+    if (refsRec && typeof refsRec === 'object') {
+      patch.activeVaultId = refsRec.activeVaultId || null;
+      patch.activeSmartVaultId = refsRec.activeSmartVaultId || null;
+    }
+    if (Array.isArray(chatsRec) && chatsRec.length > 0 && (!this.state.chatSessions || this.state.chatSessions.length === 0)) {
+      patch.chatSessions = chatsRec;
+      if (typeof activeChatRec === 'string' && activeChatRec) {
+        patch.activeChatId = activeChatRec;
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      this.suppressCloudSync = true;
+      try {
+        this.setState(patch, false);
+      } finally {
+        this.suppressCloudSync = false;
+      }
+    }
+  }
+
   restoreFromIndexedDb() {
     if (!this.db) return;
+    // Jangan menimpa sesi akun cloud yang sudah ter-bootstrap
+    if (this.state.authUser?.id) return;
 
-    // 1. Pulihkan Profil Sekolah
+    const unitId = this.getActiveUnitId();
+    const uKey = (base) => `${base}__u_${unitId}`;
+    const pKey = (base) => `${base}__${this.getPrivateStorageScope()}`;
+
+    // 1. Pulihkan Profil Sekolah (offline fallback)
     try {
       const txSchool = this.db.transaction([STORE_SCHOOL], 'readonly');
       const storeSchool = txSchool.objectStore(STORE_SCHOOL);
-      const reqSchool = storeSchool.get('profile');
+      const reqSchool = storeSchool.get(uKey('profile'));
       reqSchool.onsuccess = () => {
-        if (reqSchool.result) {
-          let loadedSchool = normalizeSchoolProfileNaming(reqSchool.result);
-          // Migrasi otomatis jika profil sekolah di browser masih sekolah bawaan lama (Surabaya) atau kode surat lama
-          if (!loadedSchool.schoolName || loadedSchool.schoolName.includes('SURABAYA') || loadedSchool.principalName?.includes('Eko Wahyudi') || !loadedSchool.numberingPattern?.includes('SMKITA') || JSON.stringify(loadedSchool) !== JSON.stringify(reqSchool.result)) {
-            loadedSchool = normalizeSchoolProfileNaming({
-              ...JSON.parse(JSON.stringify(DEFAULT_SCHOOL_PROFILE)),
-              ...loadedSchool,
-              numberingPattern: '421.3/{urut}/SMKITA/{bulanRomawi}/{tahun}'
-            });
-            this.saveSchoolProfile(loadedSchool);
-          }
+        if (this.state.authUser?.id) return;
+        const found = reqSchool.result;
+        if (found) {
+          const loadedSchool = normalizeSchoolProfileNaming(found);
           this.setState({
             schoolProfile: loadedSchool,
             document: this.regenerateActiveDocument(this.state.currentLetterForm, loadedSchool, this.state.letterOptions)
@@ -1733,10 +2304,9 @@ class StateStore {
     // 2. Pulihkan Agenda Book
     try {
       const txAgenda = this.db.transaction([STORE_AGENDA], 'readonly');
-      const storeAgenda = txAgenda.objectStore(STORE_AGENDA);
-      const reqAgenda = storeAgenda.get('agenda_list');
+      const reqAgenda = txAgenda.objectStore(STORE_AGENDA).get(uKey('agenda_list'));
       reqAgenda.onsuccess = () => {
-        if (Array.isArray(reqAgenda.result)) {
+        if (!this.state.authUser?.id && Array.isArray(reqAgenda.result)) {
           this.setState({ agendaBook: reqAgenda.result }, false);
         }
       };
@@ -1745,11 +2315,10 @@ class StateStore {
     // 3. Pulihkan Gudang API (API Vault)
     try {
       const txVault = this.db.transaction([STORE_API_VAULT], 'readonly');
-      const storeVault = txVault.objectStore(STORE_API_VAULT);
-      const reqVault = storeVault.get('vault_list');
+      const reqVault = txVault.objectStore(STORE_API_VAULT).get('vault_list');
       reqVault.onsuccess = () => {
+        if (this.state.authUser?.id) return;
         if (Array.isArray(reqVault.result) && reqVault.result.length > 0) {
-          // Migrasi otomatis jika masih ada model Gemini/Groq versi usang yang tersimpan di IndexedDB browser
           const migratedVault = reqVault.result.map(entry => {
             if (entry.provider === 'gemini') {
               const m = (entry.model || '').toLowerCase();
@@ -1797,17 +2366,10 @@ class StateStore {
     // 4. Pulihkan Gudang Kop Surat (Kop Gallery)
     try {
       const txKop = this.db.transaction([STORE_KOP_GALLERY], 'readonly');
-      const storeKop = txKop.objectStore(STORE_KOP_GALLERY);
-      const reqKop = storeKop.get('gallery_list');
+      const reqKop = txKop.objectStore(STORE_KOP_GALLERY).get(uKey('gallery_list'));
       reqKop.onsuccess = () => {
-        if (Array.isArray(reqKop.result) && reqKop.result.length > 0) {
-          let loadedGallery = reqKop.result;
-          // Migrasi otomatis ke galeri SMK IT Al-Hawari jika masih galeri bawaan lama
-          if (loadedGallery.some(k => k.name?.includes('SURABAYA') || k.dataUrl?.includes('SURABAYA') || k.description?.includes('pemerintah provinsi dan dinas pendidikan dengan garis ganda') || k.name?.includes('SMKS') || k.dataUrl?.includes('SMKS'))) {
-            loadedGallery = JSON.parse(JSON.stringify(DEFAULT_KOP_GALLERY));
-            this.saveKopGallery(loadedGallery);
-          }
-          this.setState({ kopGallery: loadedGallery }, false);
+        if (!this.state.authUser?.id && Array.isArray(reqKop.result) && reqKop.result.length > 0) {
+          this.setState({ kopGallery: reqKop.result }, false);
         }
       };
     } catch (e) {}
@@ -1815,22 +2377,20 @@ class StateStore {
     // 5. Pulihkan Gudang Surat (Letter Vault)
     try {
       const txLetter = this.db.transaction([STORE_LETTER_VAULT], 'readonly');
-      const storeLetter = txLetter.objectStore(STORE_LETTER_VAULT);
-      const reqLetter = storeLetter.get('vault_list');
+      const reqLetter = txLetter.objectStore(STORE_LETTER_VAULT).get(uKey('vault_list'));
       reqLetter.onsuccess = () => {
-        if (Array.isArray(reqLetter.result) && reqLetter.result.length > 0) {
+        if (!this.state.authUser?.id && Array.isArray(reqLetter.result)) {
           this.setState({ letterVault: reqLetter.result }, false);
         }
       };
     } catch (e) {}
 
-    // 6. Pulihkan Buku Catatan Surat Keluar (Outgoing Letters - Terkunci)
+    // 6. Pulihkan Buku Catatan Surat Keluar
     try {
       const txOutgoing = this.db.transaction([STORE_OUTGOING_LETTERS], 'readonly');
-      const storeOutgoing = txOutgoing.objectStore(STORE_OUTGOING_LETTERS);
-      const reqOutgoing = storeOutgoing.get('outgoing_list');
+      const reqOutgoing = txOutgoing.objectStore(STORE_OUTGOING_LETTERS).get(uKey('outgoing_list'));
       reqOutgoing.onsuccess = () => {
-        if (Array.isArray(reqOutgoing.result)) {
+        if (!this.state.authUser?.id && Array.isArray(reqOutgoing.result)) {
           this.setState({ outgoingLetters: reqOutgoing.result }, false);
           this.syncActiveDocumentNumberToNextOutgoing(false);
         }
@@ -1840,10 +2400,9 @@ class StateStore {
     // 6b. Pulihkan Daftar Surat Masuk
     try {
       const txIncoming = this.db.transaction([STORE_INCOMING_LETTERS], 'readonly');
-      const storeIncoming = txIncoming.objectStore(STORE_INCOMING_LETTERS);
-      const reqIncoming = storeIncoming.get('incoming_list');
+      const reqIncoming = txIncoming.objectStore(STORE_INCOMING_LETTERS).get(uKey('incoming_list'));
       reqIncoming.onsuccess = () => {
-        if (Array.isArray(reqIncoming.result)) {
+        if (!this.state.authUser?.id && Array.isArray(reqIncoming.result)) {
           this.setState({ incomingLetters: sortIncomingLetters(reqIncoming.result, 'newest') }, false);
         }
       };
@@ -1852,19 +2411,37 @@ class StateStore {
     try {
       const txProjects = this.db.transaction([STORE_PROJECTS], 'readonly');
       const storeProjects = txProjects.objectStore(STORE_PROJECTS);
-      const reqSmart = storeProjects.get('active_smart_document');
+      const reqSmart = storeProjects.get(pKey('active_smart_document'));
       reqSmart.onsuccess = () => {
-        if (reqSmart.result && Array.isArray(reqSmart.result.pages)) {
+        if (!this.state.authUser?.id && reqSmart.result && Array.isArray(reqSmart.result.pages)) {
           this.setState({ smartDocument: reqSmart.result }, false);
         }
       };
-      const reqRefs = storeProjects.get('active_vault_refs');
+      const reqRefs = storeProjects.get(pKey('active_vault_refs'));
       reqRefs.onsuccess = () => {
-        if (reqRefs.result && typeof reqRefs.result === 'object') {
+        if (!this.state.authUser?.id && reqRefs.result && typeof reqRefs.result === 'object') {
           this.setState({
             activeVaultId: reqRefs.result.activeVaultId || null,
             activeSmartVaultId: reqRefs.result.activeSmartVaultId || null
           }, false);
+        }
+      };
+    } catch (e) {}
+
+    // 7. Pulihkan Riwayat Percakapan AI
+    try {
+      const txChat = this.db.transaction([STORE_CHAT_SESSIONS], 'readonly');
+      const storeChat = txChat.objectStore(STORE_CHAT_SESSIONS);
+      const reqList = storeChat.get(pKey('sessions_list'));
+      const reqActive = storeChat.get(pKey('active_chat_id'));
+      reqList.onsuccess = () => {
+        if (!this.state.authUser?.id && Array.isArray(reqList.result) && reqList.result.length > 0) {
+          this.setState({ chatSessions: reqList.result }, false);
+        }
+      };
+      reqActive.onsuccess = () => {
+        if (!this.state.authUser?.id && typeof reqActive.result === 'string' && reqActive.result) {
+          this.setState({ activeChatId: reqActive.result }, false);
         }
       };
     } catch (e) {}

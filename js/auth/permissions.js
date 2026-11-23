@@ -168,3 +168,14 @@ export function getPendingAccLetters(outgoingLetters = []) {
   if (!Array.isArray(outgoingLetters)) return [];
   return outgoingLetters.filter(item => item?.verificationStatus === 'pending_acc' || item?.accStatus === 'pending');
 }
+
+export function canSwitchUnits(user) {
+  if (!user || user.active === false) return false;
+  return String(user.unitId || '').toLowerCase() === 'all';
+}
+
+export function getUnitDisplayName(unitId = 'smk') {
+  return String(unitId || '').toLowerCase() === 'smp'
+    ? 'SMP IT Al-Hawari'
+    : 'SMK IT Al-Hawari';
+}

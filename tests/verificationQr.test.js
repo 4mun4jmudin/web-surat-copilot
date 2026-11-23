@@ -25,6 +25,7 @@ import {
   computePrintableDimsMm,
   normalizeQrPlacement,
   findPreferredSignatureQrPlacement,
+  calibratePlacementFromDom,
   buildFloatingQrElementHtml,
   buildFloatingQrContextMenuHtml,
   mountInteractiveFloatingQr
@@ -874,4 +875,179 @@ test('Interaksi Floating QR (Drag Bersih, Resize, Menu Klik Kanan MS Word, Linta
     globalThis.document = prevDoc;
     globalThis.getComputedStyle = prevGCS;
   }
+});
+
+test('Pratinjau Surat Keluar fallback otomatis saat smartPagesSnapshot kosong/rusak dan mendukung fallback uploadedDocx', () => {
+  const sppdDoc = buildSuratTugasSppdDocModel(
+    {
+      nomorSurat: '800/014/ST.SMKITA/XI/2026',
+      tujuanLokasi: 'Golden Tulip Essential Tangerang'
+    },
+    DEFAULT_SCHOOL_PROFILE,
+    { paperSize: 'f4' }
+  );
+
+  // 1. Jika smartPagesSnapshot punya halaman kosong namun documentSnapshot valid -> wajib fallback ke documentSnapshot
+  const emptySnapItem = {
+    id: 'out-empty-snap-reg',
+    sequenceNumber: 14,
+    typeCode: 'ST',
+    nomorSurat: '800/014/ST.SMKITA/XI/2026',
+    title: 'SURAT TUGAS',
+    recipientName: 'Umum',
+    tanggalSurat: '23 November 2026',
+    isVerifiedSah: true,
+    verificationStatus: 'sah',
+    qrDataUrl: 'data:image/png;base64,AA==',
+    documentSnapshot: sppdDoc,
+    smartPagesSnapshot: {
+      pages: [{ id: 'p1', html: '' }, { id: 'p2', html: '<p><br></p>' }],
+      letterOptions: { paperSize: 'f4', orientation: 'portrait', showKop: true }
+    }
+  };
+  const recoveredHtml = renderReadOnlyDocumentHtml(emptySnapItem, { signatureMode: 'auto', isForPrint: false });
+  assert.ok(recoveredHtml.includes('SURAT TUGAS'), 'Pratinjau tidak boleh putih kosong ketika smartPagesSnapshot kosong');
+  assert.ok(recoveredHtml.includes('Golden Tulip Essential Tangerang'), 'Isi documentSnapshot harus dirender saat snapshot halaman kosong');
+
+  // 2. Jika hanya ada uploadedDocx.paragraphs (tanpa smartPagesSnapshot & tanpa blocks) -> tetap tampil teks surat
+  const docxOnlyItem = {
+    id: 'out-docx-only-reg',
+    sequenceNumber: 15,
+    typeCode: 'KET',
+    nomorSurat: '421.3/015/KET.SMPITA/XI/2026',
+    title: 'SURAT KETERANGAN',
+    recipientName: 'Siswa SMP',
+    tanggalSurat: '23 November 2026',
+    uploadedDocx: {
+      paragraphs: [
+        { text: 'SURAT KETERANGAN AKTIF' },
+        { text: 'Nomor: 421.3/015/KET.SMPITA/XI/2026' },
+        { text: 'Kepala SMP IT Al-Hawari menerangkan bahwa siswa terkait aktif.' }
+      ]
+    }
+  };
+  const docxFallbackHtml = renderReadOnlyDocumentHtml(docxOnlyItem, { signatureMode: 'manual', isForPrint: false });
+  assert.ok(docxFallbackHtml.includes('SURAT KETERANGAN AKTIF'));
+  assert.ok(docxFallbackHtml.includes('Kepala SMP IT Al-Hawari menerangkan'));
+});
+
+test('Deteksi Otomatis Area Tanda Tangan QR menolak tabel Kendaraan/SPPD Hal 3 & tabel Identitas, namun menghormati customPositioned', () => {
+  // 1. Model bebas 3 halaman: Hal 0 tabel identitas (Nama: Yangyang Budiman / Jabatan: Kepala Sekolah),
+  //    Hal 1 blok TTD bebas Kepala Sekolah + Yangyang Budiman, Hal 2 tabel Keterangan I/II (Mobil / Umum)
+  const customThreePageDoc = {
+    blocks: [
+      {
+        type: 'paragraph',
+        runs: [{ text: 'Yang bertanda tangan di bawah ini, Kepala SMP IT Al-Hawari menerangkan bahwa:' }]
+      },
+      {
+        type: 'table',
+        rows: [
+          [{ text: 'Nama' }, { text: ': Yangyang Budiman, S.Pd.' }],
+          [{ text: 'Jabatan' }, { text: ': Kepala Sekolah' }]
+        ]
+      },
+      { type: 'pageBreak' },
+      { type: 'paragraph', text: 'Demikian surat tugas ini dibuat untuk dilaksanakan.' },
+      { type: 'paragraph', text: 'Kepala SMP IT Al-Hawari', alignment: 'right' },
+      { type: 'paragraph', text: 'Yangyang Budiman, S.Pd.', alignment: 'right' },
+      { type: 'pageBreak' },
+      {
+        type: 'table',
+        rows: [
+          [{ text: 'Tempat kedudukan pegawai' }, { text: 'Dengan Kendaraan' }, { text: 'Tanda Tangan' }],
+          [{ text: 'SMKS IT Al-Hawari' }, { text: 'Mobil / Umum' }, { text: '' }]
+        ]
+      }
+    ]
+  };
+
+  const modelPlacement = findPreferredSignatureQrPlacement(
+    customThreePageDoc,
+    3,
+    { principalName: 'Yangyang Budiman, S.Pd.' }
+  );
+  assert.equal(
+    modelPlacement.pageIndex,
+    1,
+    'Deteksi otomatis wajib memilih Halaman 2 (indeks 1) tempat TTD Kepala Sekolah, bukan Hal 1 identitas atau Hal 3 Mobil/Umum'
+  );
+
+  // 2. Uji DOM calibratePlacementFromDom ketika rawPlacement awal salah di halaman 3 (index 2, Mobil / Umum) dengan customPositioned: false
+  const env = createMiniDomEnv();
+  const makeMiniStage = (pageIdx, htmlStr) => {
+    const sheet = new env.MiniElement('div');
+    sheet.className = 'smart-paper-sheet';
+    const page = new env.MiniElement('div');
+    page.className = 'smart-editable-page';
+    page.innerHTML = htmlStr;
+    sheet.appendChild(page);
+
+    const stage = new env.MiniElement('div');
+    stage.className = 'floating-qr-stage';
+    stage.dataset.qrPage = String(pageIdx);
+    stage._rect = { left: 40, top: 40 + pageIdx * 900, right: 640, bottom: 840 + pageIdx * 900, width: 600, height: 800 };
+    stage.offsetWidth = 600;
+    sheet.appendChild(stage);
+    env.docBody.appendChild(sheet);
+    return stage;
+  };
+
+  const st0 = makeMiniStage(0, `
+    <p></p>
+    <table><tbody><tr><td></td><td></td></tr></tbody></table>
+    <table><tbody><tr><td></td><td></td></tr></tbody></table>
+  `);
+  const p0Tables = st0.parentNode.querySelectorAll('table');
+  const idTable = p0Tables[0];
+  const idTds = idTable.querySelectorAll('td');
+  idTds[0].textContent = 'Nama';
+  idTds[1].textContent = ': Dian Nurhamdani, S.Pd.';
+  idTds.forEach((td) => { td._rect = { left: 80, top: 200, right: 300, bottom: 230, width: 220, height: 30 }; td.parentElement = td.parentNode; });
+  idTable.textContent = 'Nama : Dian Nurhamdani, S.Pd.';
+
+  const sigTable = p0Tables[1];
+  const p0Tds = sigTable.querySelectorAll('td');
+  p0Tds[0].textContent = '';
+  p0Tds[0]._rect = { left: 60, top: 440, right: 350, bottom: 560, width: 290, height: 120 };
+  p0Tds[0].parentElement = p0Tds[0].parentNode;
+  const sigTd = p0Tds[1];
+  sigTd.textContent = 'Garut, 23 November 2026 Kepala SMKS IT Al-Hawari Dian Nurhamdani, S.Pd.';
+  sigTd.childNodes = [
+    { nodeType: 3, nodeValue: 'Garut, 23 November 2026', parentElement: { tagName: 'TD', getBoundingClientRect: () => ({ left: 380, top: 445, right: 590, bottom: 463, width: 210, height: 18 }) } },
+    { nodeType: 3, nodeValue: 'Kepala SMKS IT Al-Hawari', parentElement: { tagName: 'TD', getBoundingClientRect: () => ({ left: 380, top: 465, right: 590, bottom: 483, width: 210, height: 18 }) } },
+    { nodeType: 3, nodeValue: 'Dian Nurhamdani, S.Pd.', parentElement: { tagName: 'STRONG', getBoundingClientRect: () => ({ left: 380, top: 535, right: 590, bottom: 553, width: 210, height: 18 }) } }
+  ];
+  sigTd._rect = { left: 360, top: 440, right: 610, bottom: 560, width: 250, height: 120 };
+  sigTd.parentElement = sigTd.parentNode;
+  sigTable.textContent = sigTd.textContent;
+
+  const st1 = makeMiniStage(1, '<p></p>');
+  const st2 = makeMiniStage(2, '<table><tbody><tr><td></td><td></td><td></td></tr></tbody></table>');
+  const p2Table = st2.parentNode.querySelector('table');
+  const p2Tds = st2.parentNode.querySelectorAll('td');
+  ['Dengan Kendaraan', 'Mobil / Umum', 'Tanda Tangan'].forEach((label, i) => {
+    p2Tds[i].textContent = label;
+    p2Tds[i].parentElement = p2Tds[i].parentNode;
+    p2Tds[i]._rect = { left: 60 + i * 160, top: 2100, right: 200 + i * 160, bottom: 2300, width: 140, height: 200 };
+  });
+  p2Table.textContent = 'Dengan Kendaraan Mobil / Umum Tanda Tangan';
+
+  const recalibrated = calibratePlacementFromDom(
+    [st0, st1, st2],
+    { pageIndex: 2, xPct: 68, yPct: 64, sizePx: 86, customPositioned: false },
+    86,
+    { school: { principalName: 'Dian Nurhamdani, S.Pd.' } }
+  );
+  assert.equal(recalibrated.pageIndex, 0, 'Kalibrasi otomatis wajib menarik QR dari halaman 3 (Mobil/Umum) ke sel TTD halaman 1');
+
+  // Jika user sudah menggeser manual (customPositioned: true), posisi manual TIDAK boleh ditimpa
+  const manualPinned = calibratePlacementFromDom(
+    [st0, st1, st2],
+    { pageIndex: 2, xPct: 55, yPct: 45, sizePx: 86, customPositioned: true },
+    86,
+    { school: { principalName: 'Dian Nurhamdani, S.Pd.' } }
+  );
+  assert.equal(manualPinned.pageIndex, 2);
+  assert.equal(manualPinned.xPct, 55);
 });

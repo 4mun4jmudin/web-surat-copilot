@@ -108,3 +108,68 @@ export const DEFAULT_KOP_GALLERY = [
     description: 'Kop resmi kegiatan siswa, perlombaan sekolah, class meeting, dan surat mandat delegasi OSIS.'
   }
 ];
+
+export const DEFAULT_SMP_KOP_SVG = createKopSvg({
+  provinsi: 'PEMERINTAH KABUPATEN GARUT',
+  dinas: 'DINAS PENDIDIKAN',
+  cabang: 'YAYASAN NUNUK KARTINI AL-IRSYAD',
+  sekolah: 'SMP IT AL-HAWARI - CIBIUK',
+  alamat: 'Jl. Raya Cibiuk, Desa Cipareuan, Kec. Cibiuk, Kab. Garut 44193',
+  kontak: 'Website: al-hawari.sch.id | Email: smpit_alhawari09@yahoo.co.id | WA: +62 895-3266-12155',
+  primaryColor: '#0f766e',
+  secondaryColor: '#ca8a04',
+  badgeText: 'SMP'
+});
+export const DEFAULT_SMP_KOP_DATA_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEFAULT_SMP_KOP_SVG)}`;
+
+export const DEFAULT_SMP_KOP_GALLERY = [
+  {
+    id: 'kop-smp-dinas',
+    name: 'Kop Resmi SMP IT Al-Hawari - Cibiuk (Dinas Pendidikan)',
+    category: 'Resmi Dinas',
+    isDefault: true,
+    dataUrl: DEFAULT_SMP_KOP_DATA_URL,
+    description: 'Format baku Pemerintah Kabupaten Garut, Dinas Pendidikan, dan SMP IT Al-Hawari - Cibiuk (NPSN 20279898).'
+  },
+  {
+    id: 'kop-smp-yayasan',
+    name: 'Kop Yayasan Nunuk Kartini Al-Irsyad (Unit SMP)',
+    category: 'Yayasan',
+    isDefault: false,
+    dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(createKopSvg({
+      provinsi: 'YAYASAN NUNUK KARTINI AL-IRSYAD',
+      dinas: 'NPYP: AA2743 • SK OPERASIONAL: 425.11/794-DISDIK',
+      cabang: '',
+      sekolah: 'SMP IT AL-HAWARI - CIBIUK',
+      badgeText: 'YYS',
+      primaryColor: '#0f766e',
+      secondaryColor: '#f59e0b',
+      alamat: 'Jl. Raya Cibiuk, Desa Cipareuan, Kec. Cibiuk, Garut 44193',
+      kontak: 'Website: al-hawari.sch.id | Email: smpit_alhawari09@yahoo.co.id | WA: +62 895-3266-12155'
+    }))}`,
+    description: 'Kop resmi naungan Yayasan Nunuk Kartini Al-Irsyad untuk unit SMP IT Al-Hawari.'
+  },
+  {
+    id: 'kop-smp-osis',
+    name: 'Kop OSIS SMP IT Al-Hawari - Cibiuk',
+    category: 'Kesiswaan',
+    isDefault: false,
+    dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(createKopSvg({
+      provinsi: 'ORGANISASI SISWA INTRA SEKOLAH (OSIS)',
+      dinas: 'SMP IT AL-HAWARI - CIBIUK',
+      cabang: '',
+      sekolah: 'PENGURUS OSIS SMP IT AL-HAWARI',
+      badgeText: 'OSIS',
+      primaryColor: '#0f766e',
+      secondaryColor: '#2563eb',
+      alamat: 'Jl. Raya Cibiuk, Desa Cipareuan, Kec. Cibiuk, Kab. Garut 44193',
+      kontak: 'Website: al-hawari.sch.id | Email: smpit_alhawari09@yahoo.co.id'
+    }))}`,
+    description: 'Kop resmi kegiatan kesiswaan dan OSIS SMP IT Al-Hawari - Cibiuk.'
+  }
+];
+
+export function getDefaultKopGalleryForUnit(unitId = 'smk') {
+  const isSmp = String(unitId || '').toLowerCase() === 'smp';
+  return JSON.parse(JSON.stringify(isSmp ? DEFAULT_SMP_KOP_GALLERY : DEFAULT_KOP_GALLERY));
+}

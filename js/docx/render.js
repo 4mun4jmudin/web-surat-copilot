@@ -31,6 +31,7 @@ import {
   buildBookmarkStart,
   buildBookmarkEnd
 } from './fields.js';
+import { cmToTwips, getListStyleSpec, normalizePageNumbering } from '../letters/wordFormat.js';
 
 const suratDinasF4Profile = {
   ...suratDinasProfile,
@@ -55,6 +56,10 @@ export function getProfile(profileName) {
 function renderRuns(runs = []) {
   return runs.map((run, idx) => {
     const rPrParts = [];
+    if (run.fontFamily) {
+      const safeFont = escapeXml(String(run.fontFamily));
+      rPrParts.push(`<w:rFonts w:ascii="${safeFont}" w:hAnsi="${safeFont}" w:cs="${safeFont}"/>`);
+    }
     if (run.bold) rPrParts.push('<w:b/>');
     if (run.italic) rPrParts.push('<w:i/>');
     if (run.underline) rPrParts.push('<w:u w:val="single"/>');
@@ -357,9 +362,14 @@ export function renderRichTableXml(block, profile, { hasQrImage = false } = {}) 
   `.trim();
 }
 
-function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, footerRelId = null) {
+function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, footerRelId = null, startAt = 1, headerRelId = null) {
   const p = profile.page;
   const m = profile.margins;
+
+  let headerXml = '';
+  if (headerRelId) {
+    headerXml = `<w:headerReference w:type="default" r:id="${headerRelId}"/>`;
+  }
 
   let footerXml = '';
   if (footerRelId) {
@@ -367,14 +377,18 @@ function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, f
   }
 
   let pgNumTypeXml = '';
-  if (numberFormat === 'roman') {
-    pgNumTypeXml = `<w:pgNumType w:fmt="lowerRoman"${restartNumbering ? ' w:start="1"' : ''}/>`;
+  const startAttr = (restartNumbering || Number(startAt) > 1) ? ` w:start="${Math.max(1, Number(startAt) || 1)}"` : '';
+  if (numberFormat === 'roman' || numberFormat === 'lowerRoman') {
+    pgNumTypeXml = `<w:pgNumType w:fmt="lowerRoman"${startAttr}/>`;
+  } else if (numberFormat === 'upperRoman') {
+    pgNumTypeXml = `<w:pgNumType w:fmt="upperRoman"${startAttr}/>`;
   } else if (numberFormat === 'decimal') {
-    pgNumTypeXml = `<w:pgNumType w:fmt="decimal"${restartNumbering ? ' w:start="1"' : ''}/>`;
+    pgNumTypeXml = `<w:pgNumType w:fmt="decimal"${startAttr}/>`;
   }
 
   return `
     <w:sectPr>
+      ${headerXml}
       ${footerXml}
       <w:pgSz w:w="${p.width}" w:h="${p.height}" w:orient="${p.orientation}"/>
       <w:pgMar w:top="${m.top}" w:right="${m.right}" w:bottom="${m.bottom}" w:left="${m.left}" w:header="${m.header}" w:footer="${m.footer}"/>
@@ -383,7 +397,7 @@ function buildSectPr(profile, numberFormat = 'none', restartNumbering = false, f
   `.trim();
 }
 
-export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage = false) {
+export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage = false, customListStartMap = null) {
   const bodyXmlParts = [];
   let figureCounter = 0;
   let tableCounter = 0;
@@ -457,10 +471,31 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
       }
 
       case 'paragraph': {
-        const runs = block.runs || [{ text: block.text || '' }];
+        const baseRuns = block.runs || [{ text: block.text || '' }];
+        const runs = baseRuns.map((r) => ({
+          ...r,
+          ...(block.fontFamily && !r.fontFamily ? { fontFamily: block.fontFamily } : {}),
+          ...(block.fontSizePt && !r.fontSizeHalfPt ? { fontSizeHalfPt: Math.round(Number(block.fontSizePt) * 2) } : {}),
+          ...(block.bold !== undefined && r.bold === undefined ? { bold: Boolean(block.bold) } : {}),
+          ...(block.italic !== undefined && r.italic === undefined ? { italic: Boolean(block.italic) } : {}),
+          ...(block.underline !== undefined && r.underline === undefined ? { underline: Boolean(block.underline) } : {})
+        }));
         const isLetterBody = block.style === 'letterBody' || isLetter;
-        const indentVal = isLetterBody ? 0 : (profile.typography?.paragraphIndent || 709);
-        const lineSpacing = profile.typography?.lineSpacing || 276;
+        const firstLineVal = block.firstLineIndentTwips !== undefined
+          ? Number(block.firstLineIndentTwips)
+          : (block.firstLineIndentCm !== undefined
+              ? cmToTwips(block.firstLineIndentCm)
+              : (isLetterBody ? 0 : (profile.typography?.paragraphIndent || 709)));
+        const leftIndVal = block.leftIndentTwips !== undefined
+          ? Number(block.leftIndentTwips)
+          : (block.leftIndentCm !== undefined ? cmToTwips(block.leftIndentCm) : 0);
+        const indAttrs = [
+          leftIndVal > 0 ? `w:left="${Math.round(leftIndVal)}"` : '',
+          firstLineVal > 0 ? `w:firstLine="${Math.round(firstLineVal)}"` : ''
+        ].filter(Boolean).join(' ');
+        const lineSpacing = block.lineSpacing
+          ? Math.round(Number(block.lineSpacing) * 240)
+          : (profile.typography?.lineSpacing || 276);
         const spacingAfter = block.spacingAfter !== undefined ? Number(block.spacingAfter) : (isLetterBody ? 100 : (profile.typography?.paragraphSpacingAfter || 120));
         const spacingBefore = block.spacingBefore !== undefined ? Number(block.spacingBefore) : 0;
 
@@ -468,7 +503,7 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
           <w:p>
             <w:pPr>
               <w:pStyle w:val="Normal"/>
-              ${indentVal ? `<w:ind w:firstLine="${indentVal}"/>` : ''}
+              ${indAttrs ? `<w:ind ${indAttrs}/>` : ''}
               <w:spacing w:before="${spacingBefore}" w:line="${lineSpacing}" w:lineRule="auto" w:after="${spacingAfter}"/>
               <w:jc w:val="${block.alignment || profile.typography?.alignment || 'both'}"/>
             </w:pPr>
@@ -479,9 +514,21 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
       }
 
       case 'list': {
-        const numId = block.ordered ? '2' : '3';
+        const spec = getListStyleSpec(block.listStyle, block.ordered !== false);
+        const customOverrideId = customListStartMap?.get?.(i);
+        const numId = customOverrideId || spec.ooxmlNumId;
+        const extraLeft = block.leftIndentCm ? cmToTwips(block.leftIndentCm) : 0;
+        const baseLeft = 720 + extraLeft;
+        const listSpacing = block.lineSpacing ? Math.round(Number(block.lineSpacing) * 240) : null;
         (block.items || []).forEach(item => {
-          let itemRuns = typeof item === 'string' ? [{ text: item }] : (Array.isArray(item) ? item : []);
+          const rawRuns = typeof item === 'string'
+            ? [{ text: item }]
+            : (Array.isArray(item) ? item : [{ text: String(item?.text ?? '') }]);
+          const itemRuns = rawRuns.map((r) => ({
+            ...r,
+            ...(block.fontFamily && !r.fontFamily ? { fontFamily: block.fontFamily } : {}),
+            ...(block.fontSizePt && !r.fontSizeHalfPt ? { fontSizeHalfPt: Math.round(Number(block.fontSizePt) * 2) } : {})
+          }));
           bodyXmlParts.push(`
             <w:p>
               <w:pPr>
@@ -490,7 +537,8 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
                   <w:ilvl w:val="0"/>
                   <w:numId w:val="${numId}"/>
                 </w:numPr>
-                <w:ind w:left="720" w:hanging="360"/>
+                <w:ind w:left="${baseLeft}" w:hanging="360"/>
+                ${listSpacing ? `<w:spacing w:line="${listSpacing}" w:lineRule="auto"/>` : ''}
               </w:pPr>
               ${renderRuns(itemRuns)}
             </w:p>
@@ -629,7 +677,16 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
     }
   }
 
-  const finalSectPr = buildSectPr(profile, currentSectionFormat, false, null);
+  const finalPn = normalizePageNumbering(
+    doc.pageNumbering || doc.pageSetup?.pageNumbering || doc.letterData?.options?.pageNumbering || profile.pageNumbering
+  );
+  const finalSectFmt = finalPn.enabled ? (finalPn.format || 'decimal') : currentSectionFormat;
+  const finalStartAt = finalPn.enabled ? (finalPn.startAt || 1) : 1;
+  const finalFooterRelId = finalPn.enabled
+    ? (finalPn.position === 'bottom-center' ? 'rIdFooter1' : (finalPn.position === 'bottom-right' ? 'rIdFooter2' : null))
+    : null;
+  const finalHeaderRelId = finalPn.enabled && finalPn.position === 'top-right' ? 'rIdHeader1' : null;
+  const finalSectPr = buildSectPr(profile, finalSectFmt, finalStartAt > 1, finalFooterRelId, finalStartAt, finalHeaderRelId);
 
   return `
     <w:body>
@@ -639,8 +696,8 @@ export function renderDocumentBody(doc, profile, hasKopImage = false, hasQrImage
   `.trim();
 }
 
-export function buildDocumentXml(doc, profile, hasKopImage = false, hasQrImage = false) {
-  const bodyXml = renderDocumentBody(doc, profile, hasKopImage, hasQrImage);
+export function buildDocumentXml(doc, profile, hasKopImage = false, hasQrImage = false, customListStartMap = null) {
+  const bodyXml = renderDocumentBody(doc, profile, hasKopImage, hasQrImage, customListStartMap);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -663,6 +720,7 @@ export function buildContentTypesXml(hasKopImage = false, hasQrImage = false) {
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
   <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
   <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
   <Override PartName="/word/footer2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
 </Types>`.trim();
@@ -681,6 +739,7 @@ export function buildDocRelsXml(hasKopImage = false, hasQrImage = false) {
   <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
   <Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+  <Relationship Id="rIdHeader1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
   <Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
   <Relationship Id="rIdFooter2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer2.xml"/>
   ${hasKopImage ? '<Relationship Id="rIdKop" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/kop.png"/><Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/logo.png"/>' : ''}
@@ -694,6 +753,16 @@ export function buildSettingsXml() {
   <w:updateFields w:val="true"/>
   <w:defaultTabStop w:val="720"/>
 </w:settings>`.trim();
+}
+
+export function buildHeader1Xml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:pPr><w:pStyle w:val="Header"/><w:jc w:val="right"/></w:pPr>
+    ${buildPageField()}
+  </w:p>
+</w:hdr>`.trim();
 }
 
 export function buildFooter1Xml() {
@@ -721,15 +790,18 @@ export function buildFooter2Xml() {
  */
 export async function renderDocx(docModel, outputType = 'blob') {
   let profile = { ...getProfile(docModel.profile) };
+  profile.fonts = { ...(profile.fonts || {}) };
+  profile.typography = { ...(profile.typography || {}) };
+  const setup = docModel.pageSetup || docModel.letterData?.options || {};
 
   // 1. Terapkan ukuran kertas kustom (A4, F4, Letter, Legal)
-  const paperKey = (docModel.paperSize || docModel.letterData?.options?.paperSize || 'a4').toLowerCase();
+  const paperKey = (docModel.paperSize || setup.paperSize || 'a4').toLowerCase();
   if (profile.pageSizes && profile.pageSizes[paperKey]) {
     profile.page = { ...profile.pageSizes[paperKey] };
   }
 
   // 2. Terapkan orientasi kertas (portrait / landscape)
-  const orientation = (docModel.orientation || docModel.letterData?.options?.orientation || 'portrait').toLowerCase();
+  const orientation = (docModel.orientation || setup.orientation || 'portrait').toLowerCase();
   if (orientation === 'landscape') {
     const origW = profile.page.width;
     const origH = profile.page.height;
@@ -739,7 +811,7 @@ export async function renderDocx(docModel, outputType = 'blob') {
   }
 
   // 3. Terapkan margin kustom
-  const customM = docModel.customMargins || docModel.letterData?.options?.margins;
+  const customM = docModel.customMargins || setup.margins;
   if (customM) {
     const toTwips = (val) => (typeof val === 'number' && val <= 25 ? Math.round(val * 567) : val);
     profile.margins = {
@@ -750,6 +822,48 @@ export async function renderDocx(docModel, outputType = 'blob') {
       right: customM.right !== undefined ? toTwips(customM.right) : profile.margins.right
     };
   }
+
+  // 4. Terapkan tipografi global & penomoran halaman Word
+  const rawFontFamily = docModel.fontFamily || setup.fontFamily;
+  if (rawFontFamily) {
+    profile.fonts.primary = String(rawFontFamily);
+    profile.fonts.heading = String(rawFontFamily);
+  }
+  const rawFontSize = parseFloat(docModel.fontSize || setup.fontSize);
+  if (Number.isFinite(rawFontSize) && rawFontSize >= 8 && rawFontSize <= 72) {
+    profile.typography.bodySize = Math.round(rawFontSize * 2);
+  }
+  const rawLineSpacing = parseFloat(docModel.lineSpacing || setup.lineSpacing);
+  if (Number.isFinite(rawLineSpacing) && rawLineSpacing >= 0.8 && rawLineSpacing <= 3.5) {
+    profile.typography.lineSpacing = Math.round(rawLineSpacing * 240);
+  }
+  const rawParaSpacing = docModel.paragraphSpacing ?? setup.paragraphSpacing;
+  if (rawParaSpacing !== undefined && rawParaSpacing !== null && Number.isFinite(Number(rawParaSpacing))) {
+    profile.typography.paragraphSpacingAfter = Math.round(Number(rawParaSpacing) * 20);
+  }
+  const rawPn = docModel.pageNumbering ?? setup.pageNumbering;
+  if (rawPn !== undefined) {
+    profile.pageNumbering = normalizePageNumbering(rawPn, profile.pageNumbering);
+  }
+
+  // 5. Kumpulkan override startAt untuk list bernomor (startAt > 1)
+  const customNumberingOverrides = [];
+  const customListStartMap = new Map();
+  (docModel.blocks || []).forEach((blk, idx) => {
+    if (!blk || blk.type !== 'list') return;
+    const startAt = Math.max(1, parseInt(blk.startAt || 1, 10) || 1);
+    if (startAt <= 1) return;
+    const spec = getListStyleSpec(blk.listStyle, blk.ordered !== false);
+    if (spec.abstractNumId) {
+      const customNumId = String(20 + customNumberingOverrides.length);
+      customListStartMap.set(idx, customNumId);
+      customNumberingOverrides.push({
+        numId: customNumId,
+        abstractNumId: spec.abstractNumId,
+        startAt
+      });
+    }
+  });
 
   // Cari apakah ada gambar banner kop surat atau logo sekolah
   let kopParsed = null;
@@ -776,10 +890,11 @@ export async function renderDocx(docModel, outputType = 'blob') {
     'word/_rels/document.xml.rels': buildDocRelsXml(hasKopImage, hasQrImage),
     'word/settings.xml': buildSettingsXml(),
     'word/styles.xml': buildStylesXml(profile),
-    'word/numbering.xml': buildNumberingXml(),
+    'word/numbering.xml': buildNumberingXml(customNumberingOverrides),
+    'word/header1.xml': buildHeader1Xml(),
     'word/footer1.xml': buildFooter1Xml(),
     'word/footer2.xml': buildFooter2Xml(),
-    'word/document.xml': buildDocumentXml(docModel, profile, hasKopImage, hasQrImage)
+    'word/document.xml': buildDocumentXml(docModel, profile, hasKopImage, hasQrImage, customListStartMap)
   };
 
   if (hasKopImage) {

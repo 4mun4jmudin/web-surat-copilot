@@ -21,6 +21,7 @@ import { renderSchoolProfileView } from './ui/schoolProfileView.js';
 import { renderSettingsView } from './ui/settingsView.js';
 import { renderAccessControlView } from './ui/accessControlView.js';
 import { renderAccApprovalView } from './ui/accApprovalView.js';
+import { renderAiChatWorkspace } from './ui/aiChatWorkspace.js';
 import {
   renderLiveAccTray,
   recordCompletedAccForTray,
@@ -34,15 +35,20 @@ import { downloadFile } from './utils/download.js';
 import { showToast } from './ui/notification.js';
 import { runSafeWindowPrint, syncGlobalPrintPageStyle } from './ui/printChoiceModal.js';
 import {
+  canSwitchUnits,
   getPendingAccLetters,
   getRoleLabel,
+  getUnitDisplayName,
   isCanvasLockedForUser
 } from './auth/permissions.js';
 import {
+  clearActiveWorkspaceUnitId,
   clearStoredAuthToken,
   fetchWorkspaceBootstrap,
+  getActiveWorkspaceUnitId,
   getStoredAuthToken,
-  onWorkspaceUnauthorized
+  onWorkspaceUnauthorized,
+  setActiveWorkspaceUnitId
 } from './sync/workspaceClient.js';
 import { initPwa } from './pwa.js';
 
@@ -57,6 +63,8 @@ function saveCachedUserSummary(user) {
         username: user.username,
         displayName: user.displayName,
         role: user.role,
+        unitId: user.unitId || 'smk',
+        defaultUnit: user.defaultUnit || 'smk',
         active: user.active !== false
       }));
     } else {
@@ -92,6 +100,10 @@ async function initApp() {
 
   let currentTab = 'canvas';
   const appHeaderEl = document.getElementById('app-header');
+  const brandSubtitleEl = document.getElementById('header-brand-subtitle');
+  const unitWrapEl = document.getElementById('header-unit-wrap');
+  const unitBadgeEl = document.getElementById('header-unit-badge');
+  const unitSelectEl = document.getElementById('header-unit-select');
   const navTabs = document.querySelectorAll('.nav-tab');
   const userPillBtn = document.getElementById('header-user-pill');
   const userRoleBadge = document.getElementById('header-user-role-badge');
@@ -152,6 +164,13 @@ async function initApp() {
             onClick: () => activateNavTab('acc-queue')
           },
           {
+            id: 'sheet-ai-chat',
+            icon: '🤖',
+            title: 'AI Asisten Percakapan Persuratan',
+            sub: 'Konsultasi redaksi surat, ringkas lampiran, atau siapkan draf baru',
+            onClick: () => activateNavTab('ai-chat')
+          },
+          {
             id: 'sheet-delegasi',
             icon: '🔐',
             title: 'Setelan Delegasi Kepsek → TU',
@@ -182,11 +201,18 @@ async function initApp() {
         ]
       : [
           {
+            id: 'sheet-ai-chat',
+            icon: '🤖',
+            title: 'AI Asisten Chat (Percakapan Gaya ChatGPT)',
+            sub: 'Tanya AI, buat surat baru, & revisi dokumen lewat obrolan cerdas',
+            highlight: true,
+            onClick: () => activateNavTab('ai-chat')
+          },
+          {
             id: 'sheet-canvas',
             icon: '📄',
             title: 'Buat Surat Baru (Lembar Kerja)',
             sub: 'Draft surat resmi SMK dengan kop & penomoran otomatis',
-            highlight: true,
             onClick: () => activateNavTab('canvas')
           },
           {
@@ -283,6 +309,8 @@ async function initApp() {
         activateNavTab(isKepsek ? 'acc-queue' : 'canvas');
       } else if (slot === 'acc') {
         activateNavTab('acc-queue');
+      } else if (slot === 'ai-chat') {
+        activateNavTab('ai-chat');
       } else if (slot === 'outgoing') {
         activateNavTab('outgoing');
       } else if (slot === 'settings') {
@@ -373,6 +401,8 @@ async function initApp() {
         isActive = tabName === 'canvas' || tabName === 'smart-canvas';
       } else if (slot === 'acc') {
         isActive = tabName === 'acc-queue';
+      } else if (slot === 'ai-chat') {
+        isActive = tabName === 'ai-chat';
       } else if (slot === 'outgoing') {
         isActive = tabName === 'outgoing';
       } else if (slot === 'settings') {
@@ -429,6 +459,9 @@ async function initApp() {
           renderSmartWordCanvas(container);
         }
         break;
+      case 'ai-chat':
+        renderAiChatWorkspace(container, { onNavigateTab: activateNavTab });
+        break;
       case 'acc-queue':
         renderAccApprovalView(container, { onNavigateTab: activateNavTab });
         break;
@@ -463,9 +496,16 @@ async function initApp() {
   function updateHeaderSessionUi(state) {
     syncGlobalPrintPageStyle(state.letterOptions);
     const user = state.authUser;
+    const activeUnit = store.getActiveUnitId();
     const isKepsek = user?.role === 'kepsek';
     const canvasLocked = isCanvasLockedForUser(user);
     const pendingList = getPendingAccLetters(state.outgoingLetters || []);
+
+    if (brandSubtitleEl) {
+      brandSubtitleEl.textContent = user
+        ? `Yayasan Al-Irsyad • ${getUnitDisplayName(activeUnit)}`
+        : 'Yayasan Al-Irsyad • Al-Hawari';
+    }
 
     document.body.classList.toggle('role-kepsek', Boolean(isKepsek));
     document.body.classList.toggle('role-tu', user?.role === 'tu');
@@ -522,6 +562,7 @@ async function initApp() {
     }
 
     if (!user) {
+      unitWrapEl?.classList.add('hidden');
       userPillBtn?.classList.add('hidden');
       mobileNotifBtn?.classList.add('hidden');
       mobileUserChipEl?.classList.add('hidden');
@@ -529,38 +570,56 @@ async function initApp() {
       renderLiveAccTray({ onNavigateToAccQueue: () => activateNavTab('acc-queue') });
       return;
     }
-    const roleIcon = user.role === 'admin' ? '🛡️' : user.role === 'kepsek' ? '🎓' : '📋';
+
+    if (unitWrapEl) {
+      unitWrapEl.classList.remove('hidden');
+      if (canSwitchUnits(user)) {
+        unitBadgeEl?.classList.add('hidden');
+        if (unitSelectEl) {
+          unitSelectEl.classList.remove('hidden');
+          if (unitSelectEl.value !== activeUnit) unitSelectEl.value = activeUnit;
+        }
+      } else {
+        unitSelectEl?.classList.add('hidden');
+        if (unitBadgeEl) {
+          unitBadgeEl.classList.remove('hidden');
+          unitBadgeEl.textContent = activeUnit === 'smp' ? 'SMP IT Al-Hawari' : 'SMK IT Al-Hawari';
+        }
+      }
+    }
+
     if (userRoleBadge) {
-      userRoleBadge.textContent = `${roleIcon} ${getRoleLabel(user.role)} (${user.username})`;
+      userRoleBadge.textContent = `${getRoleLabel(user.role)} (${user.username})`;
     }
     if (userPillBtn) {
-      userPillBtn.title = `${getRoleLabel(user.role)} (${user.username}) — Klik untuk Kelola Akses & Drive`;
+      userPillBtn.title = `${getRoleLabel(user.role)} (${user.username}) • ${getUnitDisplayName(activeUnit)} — Klik untuk Kelola Akses & Drive`;
     }
     if (mobileUserChipLabelEl) {
-      mobileUserChipLabelEl.textContent = `${roleIcon} ${user.username}`;
+      mobileUserChipLabelEl.textContent = `${activeUnit.toUpperCase()} • ${user.username}`;
     }
     if (syncDotEl) {
-      if (state.cloudSyncState === 'syncing') {
-        syncDotEl.textContent = '⏳';
-        syncDotEl.title = 'Menyinkronkan ke server...';
+      if (state.cloudSyncState === 'syncing' || state.privateSyncState === 'saving') {
+        syncDotEl.textContent = 'Sync';
+        syncDotEl.title = 'Menyinkronkan ruang kerja...';
       } else if (state.cloudSyncState === 'error') {
-        syncDotEl.textContent = '⚠️';
+        syncDotEl.textContent = 'Offline';
         syncDotEl.title = 'Sinkron cloud tertunda (tersimpan lokal)';
       } else if (state.driveStatus?.configured) {
-        syncDotEl.textContent = '☁️ Drive';
-        syncDotEl.title = 'Tersinkron ke Cloud & Google Drive';
+        syncDotEl.textContent = 'Drive';
+        syncDotEl.title = 'Ruang kerja privat tersimpan & Drive terhubung';
       } else {
-        syncDotEl.textContent = '☁️';
-        syncDotEl.title = 'Tersinkron ke Server Cloud';
+        syncDotEl.textContent = 'Cloud';
+        syncDotEl.title = 'Ruang kerja privat tersimpan di Cloud';
       }
     }
     if (mobileSyncDotEl) {
-      mobileSyncDotEl.textContent = state.cloudSyncState === 'syncing'
-        ? '⏳'
+      mobileSyncDotEl.textContent = (state.cloudSyncState === 'syncing' || state.privateSyncState === 'saving')
+        ? '•••'
         : state.cloudSyncState === 'error'
-        ? '⚠️'
-        : '☁️';
+        ? '!'
+        : '✓';
     }
+    unitWrapEl?.classList.remove('hidden');
     userPillBtn?.classList.remove('hidden');
     mobileNotifBtn?.classList.remove('hidden');
     mobileUserChipEl?.classList.remove('hidden');
@@ -570,6 +629,41 @@ async function initApp() {
   }
 
   store.subscribe(updateHeaderSessionUi);
+
+  unitSelectEl?.addEventListener('change', async (e) => {
+    const nextUnit = e.target.value;
+    const curUnit = store.getActiveUnitId();
+    if (!nextUnit || nextUnit === curUnit) return;
+    unitSelectEl.disabled = true;
+    try {
+      await store.flushPrivateWorkspaceNow();
+      stopLiveSync();
+      resetAccTrayNotifications();
+      setActiveWorkspaceUnitId(nextUnit);
+      const bootRes = await fetchWorkspaceBootstrap(nextUnit);
+      if (bootRes.ok) {
+        store.applyRemoteBootstrap(bootRes);
+        startLiveSync(bootRes.syncRev);
+        updateHeaderSessionUi(store.getState());
+        renderTab(currentTab, mainContainer);
+        showToast(`Beralih ke ruang kerja ${getUnitDisplayName(nextUnit)}.`, 'success');
+      } else {
+        setActiveWorkspaceUnitId(curUnit);
+        unitSelectEl.value = curUnit;
+        showToast(bootRes.error || 'Gagal berpindah unit sekolah.', 'error');
+      }
+    } finally {
+      unitSelectEl.disabled = false;
+    }
+  });
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        store.flushPrivateWorkspaceNow();
+      }
+    });
+  }
 
   userPillBtn?.addEventListener('click', () => {
     setMobileMenuOpen(false);
@@ -586,26 +680,29 @@ async function initApp() {
     });
   };
 
-  logoutBtn?.addEventListener('click', () => {
+  logoutBtn?.addEventListener('click', async () => {
     setMobileMenuOpen(false);
     if (!confirm('Keluar dari akun aktif sekarang?')) return;
+    await store.flushPrivateWorkspaceNow();
     stopLiveSync();
     resetAccTrayNotifications();
     saveCachedUserSummary(null);
+    clearActiveWorkspaceUnitId();
     store.clearAuthState();
     mainContainer.innerHTML = '';
-    requireLoginPrompt('Anda telah keluar. Silakan login kembali dengan akun Administrator, Kepala Sekolah, atau TU.');
+    requireLoginPrompt('Anda telah keluar. Silakan login kembali dengan akun Administrator Yayasan, Kepala Sekolah, atau TU.');
   });
 
   onWorkspaceUnauthorized((errMsg) => {
     stopLiveSync();
     resetAccTrayNotifications();
     saveCachedUserSummary(null);
+    clearActiveWorkspaceUnitId();
     store.clearAuthState();
     requireLoginPrompt(errMsg || 'Sesi Anda telah berakhir. Silakan login kembali.');
   });
 
-  // Live SPA Polling Update Tanpa Refresh Halaman (Non-Destruktif terhadap Kanvas)
+  // Pengecekan ACC Ringan Non-Destruktif (hanya update status ACC tanpa mengganggu kanvas/ruang kerja)
   initLiveSync({
     onDeltaApplied: ({ transitions } = {}) => {
       const user = store.getState().authUser;
@@ -613,21 +710,21 @@ async function initApp() {
 
       for (const item of (transitions?.approved || [])) {
         recordCompletedAccForTray(item, 'approved');
-        showToast(`🎉 Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} (${item.nomorSurat}) telah DI-ACC Kepala Sekolah! Barcode QR siap dicetak.`, 'success');
+        showToast(`Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} (${item.nomorSurat}) telah DI-ACC Kepala Sekolah! Barcode QR siap dicetak.`, 'success');
       }
       for (const item of (transitions?.rejected || [])) {
         recordCompletedAccForTray(item, 'rejected');
-        showToast(`❌ Pengajuan ACC Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} ditolak Kepala Sekolah.`, 'warning');
+        showToast(`Pengajuan ACC Surat #${String(item.sequenceNumber || 0).padStart(3, '0')} ditolak Kepala Sekolah.`, 'warning');
       }
       for (const item of (transitions?.newRequests || [])) {
         if (canApprove) {
-          showToast(`🔔 Permintaan ACC baru: ${item.title} (#${String(item.sequenceNumber || 0).padStart(3, '0')})`, 'info');
+          showToast(`Permintaan ACC baru: ${item.title} (#${String(item.sequenceNumber || 0).padStart(3, '0')})`, 'info');
         }
       }
 
       const activeInput = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
       const openModal = Boolean(mainContainer.querySelector('.modal-overlay:not(.hidden)'));
-      if (!activeInput && !openModal && (currentTab === 'acc-queue' || currentTab === 'outgoing' || currentTab === 'incoming' || currentTab === 'access')) {
+      if (!activeInput && !openModal && (currentTab === 'acc-queue' || currentTab === 'outgoing')) {
         renderTab(currentTab, mainContainer);
       } else {
         renderLiveAccTray({ onNavigateToAccQueue: () => activateNavTab('acc-queue') });
@@ -718,12 +815,14 @@ async function initApp() {
     return;
   }
 
-  // Verifikasi & tarik data workspace dari server
+  // Verifikasi & tarik data unit + ruang kerja pribadi akun dari server
   const cachedSummary = getCachedUserSummary();
   if (cachedSummary) {
-    store.setAuthSessionData({ user: cachedSummary });
+    const fallbackUnit = cachedSummary.unitId === 'smp' ? 'smp' : (cachedSummary.unitId === 'smk' ? 'smk' : getActiveWorkspaceUnitId());
+    setActiveWorkspaceUnitId(fallbackUnit);
+    store.setAuthSessionData({ user: cachedSummary, unitId: fallbackUnit });
   }
-  const bootRes = await fetchWorkspaceBootstrap();
+  const bootRes = await fetchWorkspaceBootstrap(getActiveWorkspaceUnitId());
   if (bootRes.ok) {
     store.applyRemoteBootstrap(bootRes);
     openInitialTab();
@@ -732,6 +831,7 @@ async function initApp() {
     openInitialTab();
   } else {
     clearStoredAuthToken();
+    clearActiveWorkspaceUnitId();
     saveCachedUserSummary(null);
     store.clearAuthState();
     requireLoginPrompt(bootRes.error || 'Sesi login berakhir, silakan masuk kembali.');

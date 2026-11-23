@@ -129,11 +129,14 @@ export function buildOrderedNomorSurat({
 } = {}) {
   const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
   const code = String(typeCode || 'KET').toUpperCase();
-  const prefix = LETTER_TYPE_CODES[code]?.prefix || '421';
+  const normalizedSchoolCode = String(schoolCode || 'SMKITA').toUpperCase();
+  const prefix = (code === 'KET' && normalizedSchoolCode === 'SMPITA')
+    ? '421.2'
+    : (LETTER_TYPE_CODES[code]?.prefix || '421');
   const urut = formatSequenceNumber(Math.max(1, Number(sequenceNumber) || 1), 3);
   const romanMonth = toRomanMonth(d.getMonth() + 1);
   const year = d.getFullYear().toString();
-  return `${prefix}/${urut}/${code}.${schoolCode}/${romanMonth}/${year}`;
+  return `${prefix}/${urut}/${code}.${normalizedSchoolCode}/${romanMonth}/${year}`;
 }
 
 /**
@@ -176,8 +179,13 @@ export function formatSmartNomorSurat({
     return buildOrderedNomorSurat({ typeCode, sequenceNumber: 1, schoolCode, date: d });
   }
 
-  // Normalisasi variasi kode sekolah lama (SMKIT, SMKS.IT-AH, SMK-IT, dll) menjadi SMKITA
-  const normalizedSchool = clean.replace(/\b(SMKS\.?IT-?AH|SMK-?IT|SMKIT)\b/gi, schoolCode);
+  // Normalisasi variasi kode sekolah lama (SMKIT, SMKS.IT-AH, SMKITA, SMPIT, SMPITA, dll) menjadi kode sekolah aktif
+  let normalizedSchool = clean.replace(/\b(SMKS\.?IT-?AH|SMK-?IT|SMKIT|SMKITA|SMP\.?IT-?AH|SMP-?IT|SMPIT|SMPITA)\b/gi, schoolCode);
+  if (String(schoolCode).toUpperCase() === 'SMPITA' && typeCode === 'KET') {
+    normalizedSchool = normalizedSchool.replace(/^421\.3(?=\/)/, '421.2');
+  } else if (String(schoolCode).toUpperCase() === 'SMKITA' && typeCode === 'KET') {
+    normalizedSchool = normalizedSchool.replace(/^421\.2(?=\/)/, '421.3');
+  }
 
   // Cek apakah sudah memiliki format {KODE}.{SCHOOL} atau {KODE}/{SCHOOL}
   const knownCodesPattern = Object.keys(LETTER_TYPE_CODES).join('|');

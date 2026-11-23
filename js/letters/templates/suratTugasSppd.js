@@ -4,7 +4,7 @@
  * Halaman 2 SPPD 8 Poin + Catatan Hukum & TTD 2 Kolom, Halaman 3 Keterangan I & II dengan Header Merge).
  */
 
-import { DEFAULT_SCHOOL_PROFILE, normalizeSchoolProfileNaming } from '../schoolProfile.js';
+import { DEFAULT_SCHOOL_PROFILE, getSchoolCodeFromProfile, normalizeSchoolProfileNaming } from '../schoolProfile.js';
 import { formatSmartNomorSurat } from '../numbering.js';
 
 function getTodayFormattedId() {
@@ -50,14 +50,15 @@ export function normalizeAssigneesList(raw = null) {
 
 export function buildSuratTugasBlocks(data = {}, school = {}) {
   const s = normalizeSchoolProfileNaming({ ...DEFAULT_SCHOOL_PROFILE, ...school });
-  const schoolDisplay = 'SMK IT Al-Hawari';
+  const schoolCode = getSchoolCodeFromProfile(s);
+  const schoolDisplay = s.unitLabel || (s.unitId === 'smp' ? 'SMP IT Al-Hawari - Cibiuk' : 'SMK IT Al-Hawari');
   const unitKerja = s.schoolName || 'SMK IT AL-HAWARI';
-  const pemberiNama = data.pemberiNama || s.principalName || 'Dian Nurhadian, S.Pd.';
+  const pemberiNama = data.pemberiNama || s.principalName || 'Dian Nurhamdani, S.Pd.';
   const pemberiJabatan = data.pemberiJabatan || 'Kepala Sekolah';
   const alamatSekolah = data.alamatSekolah || `${s.address || 'Kp. Curug RT/RW 002/006 Desa Cipareuan Kec. Cibiuk'} Kab. ${s.city || 'Garut'} ${s.postalCode || '44193'}`;
   const nomorSurat = data.nomorSurat
-    ? formatSmartNomorSurat({ rawNomor: data.nomorSurat, forcedTypeCode: 'ST', contextText: 'Surat Tugas' })
-    : formatSmartNomorSurat({ forcedTypeCode: 'ST', contextText: 'Surat Tugas', sequenceNumber: data.sequenceNumber || 1 });
+    ? formatSmartNomorSurat({ rawNomor: data.nomorSurat, forcedTypeCode: 'ST', contextText: 'Surat Tugas', schoolCode })
+    : formatSmartNomorSurat({ forcedTypeCode: 'ST', contextText: 'Surat Tugas', sequenceNumber: data.sequenceNumber || 1, schoolCode });
   const assignees = normalizeAssigneesList(data.assignees || data.pegawai);
   const maksudTugas = data.maksudTugas || 'Penjemputan Peserta Didik PKL';
   const tujuanLokasi = data.tujuanLokasi || 'DRAGON MOTION PICTURE ASIA';
@@ -156,9 +157,9 @@ export function buildSuratTugasBlocks(data = {}, school = {}) {
 
 export function buildSppdBlocks(data = {}, school = {}) {
   const s = normalizeSchoolProfileNaming({ ...DEFAULT_SCHOOL_PROFILE, ...school });
-  const schoolDisplay = 'SMK IT Al-Hawari';
+  const schoolDisplay = s.unitLabel || (s.unitId === 'smp' ? 'SMP IT Al-Hawari - Cibiuk' : 'SMK IT Al-Hawari');
   const unitKerja = s.schoolName || 'SMK IT AL-HAWARI';
-  const pemberiNama = data.pemberiNama || s.principalName || 'Dian Nurhadian, S.Pd.';
+  const pemberiNama = data.pemberiNama || s.principalName || 'Dian Nurhamdani, S.Pd.';
   const assignees = normalizeAssigneesList(data.assignees || data.pegawai);
   const tujuanLokasi = data.tujuanLokasi || 'DRAGON MOTION PICTURE';
   const maksudSppd = data.maksudSppd || data.maksudTugas || 'Penjemputan siswa kelas 12 Multimedia ke tempat PKL';

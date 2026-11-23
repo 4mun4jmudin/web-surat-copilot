@@ -8,6 +8,7 @@ import { store, isUsingBuiltinSystemKey, getBuiltinSystemKey } from '../state.js
 import { executeAiRequest, detectActiveGeminiModel, detectActiveGroqModel, LATEST_GEMINI_DEFAULT_MODEL, LATEST_GROQ_DEFAULT_MODEL } from '../ai/client.js';
 import { canManageApiVault } from '../auth/permissions.js';
 import { showToast } from './notification.js';
+import { uiIcon } from './icons.js';
 
 function renderProviderBrand(provider) {
   const p = (provider || 'openai').toLowerCase();
@@ -66,13 +67,13 @@ function renderProviderBrand(provider) {
   };
 }
 
-const SVG_CHAIN_22 = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
-const SVG_CUBE_14 = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-9 5-9-5V8l9-5 9 5v8z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`;
-const SVG_LINK_14 = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
-const SVG_KEY_14 = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m21 3-9.5 9.5"/><path d="m15.5 7.5 3 3M18 5l2 2"/></svg>`;
-const SVG_SIGNAL_14 = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20v-4"/><path d="M9 20v-8"/><path d="M14 20v-12"/><path d="M19 20V4"/></svg>`;
-const SVG_EDIT_14 = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
-const SVG_LOCK_11 = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+const SVG_CHAIN_22 = uiIcon('link', 22);
+const SVG_CUBE_14 = uiIcon('cube', 14);
+const SVG_LINK_14 = uiIcon('link', 14);
+const SVG_KEY_14 = uiIcon('key', 14);
+const SVG_SIGNAL_14 = uiIcon('signal', 14);
+const SVG_EDIT_14 = uiIcon('edit', 14);
+const SVG_LOCK_11 = uiIcon('lock', 11);
 
 export function renderSettingsView(container) {
   if (!container) return;
@@ -87,32 +88,33 @@ export function renderSettingsView(container) {
       <div class="view-shell-narrow settings-view-container">
 
         <!-- HEADER GUDANG API -->
-        <div class="view-page-header" style="margin-bottom: 14px;">
+        <div class="view-page-header" style="margin-bottom: 18px;">
           <div class="view-header-lead">
             <div class="view-header-badge">${SVG_CHAIN_22}</div>
             <div>
               <h2 class="view-title">
                 <span>Gudang API Multi-Provider</span>
-                <span class="status-chip status-chip-green" style="font-size:11px;">☁️ Tersinkron (${vault.length} Koneksi AI)</span>
+                <span class="status-chip status-chip-green" style="font-size:11px;">${uiIcon('cloudCheck', 12)}<span>Tersinkron (${vault.length} Koneksi AI)</span></span>
               </h2>
               <p class="view-subtitle">
                 Kelola dan hubungkan berbagai layanan AI (multi-provider) tanpa batas jumlah koneksi. Kunci yang Anda tambahkan otomatis disinkronkan lintas perangkat untuk akun sekolah.
               </p>
             </div>
           </div>
+          <div class="view-header-actions">
+            <button id="btn-add-vault-entry" class="btn btn-primary" style="padding: 9px 16px; font-weight: 700; font-size: 13px; border-radius: 8px;" ${allowEditVault ? '' : 'disabled'}>
+              ${uiIcon('plus', 14)}
+              <span>Tambah Koneksi API Baru</span>
+            </button>
+          </div>
         </div>
 
         ${!allowEditVault ? `
-          <div style="background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;">
-            🔒 Pengelolaan &amp; penambahan kunci API AI untuk peran Tata Usaha sedang dibatasi oleh Administrator. Anda tetap dapat menggunakan kunci aktif untuk AI Copilot.
+          <div style="background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:10px 14px;font-size:12.5px;margin-bottom:16px;display:flex;align-items:center;gap:8px;">
+            ${uiIcon('lock', 15)}
+            <span>Pengelolaan &amp; penambahan kunci API AI untuk peran Tata Usaha sedang dibatasi oleh Administrator. Anda tetap dapat menggunakan kunci aktif untuk AI Copilot.</span>
           </div>
         ` : ''}
-
-        <div style="margin-bottom: 18px;">
-          <button id="btn-add-vault-entry" class="btn btn-primary" style="padding: 9px 18px; font-weight: 700; font-size: 13px; border-radius: 8px;" ${allowEditVault ? '' : 'disabled'}>
-            + Tambah Koneksi API Baru
-          </button>
-        </div>
 
         <!-- DAFTAR KONEKSI API DI GUDANG -->
         <div class="vault-list-container" style="display: flex; flex-direction: column; gap: 14px;">
@@ -124,19 +126,19 @@ export function renderSettingsView(container) {
 
             let topBadgeHtml = '';
             if (isActive) {
-              topBadgeHtml = `<span class="status-chip status-chip-green">✓ Terhubung &amp; Aktif</span>`;
+              topBadgeHtml = `<span class="status-chip status-chip-green">${uiIcon('check', 12)}<span>Terhubung &amp; Aktif</span></span>`;
             } else if (hasKey) {
-              topBadgeHtml = `<span class="status-chip status-chip-blue">✓ Aktif (Siap Cadangan)</span>`;
+              topBadgeHtml = `<span class="status-chip status-chip-blue">${uiIcon('check', 12)}<span>Aktif (Siap Cadangan)</span></span>`;
             } else {
-              topBadgeHtml = `<span class="status-chip status-chip-amber">🕒 Tidak Aktif / Belum Diuji</span>`;
+              topBadgeHtml = `<span class="status-chip status-chip-amber">${uiIcon('clock', 12)}<span>Tidak Aktif / Belum Diuji</span></span>`;
             }
 
             const keyStatusPill = usingSystemKey
-              ? `<span class="status-chip status-chip-green" style="padding: 1px 9px; font-size: 11px;">${SVG_LOCK_11} Bawaan Sistem (Siap Pakai)</span>`
+              ? `<span class="status-chip status-chip-green" style="padding: 2px 9px; font-size: 11px;">${SVG_LOCK_11}<span>Bawaan Sistem (Siap Pakai)</span></span>`
               : hasKey
-                ? `<span class="status-chip status-chip-green" style="padding: 1px 9px; font-size: 11px;">${SVG_LOCK_11} Terenkripsi (Aman)</span>
-                   <span style="font-size: 11px; color: #64748b; margin-left: 4px;">(${escapeHtml(entry.apiKey.slice(0, 5))}…${escapeHtml(entry.apiKey.slice(-4))})</span>`
-                : `<span class="status-chip status-chip-red" style="padding: 1px 9px; font-size: 11px;">${SVG_LOCK_11} Belum Dikonfigurasi</span>`;
+                ? `<span class="status-chip status-chip-green" style="padding: 2px 9px; font-size: 11px;">${SVG_LOCK_11}<span>Terenkripsi (Aman)</span></span>
+                   <span style="font-size: 11px; color: #64748b; margin-left: 5px;">(${escapeHtml(entry.apiKey.slice(0, 5))}…${escapeHtml(entry.apiKey.slice(-4))})</span>`
+                : `<span class="status-chip status-chip-red" style="padding: 2px 9px; font-size: 11px;">${SVG_LOCK_11}<span>Belum Dikonfigurasi</span></span>`;
 
             return `
               <div class="vault-card api-provider-card ${isActive ? 'is-active vault-card-active' : ''}">
@@ -157,17 +159,17 @@ export function renderSettingsView(container) {
 
                   <div style="font-size: 12.5px; color: #475569; display: flex; flex-direction: column; gap: 4px;">
                     <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap;">
-                      ${SVG_CUBE_14}
+                      <span style="color:#64748b;display:inline-flex;">${SVG_CUBE_14}</span>
                       <span style="color: #64748b;">Model:</span>
                       <span style="color: #0f172a; font-weight: 500;">${escapeHtml(entry.model || '-')}</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap;">
-                      ${SVG_LINK_14}
+                      <span style="color:#64748b;display:inline-flex;">${SVG_LINK_14}</span>
                       <span style="color: #64748b;">Endpoint:</span>
                       <span style="color: #334155; word-break: break-all;">${escapeHtml(entry.baseUrl || '-')}</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap;">
-                      ${SVG_KEY_14}
+                      <span style="color:#64748b;display:inline-flex;">${SVG_KEY_14}</span>
                       <span style="color: #64748b;">Status Kunci:</span>
                       <span style="display: inline-flex; align-items: center; flex-wrap: wrap;">${keyStatusPill}</span>
                     </div>
@@ -176,7 +178,7 @@ export function renderSettingsView(container) {
 
                 <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
                   <button type="button" class="btn btn-sm btn-secondary btn-test-vault" data-id="${entry.id}" style="padding: 7px 12px; font-weight: 600; border-radius: 8px;">
-                    ${SVG_SIGNAL_14}
+                    <span style="color:#156c3b;display:inline-flex;">${SVG_SIGNAL_14}</span>
                     <span>Uji Koneksi</span>
                   </button>
                   ${allowEditVault ? `
@@ -186,23 +188,27 @@ export function renderSettingsView(container) {
                   </button>
                   <div class="api-kebab-wrap">
                     <button type="button" class="btn btn-sm btn-secondary btn-api-kebab" data-id="${entry.id}" title="Menu Tindakan"
-                      style="width: 34px; height: 34px; padding: 0; border-radius: 8px; font-size: 16px; font-weight: 700;">⋮</button>
+                      style="width: 34px; height: 34px; padding: 0; border-radius: 8px;">${uiIcon('moreVertical', 16)}</button>
                     <div class="api-kebab-menu hidden" data-menu-id="${entry.id}">
                       ${!isActive ? `
                         <button type="button" class="api-kebab-item btn-activate-vault" data-id="${entry.id}">
-                          <span style="color: #156c3b;">✓</span> Aktifkan Sebagai Utama
+                          <span style="color: #156c3b; display: inline-flex;">${uiIcon('check', 13)}</span>
+                          <span>Aktifkan Sebagai Utama</span>
                         </button>
                       ` : `
-                        <div style="padding: 6px 10px; font-size: 11.5px; color: #15803d; font-weight: 700;">
-                          ✓ Sedang Aktif Utama
+                        <div style="padding: 6px 10px; font-size: 11.5px; color: #15803d; font-weight: 700; display: flex; align-items: center; gap: 6px;">
+                          ${uiIcon('checkCircle', 13)}
+                          <span>Sedang Aktif Utama</span>
                         </div>
                       `}
                       <button type="button" class="api-kebab-item btn-kebab-edit" data-id="${entry.id}">
-                        <span>✏️</span> Edit Kunci &amp; Model
+                        ${uiIcon('edit', 13)}
+                        <span>Edit Kunci &amp; Model</span>
                       </button>
                       ${!entry.isBuiltin ? `
                         <button type="button" class="api-kebab-item danger btn-delete-vault" data-id="${entry.id}">
-                          <span>🗑️</span> Hapus Koneksi API
+                          ${uiIcon('trash', 13)}
+                          <span>Hapus Koneksi API</span>
                         </button>
                       ` : ''}
                     </div>
@@ -218,8 +224,8 @@ export function renderSettingsView(container) {
         <div id="modal-vault-form" class="modal-overlay hidden">
           <div class="modal-card" style="width: 100%; max-width: 520px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
-              <h3 id="modal-vault-title" style="font-size: 16px; font-weight: 700; color: #0f172a;">Tambah Koneksi API Baru</h3>
-              <button id="btn-close-modal-vault" class="btn-icon" style="font-size: 20px; color: #64748b;">&times;</button>
+              <h3 id="modal-vault-title" style="font-size: 16px; font-weight: 700; color: #0f172a; margin: 0;">Tambah Koneksi API Baru</h3>
+              <button type="button" id="btn-close-modal-vault" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 15)}</button>
             </div>
 
             <form id="form-vault-entry">
@@ -478,7 +484,7 @@ function bindSettingsEvents(container) {
       }
 
       btn.disabled = true;
-      btn.textContent = '⏳ Menguji...';
+      btn.innerHTML = `${uiIcon('loader', 14, 'spin-icon')}<span>Menguji...</span>`;
       try {
         let activeModelLabel = entry.model;
 
@@ -515,16 +521,16 @@ function bindSettingsEvents(container) {
         });
 
         if (testRes) {
-          showToast(`✓ Koneksi Berhasil! Model aktif terdeteksi: ${activeModelLabel}`, 'success');
+          showToast(`Koneksi Berhasil! Model aktif terdeteksi: ${activeModelLabel}`, 'success');
           renderSettingsView(container);
         } else {
           showToast(`Koneksi terhubung tetapi tidak ada data respons dari ${entry.label}.`, 'warning');
         }
       } catch (err) {
-        showToast(`❌ Gagal terhubung ke ${entry.label}: ${err.message}`, 'error');
+        showToast(`Gagal terhubung ke ${entry.label}: ${err.message}`, 'error');
       } finally {
         btn.disabled = false;
-        btn.innerHTML = `${SVG_SIGNAL_14}<span>Uji Koneksi</span>`;
+        btn.innerHTML = `<span style="color:#156c3b;display:inline-flex;">${SVG_SIGNAL_14}</span><span>Uji Koneksi</span>`;
       }
     };
   });

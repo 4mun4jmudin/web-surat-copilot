@@ -10,6 +10,7 @@ import { renderDocx } from '../docx/render.js';
 import { downloadFile } from '../utils/download.js';
 import { showToast } from './notification.js';
 import { LETTER_TYPE_CODES } from '../letters/numbering.js';
+import { buildDocumentDownloadFilename } from '../letters/smartNaming.js';
 import {
   SIGNER_ROLE_OPTIONS,
   applySignatureModeToDocModel,
@@ -59,6 +60,7 @@ import {
   exportOutgoingLettersCsv,
   buildPrintableAgendaHtml
 } from '../letters/agenda.js';
+import { uiIcon } from './icons.js';
 
 let outgoingSearchQuery = '';
 let outgoingTypeFilter = 'all';
@@ -192,27 +194,26 @@ export function renderOutgoingLettersView(container) {
   const typeCodesInUse = Array.from(new Set(allOutgoing.map(i => (i.typeCode || '').toUpperCase()).filter(Boolean)));
   const yearsInUse = collectAvailableAgendaYears(allOutgoing, (item) => item.tanggalSurat || item.recordedAt);
 
-  const OUT_SVG_TRAY = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
-  const OUT_SVG_DOC = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`;
-  const OUT_SVG_HASH = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>`;
-  const OUT_SVG_CAL = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
-  const OUT_SVG_USERS = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`;
-  const OUT_SVG_SEARCH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
-  const OUT_SVG_LAYERS = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>`;
+  const OUT_SVG_TRAY = uiIcon('outboxTray', 24);
+  const OUT_SVG_DOC = (size = 18) => uiIcon('docClean', size);
+  const OUT_SVG_HASH = (size = 18) => uiIcon('hash', size);
+  const OUT_SVG_CAL = (size = 18) => uiIcon('calendar', size);
+  const OUT_SVG_USERS = (size = 18) => uiIcon('users', size);
+  const OUT_SVG_SEARCH = uiIcon('search', 15);
+  const OUT_SVG_LAYERS = uiIcon('layers', 14);
 
   container.innerHTML = `
     <div class="view-atmosphere">
-      <div class="view-shell outgoing-view-container">
+      <div class="view-shell view-shell-fluid outgoing-view-container">
 
         <!-- HEADER DASHBOARD SURAT KELUAR -->
         <div class="view-page-header" style="margin-bottom: 18px;">
           <div class="view-header-lead">
-            <span style="margin-top: 2px;">${OUT_SVG_TRAY}</span>
-            <span class="view-header-divider"></span>
+            <div class="view-header-badge">${OUT_SVG_TRAY}</div>
             <div>
               <h2 class="view-title">
                 <span>Buku Catatan &amp; Dashboard Surat Keluar</span>
-                <span class="status-chip status-chip-amber">🔒 Arsip Tetap (Tidak Bisa Diedit)</span>
+                <span class="status-chip status-chip-amber">${uiIcon('lock', 12)}<span>Arsip Tetap (Tidak Bisa Diedit)</span></span>
               </h2>
               <p class="view-subtitle" style="max-width: 730px;">
                 Daftar resmi surat yang telah diterbitkan dengan <strong>nomor surat tersusun berurutan</strong>. Catatan surat keluar terkunci permanen agar integritas nomor &amp; nama penerima terjaga. (Untuk menyimpan template/draf yang masih bisa diedit ulang, gunakan tab <strong>Gudang Surat</strong>).
@@ -220,15 +221,18 @@ export function renderOutgoingLettersView(container) {
             </div>
           </div>
 
-          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0;">
+          <div class="view-header-actions">
             <button type="button" id="btn-out-export-csv" class="btn btn-sm btn-secondary" title="Unduh Buku Agenda Surat Keluar format Excel/CSV (sesuai filter periode)">
-              📊 Ekspor Excel/CSV
+              ${uiIcon('spreadsheet', 13)}
+              <span>Ekspor Excel/CSV</span>
             </button>
             <button type="button" id="btn-out-print-rekap" class="btn btn-sm btn-secondary" title="Cetak Rekap Buku Agenda Surat Keluar resmi">
-              🖨️ Cetak Rekap
+              ${uiIcon('printer', 13)}
+              <span>Cetak Rekap</span>
             </button>
-            <button id="btn-go-canvas-new-out" class="btn btn-blue-cta" style="font-size: 13px; padding: 10px 18px; border-radius: 8px;">
-              + Buat &amp; Catat Surat Keluar Baru
+            <button id="btn-go-canvas-new-out" class="btn btn-blue-cta" style="font-size: 13px; padding: 9px 16px; border-radius: 8px;">
+              ${uiIcon('plus', 14)}
+              <span>Buat &amp; Catat Surat Keluar Baru</span>
             </button>
           </div>
         </div>
@@ -239,7 +243,7 @@ export function renderOutgoingLettersView(container) {
             <div class="kpi-icon-box kpi-icon-green">${OUT_SVG_DOC(19)}</div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Total Surat Keluar Tercatat</div>
-              <div style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 3px;">${allOutgoing.length}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 3px;">${allOutgoing.length}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Arsip resmi terkunci permanen</div>
             </div>
             <div class="kpi-watermark" style="color: #16a34a;">${OUT_SVG_DOC(48)}</div>
@@ -250,7 +254,7 @@ export function renderOutgoingLettersView(container) {
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Nomor Urut Tersusun</div>
               <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 3px;">
-                <span style="font-size: 24px; font-weight: 800; color: #0f172a; line-height: 1.2;">${lastSeq > 0 ? `#${String(lastSeq).padStart(3, '0')}` : '#000'}</span>
+                <span class="kpi-value" style="font-size: 24px; font-weight: 800; color: #0f172a; line-height: 1.2;">${lastSeq > 0 ? `#${String(lastSeq).padStart(3, '0')}` : '#000'}</span>
                 <span class="status-chip status-chip-green" style="font-size: 10.5px; padding: 2px 8px;">Berikutnya #${String(nextSeqInfo.sequenceNumber).padStart(3, '0')} &rsaquo;</span>
               </div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Otomatis berurutan per tahun (${nextSeqInfo.year})</div>
@@ -261,7 +265,7 @@ export function renderOutgoingLettersView(container) {
             <div class="kpi-icon-box kpi-icon-amber">${OUT_SVG_CAL(19)}</div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Surat Keluar Bulan Ini</div>
-              <div style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 3px;">${thisMonthCount}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 3px;">${thisMonthCount}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Periode bulan berjalan</div>
             </div>
             <div class="kpi-watermark" style="color: #f59e0b;">${OUT_SVG_CAL(48)}</div>
@@ -271,7 +275,7 @@ export function renderOutgoingLettersView(container) {
             <div class="kpi-icon-box kpi-icon-purple">${OUT_SVG_USERS(19)}</div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Atas Nama / Penerima Unik</div>
-              <div style="font-size: 26px; font-weight: 800; color: #6d28d9; line-height: 1.2; margin-top: 3px;">${uniqueRecipients}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #6d28d9; line-height: 1.2; margin-top: 3px;">${uniqueRecipients}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Siswa, Guru, atau Instansi tujuan</div>
             </div>
             <div class="kpi-watermark" style="color: #8b5cf6;">${OUT_SVG_USERS(48)}</div>
@@ -281,7 +285,7 @@ export function renderOutgoingLettersView(container) {
         <!-- FILTER & PENCARIAN ATAS NAMA / JUDUL SURAT -->
         <div class="filter-bar-card">
           <div class="icon-input-wrap" style="flex: 1; min-width: 260px;">
-            <span class="icon-input-leading">${OUT_SVG_SEARCH}</span>
+            <span class="icon-input-leading" style="color:#64748b;">${OUT_SVG_SEARCH}</span>
             <input type="text" id="input-outgoing-search" class="icon-input-control"
               value="${escapeHtml(outgoingSearchQuery)}"
               placeholder="Cari atas nama seseorang, judul surat, nomor surat, atau perihal (mendukung typo)...">
@@ -307,14 +311,14 @@ export function renderOutgoingLettersView(container) {
             </select>
           </div>
           <div class="icon-input-wrap filter-ctrl-xs">
-            <span class="icon-input-leading">#</span>
+            <span class="icon-input-leading">${uiIcon('hash', 14)}</span>
             <select id="select-outgoing-year" class="icon-input-control" style="cursor: pointer;">
               <option value="all" ${outgoingYearFilter === 'all' ? 'selected' : ''}>Semua Tahun</option>
               ${yearsInUse.map(y => `<option value="${escapeHtml(y)}" ${outgoingYearFilter === y ? 'selected' : ''}>${escapeHtml(y)}</option>`).join('')}
             </select>
           </div>
           <div class="icon-input-wrap" style="width: 225px;">
-            <span class="icon-input-leading">⇅</span>
+            <span class="icon-input-leading">${uiIcon('sort', 14)}</span>
             <select id="select-outgoing-sort" class="icon-input-control" style="cursor: pointer;">
               <option value="seq_desc" ${outgoingSortMode === 'seq_desc' ? 'selected' : ''}>Urut: No. Terbaru (Terbesar)</option>
               <option value="seq_asc" ${outgoingSortMode === 'seq_asc' ? 'selected' : ''}>Urut: No. Awal (001 → ...)</option>
@@ -326,8 +330,9 @@ export function renderOutgoingLettersView(container) {
 
         <!-- BANNER MODE HAPUS (HANYA MUNCUL KETIKA SHORTCUT ALT+D DIAKTIFKAN) -->
         <div id="outgoing-delete-mode-banner" class="${showDeleteActions ? '' : 'hidden'}" style="background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 10px; padding: 10px 16px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12.5px;">
-          <div>
-            <strong>⚠️ Mode Hapus Surat Keluar Aktif:</strong> Tombol eksekusi <b>Hapus</b> kini ditampilkan pada setiap baris daftar Surat Keluar.
+          <div style="display:inline-flex;align-items:center;gap:7px;">
+            ${uiIcon('alertTriangle', 15)}
+            <span><strong>Mode Hapus Surat Keluar Aktif:</strong> Tombol eksekusi <b>Hapus</b> kini ditampilkan pada setiap baris daftar Surat Keluar.</span>
           </div>
           <button type="button" id="btn-exit-delete-mode" class="btn btn-sm btn-secondary" style="border-color: #fca5a5; color: #991b1b;">Sembunyikan Tombol Hapus (Alt+D)</button>
         </div>
@@ -342,8 +347,8 @@ export function renderOutgoingLettersView(container) {
     <div id="modal-confirm-delete-out" class="modal-overlay hidden">
       <div class="modal-card" style="max-width: 440px; width: 92%;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
-          <h3 style="margin: 0; font-size: 16px; color: #b91c1c;">🗑️ Konfirmasi Hapus Surat Keluar</h3>
-          <button type="button" id="btn-close-del-out-modal" class="btn btn-sm btn-secondary">&times;</button>
+          <h3 style="margin: 0; font-size: 16px; color: #b91c1c;">${uiIcon('trash', 16)}<span>Konfirmasi Hapus Surat Keluar</span></h3>
+          <button type="button" id="btn-close-del-out-modal" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 14)}</button>
         </div>
         <div style="padding: 14px 0; font-size: 13px; color: #334155;">
           <p style="margin: 0 0 10px 0;">Anda yakin ingin menghapus catatan Surat Keluar berikut dari daftar arsip?</p>
@@ -351,7 +356,7 @@ export function renderOutgoingLettersView(container) {
         </div>
         <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
           <button type="button" id="btn-cancel-del-out" class="btn btn-secondary">Batal</button>
-          <button type="button" id="btn-confirm-del-out" class="btn btn-danger" style="font-weight: 700;">🗑️ Eksekusi Hapus</button>
+          <button type="button" id="btn-confirm-del-out" class="btn btn-danger" style="font-weight: 700;">${uiIcon('trash', 13)}<span>Eksekusi Hapus</span></button>
         </div>
       </div>
     </div>
@@ -364,17 +369,18 @@ export function renderOutgoingLettersView(container) {
             <h3 id="modal-out-title" style="margin: 0; font-size: 16px; color: #0f172a;">Pratinjau Surat Keluar</h3>
             <div id="modal-out-subtitle" style="font-size: 12px; color: #64748b; margin-top: 2px;"></div>
           </div>
-          <button type="button" id="btn-close-out-modal" class="btn btn-sm btn-secondary">✕ Tutup</button>
+          <button type="button" id="btn-close-out-modal" class="btn btn-sm btn-secondary">${uiIcon('x', 13)}<span>Tutup</span></button>
         </div>
         <div id="modal-out-body" style="flex: 1; overflow-y: auto; padding: 18px; background: #f1f5f9; border-radius: 6px; margin: 12px 0;"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0;">
-          <span style="font-size: 11.5px; color: #b91c1c; font-weight: 600;">
-            🔒 Arsip Surat Keluar ini terkunci dan tidak dapat diedit.
+          <span style="font-size: 11.5px; color: #b91c1c; font-weight: 600; display:inline-flex; align-items:center; gap:5px;">
+            ${uiIcon('lock', 12)}
+            <span>Arsip Surat Keluar ini terkunci dan tidak dapat diedit.</span>
           </span>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button type="button" id="btn-modal-out-clone" class="btn btn-sm btn-secondary">📋 Salin jadi Draf Baru</button>
-            <button type="button" id="btn-modal-out-print" class="btn btn-sm btn-secondary">🖨️ Cetak / PDF</button>
-            <button type="button" id="btn-modal-out-download" class="btn btn-sm btn-success">⬇️ Unduh .docx</button>
+            <button type="button" id="btn-modal-out-clone" class="btn btn-sm btn-secondary">${uiIcon('copy', 13)}<span>Salin jadi Draf Baru</span></button>
+            <button type="button" id="btn-modal-out-print" class="btn btn-sm btn-secondary">${uiIcon('printer', 13)}<span>Cetak / PDF</span></button>
+            <button type="button" id="btn-modal-out-download" class="btn btn-sm btn-success">${uiIcon('download', 13)}<span>Unduh .docx</span></button>
           </div>
         </div>
       </div>
@@ -385,10 +391,10 @@ export function renderOutgoingLettersView(container) {
       <div class="modal-card" style="max-width: 600px; width: 94%; max-height: 90vh; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
           <div>
-            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">▣ Barcode QR &amp; Status Pengesahan Surat</h3>
+            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">${uiIcon('qrCode', 16)}<span>Barcode QR &amp; Status Pengesahan Surat</span></h3>
             <div id="qr-modal-subtitle" style="font-size: 12px; color: #64748b; margin-top: 2px;"></div>
           </div>
-          <button type="button" id="btn-close-qr-modal" class="btn btn-sm btn-secondary">✕ Tutup</button>
+          <button type="button" id="btn-close-qr-modal" class="btn btn-sm btn-secondary">${uiIcon('x', 13)}<span>Tutup</span></button>
         </div>
         <div id="qr-modal-body" style="flex: 1; overflow-y: auto; padding: 14px 2px;"></div>
       </div>
@@ -398,8 +404,8 @@ export function renderOutgoingLettersView(container) {
     <div id="modal-outgoing-verify-preview" class="modal-overlay hidden">
       <div class="modal-card" style="max-width: 720px; width: 95%; max-height: 92vh; display: flex; flex-direction: column; padding: 14px;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
-          <h3 style="margin: 0; font-size: 15px; color: #0f172a;">🔍 Simulasi Tampilan Saat Barcode QR Dipindai HP</h3>
-          <button type="button" id="btn-close-verify-preview" class="btn btn-sm btn-secondary">✕ Tutup</button>
+          <h3 style="margin: 0; font-size: 15px; color: #0f172a;">${uiIcon('search', 15)}<span>Simulasi Tampilan Saat Barcode QR Dipindai HP</span></h3>
+          <button type="button" id="btn-close-verify-preview" class="btn btn-sm btn-secondary">${uiIcon('x', 13)}<span>Tutup</span></button>
         </div>
         <div id="verify-preview-mount" style="flex: 1; overflow-y: auto; padding-top: 12px;"></div>
       </div>
@@ -449,16 +455,18 @@ function updateOutgoingListInPlace(container) {
 
   listArea.innerHTML = `
     <div class="ui-card" style="padding: 0; overflow: hidden;">
-      <div style="overflow-x: auto;">
-        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <div class="responsive-table-wrap">
+        <table class="enterprise-table responsive-data-table outgoing-list-table">
           <thead>
-            <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0; text-align: left; color: #334155; font-size: 12px;">
-              <th style="padding: 12px 14px; width: 75px;">Urut</th>
-              <th style="padding: 12px 14px; width: 235px;">Nomor Surat Tersusun</th>
-              <th style="padding: 12px 14px;">Judul Surat &amp; Perihal</th>
-              <th style="padding: 12px 14px; width: 220px;">Atas Nama / Penerima</th>
-              <th style="padding: 12px 14px; width: 135px;">Tanggal Surat</th>
-              <th style="padding: 12px 14px; width: 280px; text-align: right;">Aksi (Terkunci 🔒)</th>
+            <tr>
+              <th style="width: 7%; min-width: 72px;">Urut</th>
+              <th style="width: 21%; min-width: 185px;">Nomor &amp; Status Surat</th>
+              <th style="width: 29%; min-width: 220px;">Judul &amp; Keperluan Surat</th>
+              <th style="width: 16%; min-width: 145px;">Atas Nama / Pihak</th>
+              <th style="width: 14%; min-width: 130px;">Tanggal &amp; Pejabat</th>
+              <th style="width: 13%; min-width: 185px; text-align: right;">
+                <span style="display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;"><span>Aksi (Terkunci</span>${uiIcon('lock', 11)}<span>)</span></span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -475,64 +483,82 @@ function updateOutgoingListInPlace(container) {
                 : item.signerRole === 'kepsek_dan_tu'
                 ? 'a.n. Kepsek & TU'
                 : 'a.n. Kepala Sekolah';
+              const unitLabel = item.unitId
+                ? String(item.unitId).toUpperCase()
+                : (/SMPITA/i.test(item.nomorSurat || '') ? 'SMP' : (/SMKITA/i.test(item.nomorSurat || '') ? 'SMK' : ''));
               const statusChipHtml = isRevoked
-                ? '<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 7px;">⛔ Dicabut</span>'
+                ? `<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:2px 7px;">${uiIcon('ban', 11)}<span>Dicabut</span></span>`
                 : isPendingAcc
                 ? '<span class="status-chip acc-row-pending-chip"><span class="acc-live-spinner acc-spinner-sm"></span> Menunggu ACC Kepsek</span>'
                 : isRejected
-                ? `<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 7px;" title="${escapeHtml(item.rejectedReason || '')}">❌ Ditolak Kepsek</span>`
+                ? `<span class="status-chip" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:2px 7px;" title="${escapeHtml(item.rejectedReason || '')}">${uiIcon('xCircle', 11)}<span>Ditolak Kepsek</span></span>`
                 : isSah
-                ? `<span class="status-chip" style="background:#dcfce7;color:#15803d;font-size:10px;padding:1px 7px;">✓ SAH (${escapeHtml(roleBadge)})</span>`
-                : '<span class="status-chip" style="background:#f1f5f9;color:#475569;font-size:10px;padding:1px 7px;">Manual (Belum SAH)</span>';
+                ? `<span class="status-chip" style="background:#dcfce7;color:#15803d;font-size:10px;padding:2px 7px;">${uiIcon('check', 11)}<span>SAH (${escapeHtml(roleBadge)})</span></span>`
+                : '<span class="status-chip" style="background:#f1f5f9;color:#475569;font-size:10px;padding:2px 7px;">Manual (Belum SAH)</span>';
               const cloudChipHtml = isSah && !isRevoked
                 ? (item.cloudSynced
-                    ? '<span class="status-chip" style="background:#eff6ff;color:#1d4ed8;font-size:10px;padding:1px 6px;" title="Tersinkron ke server verifikasi publik Netlify">☁️ Online</span>'
-                    : '<span class="status-chip" style="background:#fef3c7;color:#b45309;font-size:10px;padding:1px 6px;" title="Belum tersinkron ke cloud; klik QR untuk Sync">⚠️ Lokal</span>')
+                    ? `<span class="status-chip" style="background:#eff6ff;color:#1d4ed8;font-size:10px;padding:2px 6px;" title="Tersinkron ke server verifikasi publik Netlify">${uiIcon('cloudCheck', 11)}<span>Online</span></span>`
+                    : `<span class="status-chip" style="background:#fef3c7;color:#b45309;font-size:10px;padding:2px 6px;" title="Belum tersinkron ke cloud; klik QR untuk Sync">${uiIcon('alertTriangle', 11)}<span>Lokal</span></span>`)
                 : '';
               const driveLink = item.driveDocxUrl || item.driveJsonUrl || '';
               const driveChipHtml = item.driveSynced && driveLink
-                ? `<a href="${escapeHtml(driveLink)}" target="_blank" rel="noopener" class="status-chip" style="background:#ecfdf5;color:#15803d;font-size:10px;padding:1px 6px;text-decoration:none;" title="Buka arsip file di Google Drive">📁 Drive ↗</a>`
+                ? `<a href="${escapeHtml(driveLink)}" target="_blank" rel="noopener" class="status-chip" style="background:#ecfdf5;color:#15803d;font-size:10px;padding:2px 6px;text-decoration:none;" title="Buka arsip file di Google Drive">${uiIcon('folder', 11)}<span>Drive</span>${uiIcon('externalLink', 10)}</a>`
                 : '';
               const qrBtnLabel = isPendingAcc
-                ? (canApprove ? '✅ ACC' : '⏳ ACC')
-                : (isSah && !isRevoked ? '▣ QR' : '🛡️ Sahkan');
+                ? (canApprove ? `${uiIcon('checkCircle', 12)}<span>ACC</span>` : `${uiIcon('clock', 12)}<span>ACC</span>`)
+                : (isSah && !isRevoked ? `${uiIcon('qrCode', 12)}<span>QR</span>` : `${uiIcon('shieldCheck', 12)}<span>Sahkan</span>`);
               return `
-              <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.12s;" class="outgoing-row ${isPendingAcc ? 'is-pending-acc-row' : ''}">
-                <td style="padding: 12px 14px; font-weight: 800; color: #156c3b;">
-                  #${String(item.sequenceNumber || 0).padStart(3, '0')}
-                </td>
-                <td style="padding: 12px 14px;">
-                  <div style="font-family: Consolas, monospace; font-size: 12px; font-weight: 700; color: #0f172a;">
-                    ${escapeHtml(item.nomorSurat)}
+              <tr class="outgoing-row ${isPendingAcc ? 'is-pending-acc-row' : ''}">
+                <td data-label="Urut" style="font-weight: 800; color: #156c3b; font-variant-numeric: tabular-nums;">
+                  <div class="td-value-stack">
+                    <span>#${String(item.sequenceNumber || 0).padStart(3, '0')}</span>
+                    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">
+                      <span class="status-chip status-chip-blue" style="font-size: 10px; padding: 1px 6px;">${escapeHtml(item.typeCode || 'DINAS')}</span>
+                      ${unitLabel ? `<span class="status-chip status-chip-green" style="font-size: 10px; padding: 1px 6px;">${escapeHtml(unitLabel)}</span>` : ''}
+                    </div>
                   </div>
-                  <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:4px;">
-                    <span class="status-chip status-chip-blue" style="font-size: 10px; padding: 1px 7px;">
-                      ${escapeHtml(item.typeCode || 'DINAS')}
+                </td>
+                <td data-label="Nomor &amp; Status Surat">
+                  <div class="td-value-stack">
+                    <div style="font-family: Consolas, monospace; font-size: 12px; font-weight: 700; color: #0f172a; overflow-wrap: anywhere;">
+                      ${escapeHtml(item.nomorSurat)}
+                    </div>
+                    <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:5px;">
+                      ${statusChipHtml}
+                      ${cloudChipHtml}
+                      ${driveChipHtml}
+                    </div>
+                  </div>
+                </td>
+                <td data-label="Judul &amp; Keperluan">
+                  <div class="td-value-stack">
+                    <div style="font-weight: 700; color: #0f172a; line-height: 1.38; overflow-wrap: anywhere;">${escapeHtml(item.title)}</div>
+                    ${item.perihal && item.perihal !== item.title ? `<div style="font-size: 11.5px; color: #475569; margin-top: 3px; line-height: 1.4; overflow-wrap: anywhere;">${escapeHtml(item.perihal)}</div>` : ''}
+                  </div>
+                </td>
+                <td data-label="Atas Nama / Pihak">
+                  <div class="td-value-stack">
+                    <span class="status-chip status-chip-purple" style="font-size: 11.5px; font-weight: 600; white-space: normal; text-align: left; line-height: 1.35;">
+                      ${uiIcon('user', 12)}
+                      <span>${escapeHtml(item.recipientName || '-')}</span>
                     </span>
-                    ${statusChipHtml}
-                    ${cloudChipHtml}
-                    ${driveChipHtml}
                   </div>
                 </td>
-                <td style="padding: 12px 14px;">
-                  <div style="font-weight: 700; color: #0f172a;">${escapeHtml(item.title)}</div>
-                  <div style="font-size: 11.5px; color: #64748b; margin-top: 2px;">${escapeHtml(item.perihal || '-')}</div>
+                <td data-label="Tanggal &amp; Pejabat" style="color: #334155; font-size: 12px;">
+                  <div class="td-value-stack">
+                    <div style="font-weight: 600;">${escapeHtml(item.tanggalSurat || '-')}</div>
+                    ${item.signerName ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px;">${escapeHtml(item.signerName)}</div>` : ''}
+                  </div>
                 </td>
-                <td style="padding: 12px 14px;">
-                  <span class="status-chip status-chip-purple" style="font-size: 11.5px; font-weight: 600;">
-                    👤 ${escapeHtml(item.recipientName || '-')}
-                  </span>
-                </td>
-                <td style="padding: 12px 14px; color: #475569; font-size: 12px;">
-                  ${escapeHtml(item.tanggalSurat || '-')}
-                </td>
-                <td style="padding: 12px 14px; text-align: right; white-space: nowrap;">
-                  <button type="button" class="btn btn-sm btn-secondary btn-out-view" data-id="${escapeHtml(item.id)}" title="Lihat pratinjau surat (Read-Only)">👁️ Lihat</button>
-                  <button type="button" class="btn btn-sm ${isPendingAcc && canApprove ? 'btn-primary acc-glow-btn' : 'btn-secondary'} btn-out-qr" data-id="${escapeHtml(item.id)}" title="Kelola Pengesahan SAH &amp; Barcode QR">${qrBtnLabel}</button>
-                  <button type="button" class="btn btn-sm btn-secondary btn-out-print" data-id="${escapeHtml(item.id)}" title="Cetak / PDF (Pilih Barcode QR atau Kosongan TTD Manual)">🖨️</button>
-                  <button type="button" class="btn btn-sm btn-success btn-out-download" data-id="${escapeHtml(item.id)}" title="Unduh berkas .docx resmi (Pilih QR atau TTD Manual)">⬇️</button>
-                  <button type="button" class="btn btn-sm btn-secondary btn-out-clone" data-id="${escapeHtml(item.id)}" title="Salin isi surat sebagai draf baru di Lembar Kerja (tanpa mengubah arsip ini)">📋 Salin</button>
-                  ${showDeleteActions && canDelete ? `<button type="button" class="btn btn-sm btn-danger btn-out-delete" data-id="${escapeHtml(item.id)}" title="Hapus data Surat Keluar ini">🗑️ Hapus</button>` : ''}
+                <td data-label="Aksi" class="td-actions-cell" style="text-align: right;">
+                  <div class="table-action-group">
+                    <button type="button" class="btn btn-sm btn-secondary btn-out-view" data-id="${escapeHtml(item.id)}" title="Lihat pratinjau surat (Read-Only)">${uiIcon('eye', 13)}<span>Lihat</span></button>
+                    <button type="button" class="btn btn-sm ${isPendingAcc && canApprove ? 'btn-primary acc-glow-btn' : 'btn-secondary'} btn-out-qr" data-id="${escapeHtml(item.id)}" title="Kelola Pengesahan SAH &amp; Barcode QR">${qrBtnLabel}</button>
+                    <button type="button" class="btn btn-sm btn-secondary btn-square-sm btn-out-print" data-id="${escapeHtml(item.id)}" title="Cetak / PDF (Pilih Barcode QR atau Kosongan TTD Manual)">${uiIcon('printer', 13)}</button>
+                    <button type="button" class="btn btn-sm btn-success btn-square-sm btn-out-download" data-id="${escapeHtml(item.id)}" title="Unduh berkas .docx resmi (Pilih QR atau TTD Manual)">${uiIcon('download', 13)}</button>
+                    <button type="button" class="btn btn-sm btn-secondary btn-out-clone" data-id="${escapeHtml(item.id)}" title="Salin isi surat sebagai draf baru di Lembar Kerja (tanpa mengubah arsip ini)">${uiIcon('copy', 13)}<span>Salin</span></button>
+                    ${showDeleteActions && canDelete ? `<button type="button" class="btn btn-sm btn-danger btn-out-delete" data-id="${escapeHtml(item.id)}" title="Hapus data Surat Keluar ini">${uiIcon('trash', 13)}<span>Hapus</span></button>` : ''}
+                  </div>
                 </td>
               </tr>
             `;
@@ -651,7 +677,7 @@ function bindOutgoingEvents(container) {
   const toggleDeleteMode = (forceState = null) => {
     const st = store.getState();
     if (!canDeleteOutgoingItem(st.authUser, st.authPermissions)) {
-      showToast('🔒 Mode hapus Surat Keluar hanya diizinkan untuk Administrator atau Kepala Sekolah.', 'warning');
+      showToast('Mode hapus Surat Keluar hanya diizinkan untuk Administrator atau Kepala Sekolah.', 'warning');
       return;
     }
     showDeleteActions = forceState !== null ? Boolean(forceState) : !showDeleteActions;
@@ -661,8 +687,8 @@ function bindOutgoingEvents(container) {
     updateOutgoingListInPlace(container);
     showToast(
       showDeleteActions
-        ? '🔓 Mode Hapus Surat Keluar aktif (Alt+D): Tombol Hapus kini tampil di daftar.'
-        : '🔒 Mode Hapus disembunyikan kembali.',
+        ? 'Mode Hapus Surat Keluar aktif (Alt+D): Tombol Hapus kini tampil di daftar.'
+        : 'Mode Hapus disembunyikan kembali.',
       'info'
     );
   };
@@ -750,7 +776,7 @@ function bindOutgoingRowActions(container) {
           }
           store.removeOutgoingLetter(item.id);
           closeDelModal();
-          showToast(`🗑️ Data Surat Keluar #${String(item.sequenceNumber || 0).padStart(3, '0')} (${item.nomorSurat}) dihapus.`, 'success');
+          showToast(`Data Surat Keluar #${String(item.sequenceNumber || 0).padStart(3, '0')} (${item.nomorSurat}) dihapus.`, 'success');
           renderOutgoingLettersView(container);
         };
       }
@@ -767,7 +793,25 @@ function bindOutgoingRowActions(container) {
       modalBody.innerHTML = renderReadOnlyDocumentHtml(item);
       modal.dataset.activeId = item.id;
       modal.classList.remove('hidden');
-      requestAnimationFrame(() => syncOutgoingPreviewContainer(modalBody, item));
+
+      if (modalBody._previewResizeObserver) {
+        try { modalBody._previewResizeObserver.disconnect(); } catch {}
+        modalBody._previewResizeObserver = null;
+      }
+      const runPreviewSync = () => {
+        if (!modal || modal.classList.contains('hidden') || modal.dataset.activeId !== item.id) return;
+        syncOutgoingPreviewContainer(modalBody, item);
+      };
+      requestAnimationFrame(() => {
+        runPreviewSync();
+        requestAnimationFrame(runPreviewSync);
+      });
+      setTimeout(runPreviewSync, 80);
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => runPreviewSync());
+        ro.observe(modalBody);
+        modalBody._previewResizeObserver = ro;
+      }
 
       if (btnModalPrint) {
         btnModalPrint.onclick = () => promptOutgoingActionWithChoice(item, 'print', container);
@@ -815,7 +859,7 @@ function bindOutgoingRowActions(container) {
 
 async function authorizeExistingOutgoingItem(item, signerRole = 'kepala_sekolah') {
   const st = store.getState();
-  const school = st.schoolProfile || {};
+  const school = store.getEffectiveSchoolForDocument(item.documentSnapshot || item);
   const roleCheck = canSignWithRole(st.authUser, st.authPermissions, signerRole);
   if (!roleCheck.allowed) {
     showToast(roleCheck.reason || 'Anda tidak memiliki izin pengesahan atas nama pejabat tersebut.', 'error');
@@ -923,7 +967,8 @@ export function promptOutgoingActionWithChoice(item, actionType, container) {
   const isPendingAcc = item.verificationStatus === 'pending_acc' || item.accStatus === 'pending';
   const isRejectedAcc = item.verificationStatus === 'rejected';
   const isVerifiedSah = Boolean((item.verificationStatus === 'sah' || item.isVerifiedSah) && !isRevoked && item.qrDataUrl);
-  const signerInfo = buildSignerSelectionInfo(store.getState().schoolProfile, item.signerRole || 'kepala_sekolah');
+  const itemSchool = store.getEffectiveSchoolForDocument(item.documentSnapshot || item);
+  const signerInfo = buildSignerSelectionInfo(itemSchool, item.signerRole || 'kepala_sekolah');
 
   openPrintSignatureChoiceModal({
     actionType,
@@ -938,6 +983,7 @@ export function promptOutgoingActionWithChoice(item, actionType, container) {
     defaultSignerRole: item.signerRole || 'kepala_sekolah',
     signerLabel: signerInfo.roleLabel,
     signerName: item.signerName || signerInfo.signerName,
+    school: itemSchool,
     onChooseQr: async () => {
       if (actionType === 'print') {
         printOutgoingItem(item, { mode: 'qr' });
@@ -974,7 +1020,7 @@ export function promptOutgoingActionWithChoice(item, actionType, container) {
           store.upsertOutgoingLetterFromCloud(res.item);
           if (res.syncRev) setLastKnownSyncRev(res.syncRev);
           updateOutgoingListInPlace(container);
-          showToast('⏳ Permintaan ACC dikirim ke Kepala Sekolah. Antrean otomatis sinkron tanpa refresh!', 'success');
+          showToast('Permintaan ACC dikirim ke Kepala Sekolah. Antrean otomatis sinkron tanpa refresh!', 'success');
         }
       : null
   });
@@ -989,7 +1035,7 @@ function openOutgoingQrModal(initialItem, container) {
   const renderModalContent = () => {
     const st = store.getState();
     const item = store.getOutgoingLetters().find(x => x.id === initialItem.id) || initialItem;
-    const school = st.schoolProfile || {};
+    const school = store.getEffectiveSchoolForDocument(item.documentSnapshot || item);
     const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
     const isRevoked = item.verificationStatus === 'revoked';
     const isPendingAcc = item.verificationStatus === 'pending_acc' || item.accStatus === 'pending';
@@ -1013,9 +1059,9 @@ function openOutgoingQrModal(initialItem, container) {
             const allowClick = opt.allowed || canRequestAnyRole;
             const roleStatusBadge = !opt.allowed
               ? (canRequestAnyRole
-                  ? `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">📨 Minta ACC Kepala Sekolah</div>`
-                  : `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:2px;">🔒 Perlu Izin Kepsek/Admin</div>`)
-              : (opt.delegated ? `<div style="font-size:10px;color:#15803d;font-weight:700;margin-top:2px;">✓ Izin Delegasi Aktif</div>` : '');
+                  ? `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:3px;display:inline-flex;align-items:center;gap:4px;">${uiIcon('sendOut', 10)}<span>Minta ACC Kepala Sekolah</span></div>`
+                  : `<div style="font-size:10px;color:#b45309;font-weight:700;margin-top:3px;display:inline-flex;align-items:center;gap:4px;">${uiIcon('lock', 10)}<span>Perlu Izin Kepsek/Admin</span></div>`)
+              : (opt.delegated ? `<div style="font-size:10px;color:#15803d;font-weight:700;margin-top:3px;display:inline-flex;align-items:center;gap:4px;">${uiIcon('check', 10)}<span>Izin Delegasi Aktif</span></div>` : '');
             return `
               <label class="signer-role-option ${opt.allowed ? '' : 'is-request-acc'}" title="${escapeHtml(opt.lockReason || opt.description)}">
                 <input type="radio" name="modal-out-signer-role" value="${escapeHtml(opt.id)}" ${opt.id === activeRole ? 'checked' : ''} ${allowClick ? '' : 'disabled'} data-allowed="${opt.allowed ? '1' : '0'}" />
@@ -1034,7 +1080,7 @@ function openOutgoingQrModal(initialItem, container) {
     if (isSah && item.qrDataUrl) {
       body.innerHTML = `
         <div class="choice-status-banner choice-banner-sah" style="margin-bottom:12px;">
-          <strong>✓ Surat Dinyatakan SAH — Barcode QR Aktif</strong>
+          <strong style="display:inline-flex;align-items:center;gap:6px;">${uiIcon('checkCircle', 14)}<span>Surat Dinyatakan SAH — Barcode QR Aktif</span></strong>
           <span>${escapeHtml(item.verificationStatement || roleInfo.verificationStatement)}</span>
         </div>
 
@@ -1050,8 +1096,8 @@ function openOutgoingQrModal(initialItem, container) {
             </div>
             <div>
               <div style="font-size:11px;color:#64748b;font-weight:700;">Status Sinkronisasi Server Publik</div>
-              <div style="font-size:12.5px;font-weight:600;color:${item.cloudSynced ? '#15803d' : '#b45309'};">
-                ${item.cloudSynced ? '☁️ Tersinkron di Netlify Cloud (Siap dipindai dari HP mana pun)' : '⚠️ Baru Tersimpan Lokal (Klik Sinkron Cloud agar bisa dipindai HP)'}
+              <div style="font-size:12.5px;font-weight:600;display:inline-flex;align-items:center;gap:5px;color:${item.cloudSynced ? '#15803d' : '#b45309'};">
+                ${item.cloudSynced ? `${uiIcon('cloudCheck', 14)}<span>Tersinkron di Netlify Cloud (Siap dipindai dari HP mana pun)</span>` : `${uiIcon('alertTriangle', 14)}<span>Baru Tersimpan Lokal (Klik Sinkron Cloud agar bisa dipindai HP)</span>`}
               </div>
             </div>
             <div>
@@ -1062,10 +1108,10 @@ function openOutgoingQrModal(initialItem, container) {
               </div>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
-              <button type="button" id="btn-qr-preview-page" class="btn btn-sm btn-primary">🔍 Pratinjau Halaman Scan</button>
-              ${!item.cloudSynced ? '<button type="button" id="btn-qr-sync-cloud" class="btn btn-sm btn-secondary" style="border-color:#0284c7;color:#0369a1;">☁️ Sinkron Cloud</button>' : ''}
-              ${item.driveDocxUrl ? `<a href="${escapeHtml(item.driveDocxUrl)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="text-decoration:none;border-color:#15803d;color:#15803d;">📁 Buka .docx di Drive ↗</a>` : (getStoredAuthToken() ? '<button type="button" id="btn-qr-push-drive" class="btn btn-sm btn-secondary" style="border-color:#15803d;color:#15803d;">📤 Upload .docx ke Drive</button>' : '')}
-              ${canRevoke ? '<button type="button" id="btn-qr-revoke" class="btn btn-sm btn-danger">⛔ Cabut Pengesahan</button>' : '<span style="font-size:11px;color:#64748b;">🔒 Pencabutan khusus Kepsek/Admin</span>'}
+              <button type="button" id="btn-qr-preview-page" class="btn btn-sm btn-primary">${uiIcon('search', 13)}<span>Pratinjau Halaman Scan</span></button>
+              ${!item.cloudSynced ? `<button type="button" id="btn-qr-sync-cloud" class="btn btn-sm btn-secondary" style="border-color:#0284c7;color:#0369a1;">${uiIcon('cloud', 13)}<span>Sinkron Cloud</span></button>` : ''}
+              ${item.driveDocxUrl ? `<a href="${escapeHtml(item.driveDocxUrl)}" target="_blank" rel="noopener" class="btn btn-sm btn-secondary" style="text-decoration:none;border-color:#15803d;color:#15803d;">${uiIcon('folder', 13)}<span>Buka .docx di Drive</span>${uiIcon('externalLink', 11)}</a>` : (getStoredAuthToken() ? `<button type="button" id="btn-qr-push-drive" class="btn btn-sm btn-secondary" style="border-color:#15803d;color:#15803d;">${uiIcon('upload', 13)}<span>Upload .docx ke Drive</span></button>` : '')}
+              ${canRevoke ? `<button type="button" id="btn-qr-revoke" class="btn btn-sm btn-danger">${uiIcon('ban', 13)}<span>Cabut Pengesahan</span></button>` : `<span style="font-size:11px;color:#64748b;display:inline-flex;align-items:center;gap:4px;">${uiIcon('lock', 12)}<span>Pencabutan khusus Kepsek/Admin</span></span>`}
             </div>
           </div>
         </div>
@@ -1095,7 +1141,7 @@ function openOutgoingQrModal(initialItem, container) {
       if (btnSync) {
         btnSync.onclick = async () => {
           btnSync.disabled = true;
-          btnSync.textContent = 'Menyinkronkan...';
+          btnSync.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Menyinkronkan...</span>`;
           const payload = buildVerificationPayload({
             entry: {
               ...item,
@@ -1111,10 +1157,10 @@ function openOutgoingQrModal(initialItem, container) {
             store.updateOutgoingLetterVerification(item.id, { cloudSynced: true });
             updateOutgoingListInPlace(container);
             renderModalContent();
-            showToast('☁️ Data pengesahan surat berhasil disinkronkan ke cloud!', 'success');
+            showToast('Data pengesahan surat berhasil disinkronkan ke cloud!', 'success');
           } else {
             btnSync.disabled = false;
-            btnSync.textContent = '☁️ Sinkron Cloud';
+            btnSync.innerHTML = `${uiIcon('cloud', 13)}<span>Sinkron Cloud</span>`;
             showToast(res.error || 'Gagal sinkronisasi ke cloud.', 'error');
           }
         };
@@ -1124,7 +1170,7 @@ function openOutgoingQrModal(initialItem, container) {
       if (btnPushDrive) {
         btnPushDrive.onclick = async () => {
           btnPushDrive.disabled = true;
-          btnPushDrive.textContent = 'Mengunggah ke Drive...';
+          btnPushDrive.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Mengunggah ke Drive...</span>`;
           try {
             let docxBase64 = '';
             if (item.documentSnapshot) {
@@ -1145,16 +1191,16 @@ function openOutgoingQrModal(initialItem, container) {
               store.upsertOutgoingLetterFromCloud(res.item);
               updateOutgoingListInPlace(container);
               renderModalContent();
-              showToast('📁 Arsip .docx berhasil diunggah ke Google Drive!', 'success');
+              showToast('Arsip .docx berhasil diunggah ke Google Drive!', 'success');
             } else {
               showToast(res.error || 'Gagal mengunggah ke Google Drive.', 'warning');
               btnPushDrive.disabled = false;
-              btnPushDrive.textContent = '📤 Upload .docx ke Drive';
+              btnPushDrive.innerHTML = `${uiIcon('upload', 13)}<span>Upload .docx ke Drive</span>`;
             }
           } catch (err) {
             showToast(err.message, 'error');
             btnPushDrive.disabled = false;
-            btnPushDrive.textContent = '📤 Upload .docx ke Drive';
+            btnPushDrive.innerHTML = `${uiIcon('upload', 13)}<span>Upload .docx ke Drive</span>`;
           }
         };
       }
@@ -1177,7 +1223,7 @@ function openOutgoingQrModal(initialItem, container) {
             if (res.forbidden) {
               showToast(res.error || 'Tidak memiliki izin mencabut pengesahan ini.', 'error');
               btnRevokeEl.disabled = false;
-              btnRevokeEl.textContent = '⛔ Cabut Pengesahan';
+              btnRevokeEl.innerHTML = `${uiIcon('ban', 13)}<span>Cabut Pengesahan</span>`;
               return;
             }
             cloudOk = res.ok;
@@ -1201,7 +1247,7 @@ function openOutgoingQrModal(initialItem, container) {
           });
           updateOutgoingListInPlace(container);
           renderModalContent();
-          showToast(cloudOk ? '⛔ Pengesahan surat dicabut di arsip & cloud.' : '⛔ Pengesahan surat dicabut di arsip lokal.', 'info');
+          showToast(cloudOk ? 'Pengesahan surat dicabut di arsip & cloud.' : 'Pengesahan surat dicabut di arsip lokal.', 'info');
         };
       }
       return;
@@ -1216,7 +1262,7 @@ function openOutgoingQrModal(initialItem, container) {
         ${canApprove ? `
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
             <button type="button" id="btn-qr-approve-acc-now" class="btn btn-primary acc-glow-btn">
-              ✅ ACC &amp; Terbitkan Barcode QR Sekarang
+              ${uiIcon('checkCircle', 14)}<span>ACC &amp; Terbitkan Barcode QR Sekarang</span>
             </button>
           </div>
         ` : ''}
@@ -1225,7 +1271,7 @@ function openOutgoingQrModal(initialItem, container) {
       if (btnApprove) {
         btnApprove.onclick = async () => {
           btnApprove.disabled = true;
-          btnApprove.textContent = '⟳ Meng-ACC & Menerbitkan QR...';
+          btnApprove.innerHTML = `${uiIcon('loader', 14, 'spin-icon')}<span>Meng-ACC &amp; Menerbitkan QR...</span>`;
           const res = await approveAccCloud({
             outgoingId: item.id,
             signerRole: item.signerRole || 'kepala_sekolah',
@@ -1233,7 +1279,7 @@ function openOutgoingQrModal(initialItem, container) {
           });
           if (!res.ok || !res.item) {
             btnApprove.disabled = false;
-            btnApprove.textContent = '✅ ACC & Terbitkan Barcode QR Sekarang';
+            btnApprove.innerHTML = `${uiIcon('checkCircle', 14)}<span>ACC &amp; Terbitkan Barcode QR Sekarang</span>`;
             showToast(res.error || 'Gagal meng-ACC surat.', 'error');
             return;
           }
@@ -1241,7 +1287,7 @@ function openOutgoingQrModal(initialItem, container) {
           if (res.syncRev) setLastKnownSyncRev(res.syncRev);
           updateOutgoingListInPlace(container);
           renderModalContent();
-          showToast('✅ Surat di-ACC Kepala Sekolah & QR aktif!', 'success');
+          showToast('Surat di-ACC Kepala Sekolah & QR aktif!', 'success');
         };
       }
       return;
@@ -1249,7 +1295,7 @@ function openOutgoingQrModal(initialItem, container) {
 
     body.innerHTML = `
       <div class="choice-status-banner ${isRevoked ? 'choice-banner-danger' : 'choice-banner-warn'}" style="margin-bottom: 12px;">
-        <strong>${isRevoked ? '⛔ Pengesahan Surat Ini Telah Dicabut' : '⚠️ Surat Belum Dinyatakan SAH'}</strong>
+        <strong style="display:inline-flex;align-items:center;gap:6px;">${isRevoked ? `${uiIcon('ban', 14)}<span>Pengesahan Surat Ini Telah Dicabut</span>` : `${uiIcon('alertTriangle', 14)}<span>Surat Belum Dinyatakan SAH</span>`}</strong>
         <span>${isRevoked
           ? `Dicabut${item.revokedReason ? ` (${escapeHtml(item.revokedReason)})` : ''}. Anda dapat mengesahkannya kembali dengan memilih pejabat di bawah.`
           : 'Terbitkan pengesahan SAH dan Barcode QR sekarang, atau ajukan permintaan ACC ke Kepala Sekolah.'}</span>
@@ -1257,7 +1303,8 @@ function openOutgoingQrModal(initialItem, container) {
       ${roleSelectHtml}
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
         <button type="button" id="btn-qr-authorize-now" class="btn btn-primary">
-          🛡️ ${isRevoked ? 'Sahkan Ulang &amp; Aktifkan QR' : 'Nyatakan SAH &amp; Terbitkan Barcode QR'}
+          ${uiIcon('shieldCheck', 14)}
+          <span>${isRevoked ? 'Sahkan Ulang &amp; Aktifkan QR' : 'Nyatakan SAH &amp; Terbitkan Barcode QR'}</span>
         </button>
       </div>
     `;
@@ -1267,9 +1314,9 @@ function openOutgoingQrModal(initialItem, container) {
       const checked = body.querySelector('input[name="modal-out-signer-role"]:checked');
       const isDirectAllowed = checked?.dataset?.allowed !== '0';
       if (btnAuthEl) {
-        btnAuthEl.textContent = isDirectAllowed
-          ? (isRevoked ? '🛡️ Sahkan Ulang & Aktifkan QR' : '🛡️ Nyatakan SAH & Terbitkan Barcode QR')
-          : '📨 Ajukan Minta ACC Kepala Sekolah';
+        btnAuthEl.innerHTML = isDirectAllowed
+          ? `${uiIcon('shieldCheck', 14)}<span>${isRevoked ? 'Sahkan Ulang &amp; Aktifkan QR' : 'Nyatakan SAH &amp; Terbitkan Barcode QR'}</span>`
+          : `${uiIcon('sendOut', 14)}<span>Ajukan Minta ACC Kepala Sekolah</span>`;
       }
     };
     body.querySelectorAll('input[name="modal-out-signer-role"]').forEach(r => {
@@ -1285,7 +1332,7 @@ function openOutgoingQrModal(initialItem, container) {
       btnAuth.disabled = true;
 
       if (!isDirectAllowed && canRequestAnyRole) {
-        btnAuth.textContent = '⟳ Mengirim ke Antrean ACC Kepsek...';
+        btnAuth.innerHTML = `${uiIcon('loader', 14, 'spin-icon')}<span>Mengirim ke Antrean ACC Kepsek...</span>`;
         const res = await requestAccCloud({ outgoingId: item.id, signerRole: selectedRole });
         if (!res.ok || !res.item) {
           btnAuth.disabled = false;
@@ -1297,7 +1344,7 @@ function openOutgoingQrModal(initialItem, container) {
         if (res.syncRev) setLastKnownSyncRev(res.syncRev);
         updateOutgoingListInPlace(container);
         renderModalContent();
-        showToast('⏳ Permintaan ACC dikirim ke Kepala Sekolah!', 'success');
+        showToast('Permintaan ACC dikirim ke Kepala Sekolah!', 'success');
         return;
       }
 
@@ -1313,7 +1360,7 @@ function openOutgoingQrModal(initialItem, container) {
 }
 
 export async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
-  const school = store.getState().schoolProfile || {};
+  const school = store.getEffectiveSchoolForDocument(item.documentSnapshot || item);
   const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
   const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah', {
     signerName: item.signerName,
@@ -1338,11 +1385,19 @@ export async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
     showToast(`Menyusun berkas .docx (${mode === 'qr' ? 'pakai Barcode QR' : 'kosongan TTD manual'}) untuk "${item.title}"...`, 'info');
     try {
       const blob = await renderDocx(finalModel, 'blob');
-      const safeTitle = `${item.sequenceNumber || 'out'}_${item.title || 'surat'}`
-        .replace(/[^a-zA-Z0-9_\-]/g, '_')
-        .slice(0, 50);
-      downloadFile(blob, `${safeTitle}.docx`);
-      showToast('Berkas Surat Keluar berhasil diunduh.', 'success');
+      const fileName = buildDocumentDownloadFilename({
+        kind: 'outgoing',
+        sequenceNumber: item.sequenceNumber,
+        typeCode: item.typeCode,
+        title: item.title,
+        perihal: item.perihal,
+        recipientName: item.recipientName,
+        tanggalSurat: item.tanggalSurat,
+        unitId: school?.unitId,
+        schoolProfile: school
+      });
+      downloadFile(blob, fileName);
+      showToast(`Berkas ${fileName} berhasil diunduh.`, 'success');
       return;
     } catch (err) {
       showToast(`Gagal mengunduh: ${err.message}`, 'error');
@@ -1354,11 +1409,19 @@ export async function downloadOutgoingItem(item, { mode = 'manual' } = {}) {
     try {
       const { applyCanvasEditsToDocx } = await import('../docx/patch.js');
       const patchedBlob = await applyCanvasEditsToDocx(item.uploadedDocx.rawBytes, item.uploadedDocx.paragraphs || [], { outputType: 'blob' });
-      const safeTitle = `${item.sequenceNumber || 'out'}_${item.title || 'surat'}`
-        .replace(/[^a-zA-Z0-9_\-]/g, '_')
-        .slice(0, 50);
-      downloadFile(patchedBlob, `${safeTitle}.docx`);
-      showToast('Berkas Surat Keluar berhasil diunduh.', 'success');
+      const fileName = buildDocumentDownloadFilename({
+        kind: 'outgoing',
+        sequenceNumber: item.sequenceNumber,
+        typeCode: item.typeCode,
+        title: item.title,
+        perihal: item.perihal,
+        recipientName: item.recipientName,
+        tanggalSurat: item.tanggalSurat,
+        unitId: school?.unitId,
+        schoolProfile: school
+      });
+      downloadFile(patchedBlob, fileName);
+      showToast(`Berkas ${fileName} berhasil diunduh.`, 'success');
       return;
     } catch (err) {
       showToast(`Gagal mengunduh: ${err.message}`, 'error');
@@ -1382,8 +1445,41 @@ function syncSmartNomorInHtml(html = '', nomorSurat = '') {
   const fullNomor = /^nomor\s*:/i.test(clean) ? clean : `Nomor: ${clean}`;
   return String(html).replace(
     /(<(?:p|div)[^>]*data-smart-role=["']nomor["'][^>]*>)([\s\S]*?)(<\/(?:p|div)>)/i,
-    `$1${escapeHtmlText(fullNomor)}$3`
+    (_, openTag, _old, closeTag) => `${openTag}${escapeHtmlText(fullNomor)}${closeTag}`
   );
+}
+
+function pageHtmlHasVisibleContent(html = '') {
+  const raw = String(html || '').trim();
+  if (!raw) return false;
+  if (/<(img|table|svg|canvas|hr|object|iframe)\b/i.test(raw)) return true;
+  const textOnly = raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return textOnly.length > 0;
+}
+
+function buildUploadedDocxFallbackPages(uploadedDocx = null, item = {}) {
+  const paras = Array.isArray(uploadedDocx?.paragraphs) ? uploadedDocx.paragraphs : [];
+  const validLines = paras
+    .map(p => String(p?.text ?? p?.editedText ?? p ?? '').trim())
+    .filter(Boolean);
+  if (validLines.length === 0) return [];
+
+  const html = validLines.map((line, idx) => {
+    const cleanLine = escapeHtmlText(line);
+    if (idx === 0 && line.length <= 80 && line === line.toUpperCase()) {
+      return `<h2 class="smart-doc-title" data-smart-role="title" style="text-align: center;">${cleanLine}</h2>`;
+    }
+    if (/^nomor\s*:/i.test(line)) {
+      return `<p class="smart-doc-nomor" data-smart-role="nomor" style="text-align: center;">${escapeHtmlText(item.nomorSurat ? `Nomor: ${item.nomorSurat}` : line)}</p>`;
+    }
+    return `<p>${cleanLine}</p>`;
+  }).join('\n');
+
+  return [{ id: 'out-docx-fallback-1', html }];
 }
 
 function calibrateOutgoingQrStages(rootEl, item) {
@@ -1395,11 +1491,14 @@ function calibrateOutgoingQrStages(rootEl, item) {
 
   const stages = [...rootEl.querySelectorAll('.floating-qr-stage')];
   if (stages.length === 0) return;
-  const school = store.getState().schoolProfile || {};
+  const school = store.getEffectiveSchoolForDocument(item.documentSnapshot || item) || store.getState().schoolProfile || {};
   const basePlacement = rawPlacement
     ? normalizeQrPlacement(rawPlacement, stages.length)
-    : findPreferredSignatureQrPlacement(item.documentSnapshot, stages.length);
-  const calibrated = calibratePlacementFromDom(stages, basePlacement, basePlacement.sizePx);
+    : findPreferredSignatureQrPlacement(item.documentSnapshot, stages.length, school);
+  const calibrated = calibratePlacementFromDom(stages, basePlacement, basePlacement.sizePx, {
+    docModel: item.documentSnapshot || null,
+    school
+  });
   const html = buildFloatingQrElementHtml({
     qrDataUrl: item.qrDataUrl,
     placement: calibrated,
@@ -1421,17 +1520,36 @@ function syncOutgoingPreviewContainer(modalBody, item) {
   if (sheets.length > 0) {
     const firstPaper = sheets[0].querySelector('.smart-paper-sheet');
     const sheetWidthPx = firstPaper?.offsetWidth || 794;
-    const availW = Math.max(260, (modalBody.clientWidth || 760) - 28);
+    const modalCard = modalBody.closest('.modal-card');
+    const rectW = modalBody.getBoundingClientRect ? modalBody.getBoundingClientRect().width : 0;
+    const cardInnerW = modalCard?.clientWidth ? Math.max(260, modalCard.clientWidth - 48) : 0;
+    const viewportW = typeof window !== 'undefined' ? Math.max(280, window.innerWidth - 72) : 760;
+    const measuredW = modalBody.clientWidth >= 320
+      ? modalBody.clientWidth
+      : (rectW >= 320 ? rectW : (cardInnerW >= 320 ? cardInnerW : Math.min(880, viewportW)));
+    const availW = Math.max(260, measuredW - 28);
     const scale = Math.min(1, Math.max(0.35, Number((availW / sheetWidthPx).toFixed(3))));
     const stack = modalBody.querySelector('.outgoing-preview-stack');
     if (stack) stack.style.setProperty('--prev-scale', String(scale));
+    sheets.forEach((slot) => {
+      const paper = slot.querySelector('.smart-paper-sheet');
+      const pw = paper?.offsetWidth || sheetWidthPx;
+      const ph = paper?.offsetHeight || Math.round(pw * 1.414);
+      slot.style.width = `${Math.round(pw * scale)}px`;
+      slot.style.height = `${Math.round(ph * scale)}px`;
+      if (paper) {
+        paper.style.transform = `scale(${scale})`;
+        paper.style.transformOrigin = 'top left';
+        paper.style.margin = '0';
+      }
+    });
   }
   calibrateOutgoingQrStages(modalBody, item);
 }
 
 export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isForPrint = false } = {}) {
   const doc = item.documentSnapshot;
-  const school = store.getState().schoolProfile || {};
+  const school = store.getEffectiveSchoolForDocument(doc || item) || store.getState().schoolProfile || {};
   const signerInfo = buildSignerSelectionInfo(school, item.signerRole || 'kepala_sekolah');
   const isSah = (item.verificationStatus === 'sah' || item.isVerifiedSah) && item.verificationStatus !== 'revoked';
   const showQr = Boolean(item.qrDataUrl && isSah && (signatureMode === 'qr' || (signatureMode === 'auto' && !isForPrint)));
@@ -1450,9 +1568,12 @@ export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isFor
   const kopUrl = kopBlock?.image || doc?.letterData?.kopImage || school.kopImage || DEFAULT_KOP_DATA_URL;
   const dims = computePrintableDimsMm({ paperSize, orientation, margins });
 
+  const smartSnapPages = Array.isArray(item.smartPagesSnapshot?.pages) ? item.smartPagesSnapshot.pages : [];
+  const smartSnapHasContent = smartSnapPages.some(p => pageHtmlHasVisibleContent(p?.html));
+
   let pages = [];
-  if (Array.isArray(item.smartPagesSnapshot?.pages) && item.smartPagesSnapshot.pages.length > 0) {
-    pages = item.smartPagesSnapshot.pages.map((p, idx) => ({
+  if (smartSnapPages.length > 0 && smartSnapHasContent) {
+    pages = smartSnapPages.map((p, idx) => ({
       ...p,
       html: idx === 0 && item.nomorSurat ? syncSmartNomorInHtml(p.html || '', item.nomorSurat) : (p.html || '<p><br></p>')
     }));
@@ -1462,8 +1583,17 @@ export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isFor
     if (tBlock && item.nomorSurat) {
       tBlock.nomor = /^nomor\s*:/i.test(item.nomorSurat) ? item.nomorSurat : `Nomor: ${item.nomorSurat}`;
     }
-    pages = docModelToSmartPages(clonedDoc, school).pages || [];
-  } else {
+    const modelPages = docModelToSmartPages(clonedDoc, school).pages || [];
+    if (modelPages.some(p => pageHtmlHasVisibleContent(p?.html))) {
+      pages = modelPages;
+    }
+  }
+
+  if (pages.length === 0 && item.uploadedDocx) {
+    pages = buildUploadedDocxFallbackPages(item.uploadedDocx, item);
+  }
+
+  if (pages.length === 0) {
     const fallbackSig = `
       <table class="smart-sig-table" data-smart-role="signature">
         <tbody>
@@ -1494,7 +1624,7 @@ export function renderReadOnlyDocumentHtml(item, { signatureMode = 'auto', isFor
   const rawPlacement = doc?.qrPlacement || item.qrPlacement || null;
   const placement = rawPlacement
     ? normalizeQrPlacement(rawPlacement, pages.length)
-    : findPreferredSignatureQrPlacement(doc, pages.length);
+    : findPreferredSignatureQrPlacement(doc, pages.length, school);
 
   const pagesHtml = pages.map((page, idx) => {
     const qrHtml = showQr && placement.pageIndex === idx

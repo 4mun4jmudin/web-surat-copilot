@@ -603,3 +603,120 @@ test('Helper Kunci Kanvas HP Kepala Sekolah & Filter Antrean ACC', () => {
   ]);
   assert.deepEqual(pending.map(p => p.id), ['1', '3']);
 });
+
+test('Multi-Unit Yayasan (SMP & SMK) & Privasi Ruang Kerja + Chat AI per Akun', async () => {
+  const wsStore = createMockBlobStore();
+  const verifyStore = createMockBlobStore();
+  const mockFetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+
+  // 1. Login Admin Yayasan, Kepsek SMP, TU SMP, dan TU SMK
+  const adminLogin = await loginAs(wsStore, verifyStore, 'admin', TEST_ENV.INITIAL_ADMIN_PASSWORD);
+  const tuSmkLogin = await loginAs(wsStore, verifyStore, 'tu', TEST_ENV.INITIAL_TU_PASSWORD);
+  const tuSmpLogin = await loginAs(wsStore, verifyStore, 'tu_smp', 'TuSmpAlHawari#2026');
+  const kepsekSmpLogin = await loginAs(wsStore, verifyStore, 'kepsek_smp', 'KepsekSmpAlHawari#2026');
+
+  assert.equal(adminLogin.json.user.unitId, 'all');
+  assert.equal(tuSmkLogin.json.user.unitId, 'smk');
+  assert.equal(tuSmpLogin.status, 200);
+  assert.equal(tuSmpLogin.json.user.unitId, 'smp');
+  assert.equal(kepsekSmpLogin.status, 200);
+  assert.equal(kepsekSmpLogin.json.user.unitId, 'smp');
+
+  // 2. Bootstrap SMP mengembalikan profil resmi SMP IT Al-Hawari - Cibiuk (NPSN 20279898 & Yangyang Budiman, S.Pd.)
+  const bootSmp = await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', token: tuSmpLogin.json.token
+  });
+  const bootSmpJson = await bootSmp.json();
+  assert.equal(bootSmpJson.unitId, 'smp');
+  assert.equal(bootSmpJson.workspace.schoolProfile.npsn, '20279898');
+  assert.equal(bootSmpJson.workspace.schoolProfile.principalName, 'Yangyang Budiman, S.Pd.');
+  assert.ok(bootSmpJson.workspace.schoolProfile.numberingPattern.includes('SMPITA'));
+
+  // 3. Staf SMP dilarang mengakses unit SMK (403 Forbidden) dan sebaliknya
+  const crossUnitTry = await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', query: { unit: 'smk' }, token: tuSmpLogin.json.token
+  });
+  assert.equal(crossUnitTry.status, 403);
+  const crossUnitTry2 = await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', query: { unit: 'smp' }, token: tuSmkLogin.json.token
+  });
+  assert.equal(crossUnitTry2.status, 403);
+
+  // 4. Penomoran & Antrean ACC SMP terpisah total dari SMK (keduanya mulai urut #001)
+  const smkOutRes = await callWorkspace({
+    wsStore, verifyStore, method: 'POST', action: 'record_outgoing', token: tuSmkLogin.json.token, fetchImpl: mockFetch,
+    body: {
+      authorizeSah: false, requestAcc: true,
+      entry: { year: '2026', typeCode: 'KET', nomorSurat: '421.3/001/KET.SMKITA/XI/2026', title: 'SURAT SMK 1', recipientName: 'Siswa SMK' }
+    }
+  });
+  assert.equal((await smkOutRes.json()).item.sequenceNumber, 1);
+
+  const smpOutRes = await callWorkspace({
+    wsStore, verifyStore, method: 'POST', action: 'record_outgoing', token: tuSmpLogin.json.token, fetchImpl: mockFetch,
+    body: {
+      authorizeSah: false, requestAcc: true,
+      entry: { year: '2026', typeCode: 'KET', nomorSurat: '421.2/001/KET.SMPITA/XI/2026', title: 'SURAT SMP 1', recipientName: 'Siswa SMP' }
+    }
+  });
+  const smpOutJson = await smpOutRes.json();
+  assert.equal(smpOutRes.status, 201);
+  assert.equal(smpOutJson.item.sequenceNumber, 1);
+  assert.equal(smpOutJson.item.unitId, 'smp');
+
+  // Kepsek SMP menyetujui ACC -> verifikasi QR tercatat atas nama SMP IT AL-HAWARI - CIBIUK
+  const approveSmpRes = await callWorkspace({
+    wsStore, verifyStore, method: 'POST', action: 'approve_acc', token: kepsekSmpLogin.json.token, fetchImpl: mockFetch,
+    body: { outgoingId: smpOutJson.item.id, signerRole: 'kepala_sekolah' }
+  });
+  const approveSmpJson = await approveSmpRes.json();
+  assert.equal(approveSmpRes.status, 200);
+  assert.equal(approveSmpJson.item.verificationStatus, 'sah');
+  assert.equal(approveSmpJson.verification.schoolName, 'SMP IT AL-HAWARI - CIBIUK');
+
+  // Admin Yayasan dapat beralih unit SMK vs SMP dengan data terpisah
+  const adminBootSmp = await (await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', query: { unit: 'smp' }, token: adminLogin.json.token
+  })).json();
+  assert.equal(adminBootSmp.unitId, 'smp');
+  assert.equal(adminBootSmp.workspace.outgoingLetters.length, 1);
+  assert.equal(adminBootSmp.workspace.outgoingLetters[0].title, 'SURAT SMP 1');
+
+  // 5. Ruang Kerja & Chat AI bersifat PRIVAT per akun (TU SMP vs Kepsek SMP vs Admin tidak bisa saling intip)
+  const tuPrivSave = await callWorkspace({
+    wsStore, verifyStore, method: 'POST', action: 'save_private_workspace', token: tuSmpLogin.json.token,
+    body: {
+      document: { meta: { title: 'Draf Privat Yoga TU SMP' }, blocks: [{ type: 'paragraph', runs: [{ text: 'Rahasia draf TU SMP' }] }] },
+      chatSessions: [{ id: 'chat_smp_tu_1', title: 'Percakapan Privat TU SMP', messages: [{ role: 'user', text: 'Susun surat rahasia SMP' }] }],
+      activeChatId: 'chat_smp_tu_1'
+    }
+  });
+  assert.equal(tuPrivSave.status, 200);
+
+  // Akun Kepsek SMP & Admin memeriksa private workspace & bootstrap -> tidak ada chat/draf milik tu_smp
+  const kepsekPrivGet = await (await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'get_private_workspace', token: kepsekSmpLogin.json.token
+  })).json();
+  assert.equal(kepsekPrivGet.privateWorkspace, null);
+
+  const adminBootCheckSmp = await (await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', query: { unit: 'smp' }, token: adminLogin.json.token
+  })).json();
+  assert.equal(adminBootCheckSmp.privateWorkspace, null);
+
+  // Poll lite=1 mengembalikan HANYA data ACC ringan (tanpa workspace private atau blob berat)
+  const litePoll = await (await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'poll_updates', query: { unit: 'smp', since: 0, lite: '1' }, token: kepsekSmpLogin.json.token
+  })).json();
+  assert.equal(litePoll.lite, true);
+  assert.equal(litePoll.workspace.schoolProfile, undefined);
+  assert.equal(litePoll.privateWorkspace, undefined);
+  assert.equal(litePoll.workspace.outgoingLetters.length, 1);
+
+  // TU SMP sendiri memanggil bootstrap -> ruang kerja & chat AI miliknya pulih utuh
+  const tuOwnBoot = await (await callWorkspace({
+    wsStore, verifyStore, method: 'GET', action: 'bootstrap', token: tuSmpLogin.json.token
+  })).json();
+  assert.equal(tuOwnBoot.privateWorkspace.activeChatId, 'chat_smp_tu_1');
+  assert.equal(tuOwnBoot.privateWorkspace.chatSessions[0].title, 'Percakapan Privat TU SMP');
+});

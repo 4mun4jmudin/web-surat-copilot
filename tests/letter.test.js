@@ -76,7 +76,7 @@ test('Renderer DOCX: Merender Surat Dinas lengkap dengan Kop, Garis Ganda, dan L
   assert.match(documentXml, /w:val="double"/, 'Harus ada garis ganda kop surat');
   assert.match(documentXml, /SURAT KETERANGAN SISWA AKTIF/, 'Harus ada judul surat');
   assert.match(documentXml, /Budi Santoso/, 'Harus ada nama siswa');
-  assert.match(documentXml, /Dian Nurhadian, S\.Pd\./, 'Harus ada nama kepala sekolah');
+  assert.match(documentXml, /Dian Nurhamdani, S\.Pd\./, 'Harus ada nama kepala sekolah');
 });
 
 test('Profil Sekolah Bawaan: SMK IT Al-Hawari memiliki identitas lengkap dan akurat', () => {
@@ -90,7 +90,8 @@ test('Profil Sekolah Bawaan: SMK IT Al-Hawari memiliki identitas lengkap dan aku
   assert.equal(migrated.principalRank, 'Kepala SMK IT Al-Hawari');
   assert.equal(migrated.tuRank, 'Tata Usaha SMK IT Al-Hawari');
   assert.equal(DEFAULT_SCHOOL_PROFILE.npsn, '69758993');
-  assert.equal(DEFAULT_SCHOOL_PROFILE.principalName, 'Dian Nurhadian, S.Pd.');
+  assert.equal(DEFAULT_SCHOOL_PROFILE.principalName, 'Dian Nurhamdani, S.Pd.');
+  assert.equal(DEFAULT_SCHOOL_PROFILE.tuName, 'Tanti Nurkomalasari');
   assert.equal(DEFAULT_SCHOOL_PROFILE.foundation, 'Yayasan Nunuk Kartini Al-Irsyad');
   assert.equal(DEFAULT_SCHOOL_PROFILE.city, 'Garut');
   assert.equal(DEFAULT_SCHOOL_PROFILE.postalCode, '44193');

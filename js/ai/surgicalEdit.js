@@ -16,6 +16,242 @@ import {
 } from '../utils/htmlAst.js';
 import { formatSmartNomorSurat } from '../letters/numbering.js';
 import { formatSignerNipLine } from '../letters/verification.js';
+import {
+  cmToTwips,
+  ptToTwips,
+  cssLenToCm,
+  normalizeAlignment,
+  normalizeFontFamily,
+  normalizeListStyle,
+  getListStyleSpec,
+  parseListNodeMeta,
+  extractPageSetupFromAiPayload,
+  normalizePageSetupOptions
+} from '../letters/wordFormat.js';
+
+function upsertCssStyleProp(styleStr = '', propName = '', propValue = '') {
+  const cleanProp = String(propName || '').trim().toLowerCase();
+  const declarations = String(styleStr || '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((decl) => {
+      const idx = decl.indexOf(':');
+      if (idx === -1) return false;
+      return decl.slice(0, idx).trim().toLowerCase() !== cleanProp;
+    });
+  if (propValue !== null && propValue !== undefined && String(propValue).trim() !== '') {
+    declarations.push(`${cleanProp}: ${String(propValue).trim()}`);
+  }
+  return declarations.join('; ');
+}
+
+function readCssStyleProp(node, propName) {
+  const style = String(node?.attrs?.style || '');
+  const re = new RegExp(`(?:^|;)\\s*${propName}\\s*:\\s*([^;]+)`, 'i');
+  const m = style.match(re);
+  return m ? m[1].trim() : '';
+}
+
+function applyAstParagraphFormat(node, patch = {}) {
+  if (!node || typeof node !== 'object') return false;
+  node.attrs = node.attrs || {};
+  let style = node.attrs.style || '';
+  let changed = false;
+
+  const align = normalizeAlignment(patch.alignment || patch.align || '');
+  if (align) {
+    const cssAlign = align === 'both' ? 'justify' : align;
+    style = upsertCssStyleProp(style, 'text-align', cssAlign);
+    changed = true;
+  }
+  if (patch.firstLineIndentCm !== undefined && Number.isFinite(Number(patch.firstLineIndentCm))) {
+    const cm = Math.max(0, Math.min(8, Number(patch.firstLineIndentCm)));
+    style = upsertCssStyleProp(style, 'text-indent', cm > 0 ? `${cm}cm` : '0cm');
+    changed = true;
+  }
+  if (patch.leftIndentCm !== undefined && Number.isFinite(Number(patch.leftIndentCm))) {
+    const cm = Math.max(0, Math.min(8, Number(patch.leftIndentCm)));
+    style = upsertCssStyleProp(style, 'padding-left', cm > 0 ? `${cm}cm` : '0cm');
+    changed = true;
+  }
+  if (patch.spacingBeforePt !== undefined && Number.isFinite(Number(patch.spacingBeforePt))) {
+    const pt = Math.max(0, Math.min(72, Number(patch.spacingBeforePt)));
+    style = upsertCssStyleProp(style, 'margin-top', `${pt}pt`);
+    node.attrs['data-space-before'] = String(ptToTwips(pt));
+    changed = true;
+  }
+  if (patch.spacingAfterPt !== undefined && Number.isFinite(Number(patch.spacingAfterPt))) {
+    const pt = Math.max(0, Math.min(72, Number(patch.spacingAfterPt)));
+    style = upsertCssStyleProp(style, 'margin-bottom', `${pt}pt`);
+    node.attrs['data-space-after'] = String(ptToTwips(pt));
+    changed = true;
+  }
+  if (patch.lineSpacing !== undefined && Number.isFinite(Number(patch.lineSpacing))) {
+    const ls = Math.max(0.8, Math.min(3.5, Number(patch.lineSpacing)));
+    style = upsertCssStyleProp(style, 'line-height', String(ls));
+    changed = true;
+  }
+  if (patch.fontSizePt !== undefined && Number.isFinite(Number(patch.fontSizePt))) {
+    const pt = Math.max(8, Math.min(48, Number(patch.fontSizePt)));
+    style = upsertCssStyleProp(style, 'font-size', `${pt}pt`);
+    changed = true;
+  }
+  if (patch.fontFamily !== undefined && String(patch.fontFamily).trim()) {
+    const font = normalizeFontFamily(patch.fontFamily);
+    style = upsertCssStyleProp(style, 'font-family', `'${font}', serif`);
+    changed = true;
+  }
+  if (patch.bold !== undefined) {
+    style = upsertCssStyleProp(style, 'font-weight', patch.bold ? 'bold' : 'normal');
+    changed = true;
+  }
+  if (patch.italic !== undefined) {
+    style = upsertCssStyleProp(style, 'font-style', patch.italic ? 'italic' : 'normal');
+    changed = true;
+  }
+  if (patch.underline !== undefined) {
+    style = upsertCssStyleProp(style, 'text-decoration', patch.underline ? 'underline' : 'none');
+    changed = true;
+  }
+
+  if (changed) {
+    if (style) node.attrs.style = style;
+    else delete node.attrs.style;
+  }
+  return changed;
+}
+
+function applyListStyleToAstNode(listNode, listStyleRaw, startAtRaw) {
+  if (!listNode || typeof listNode !== 'object') return false;
+  listNode.attrs = listNode.attrs || {};
+  const spec = getListStyleSpec(listStyleRaw, listNode.tag === 'ol');
+  listNode.tag = spec.htmlTag;
+  listNode.attrs['data-list-style'] = spec.key;
+  listNode.attrs.style = upsertCssStyleProp(listNode.attrs.style || '', 'list-style-type', spec.cssType);
+  if (spec.key === 'bullet') {
+    delete listNode.attrs.type;
+    delete listNode.attrs.start;
+  } else {
+    listNode.attrs.type = spec.htmlType;
+    if (startAtRaw !== undefined && Number(startAtRaw) > 1) {
+      listNode.attrs.start = String(Math.round(Number(startAtRaw)));
+    } else if (startAtRaw !== undefined) {
+      delete listNode.attrs.start;
+    }
+  }
+  return true;
+}
+
+function applyTableFormatAst(tableNode, patch = {}) {
+  if (!tableNode || tableNode.tag !== 'table') return false;
+  tableNode.attrs = tableNode.attrs || {};
+  let classes = String(tableNode.attrs.class || 'smart-word-table').split(/\s+/).filter(Boolean);
+  if (!classes.includes('smart-word-table')) classes.unshift('smart-word-table');
+  let changed = false;
+
+  if (patch.borderStyle !== undefined) {
+    const bs = String(patch.borderStyle).trim().toLowerCase();
+    classes = classes.filter((c) => !['smart-table-grid', 'smart-table-sppd', 'smart-table-none'].includes(c));
+    if (bs === 'sppd') classes.push('smart-table-sppd');
+    else if (bs === 'none') classes.push('smart-table-none');
+    else classes.push('smart-table-grid');
+    changed = true;
+  }
+  if (patch.headerShading !== undefined) {
+    classes = classes.filter((c) => c !== 'no-header-bg');
+    if (!patch.headerShading) classes.push('no-header-bg');
+    changed = true;
+  }
+  if (patch.headerBold !== undefined) {
+    classes = classes.filter((c) => c !== 'no-header-bold');
+    if (!patch.headerBold) classes.push('no-header-bold');
+    changed = true;
+  }
+  if (patch.align !== undefined) {
+    const align = normalizeAlignment(patch.align) || 'left';
+    tableNode.attrs.style = upsertCssStyleProp(tableNode.attrs.style || '', 'text-align', align === 'both' ? 'justify' : align);
+    changed = true;
+  }
+  if (Array.isArray(patch.colWidthsPct) && patch.colWidthsPct.length > 0) {
+    const cleanWidths = patch.colWidthsPct.map((n) => Math.max(4, Math.min(90, Number(n) || 10)));
+    tableNode.attrs['data-col-widths'] = cleanWidths.join(',');
+    const colgroup = (tableNode.children || []).find((c) => c.type === 'element' && c.tag === 'colgroup');
+    if (colgroup && Array.isArray(colgroup.children)) {
+      const cols = colgroup.children.filter((c) => c.type === 'element' && c.tag === 'col');
+      cols.forEach((col, i) => {
+        if (cleanWidths[i] !== undefined) {
+          col.attrs = col.attrs || {};
+          col.attrs.style = upsertCssStyleProp(col.attrs.style || '', 'width', `${cleanWidths[i]}%`);
+        }
+      });
+    }
+    changed = true;
+  }
+
+  tableNode.attrs.class = [...new Set(classes)].join(' ');
+  return changed;
+}
+
+function applyDocModelParagraphFormat(block, patch = {}) {
+  if (!block || typeof block !== 'object') return false;
+  let changed = false;
+  const align = normalizeAlignment(patch.alignment || patch.align || '');
+  if (align) {
+    block.alignment = align;
+    changed = true;
+  }
+  if (patch.firstLineIndentCm !== undefined && Number.isFinite(Number(patch.firstLineIndentCm))) {
+    const cm = Math.max(0, Math.min(8, Number(patch.firstLineIndentCm)));
+    block.firstLineIndentCm = cm;
+    block.firstLineIndentTwips = cmToTwips(cm);
+    changed = true;
+  }
+  if (patch.leftIndentCm !== undefined && Number.isFinite(Number(patch.leftIndentCm))) {
+    const cm = Math.max(0, Math.min(8, Number(patch.leftIndentCm)));
+    block.leftIndentCm = cm;
+    block.leftIndentTwips = cmToTwips(cm);
+    changed = true;
+  }
+  if (patch.spacingBeforePt !== undefined && Number.isFinite(Number(patch.spacingBeforePt))) {
+    block.spacingBefore = ptToTwips(Math.max(0, Math.min(72, Number(patch.spacingBeforePt))));
+    changed = true;
+  }
+  if (patch.spacingAfterPt !== undefined && Number.isFinite(Number(patch.spacingAfterPt))) {
+    block.spacingAfter = ptToTwips(Math.max(0, Math.min(72, Number(patch.spacingAfterPt))));
+    changed = true;
+  }
+  if (patch.lineSpacing !== undefined && Number.isFinite(Number(patch.lineSpacing))) {
+    block.lineSpacing = Math.max(0.8, Math.min(3.5, Number(patch.lineSpacing)));
+    changed = true;
+  }
+  if (patch.fontSizePt !== undefined && Number.isFinite(Number(patch.fontSizePt))) {
+    const pt = Math.max(8, Math.min(48, Number(patch.fontSizePt)));
+    block.fontSizePt = pt;
+    if (Array.isArray(block.runs)) {
+      block.runs = block.runs.map((r) => ({ ...r, fontSizeHalfPt: Math.round(pt * 2) }));
+    }
+    changed = true;
+  }
+  if (patch.fontFamily !== undefined && String(patch.fontFamily).trim()) {
+    const font = normalizeFontFamily(patch.fontFamily);
+    block.fontFamily = font;
+    if (Array.isArray(block.runs)) {
+      block.runs = block.runs.map((r) => ({ ...r, fontFamily: font }));
+    }
+    changed = true;
+  }
+  for (const flag of ['bold', 'italic', 'underline']) {
+    if (patch[flag] !== undefined) {
+      block[flag] = Boolean(patch[flag]);
+      if (Array.isArray(block.runs)) {
+        block.runs = block.runs.map((r) => ({ ...r, [flag]: Boolean(patch[flag]) }));
+      }
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 const INLINE_FMT_TAGS = new Set(['strong', 'b', 'em', 'i', 'u', 'span', 'sup', 'sub', 'small']);
 const WRAPPER_CONTAINER_TAGS = new Set(['div', 'blockquote', 'section']);
@@ -351,7 +587,7 @@ function parseMetaRecipientFromAst(metaTableNode) {
  * Membangun indeks struktural bedah (slot ID + peta sel AST) langsung dari array halaman Smart Word Pro
  * tanpa kehilangan atribut HTML, lebar kolom, tinggi baris, maupun slot QR.
  */
-export function buildSurgicalIndexFromSmartPages(pages = [], schoolProfile = {}) {
+export function buildSurgicalIndexFromSmartPages(pages = [], schoolProfile = {}, options = {}) {
   const astPages = [];
   const nodeMap = new Map();
   const orderedBlocks = [];
@@ -457,13 +693,16 @@ export function buildSurgicalIndexFromSmartPages(pages = [], schoolProfile = {})
         if (node.tag === 'ul' || node.tag === 'ol') {
           const blockId = `p${pageIndex}_list${counters.list++}`;
           const liNodes = (node.children || []).filter((c) => c.type === 'element' && c.tag === 'li');
+          const listMeta = parseListNodeMeta(node);
           const entry = { blockId, pageIndex, kind: 'list', node, parentArray: nodesList };
           nodeMap.set(blockId, entry);
           orderedBlocks.push(entry);
           pageSummaryBlocks.push({
             blockId,
             type: 'list',
-            ordered: node.tag === 'ol',
+            ordered: listMeta.ordered,
+            listStyle: listMeta.listStyle,
+            ...(listMeta.startAt > 1 ? { startAt: listMeta.startAt } : {}),
             items: liNodes.map((li, itemIndex) => ({
               itemIndex,
               text: getNodePlainText(li).replace(/\u00a0/g, ' ').trim()
@@ -482,12 +721,16 @@ export function buildSurgicalIndexFromSmartPages(pages = [], schoolProfile = {})
           const txt = getNodePlainText(node).replace(/\u00a0/g, ' ').trim();
           if (!txt) continue;
           const blockId = `p${pageIndex}_b${counters.b++}`;
+          const alignment = normalizeAlignment(readCssStyleProp(node, 'text-align'));
+          const firstLineIndentCm = cssLenToCm(readCssStyleProp(node, 'text-indent'));
           const entry = { blockId, pageIndex, kind: 'paragraph', node, parentArray: nodesList };
           nodeMap.set(blockId, entry);
           orderedBlocks.push(entry);
           pageSummaryBlocks.push({
             blockId,
             type: /^h[1-4]$/.test(node.tag) ? 'heading' : 'paragraph',
+            ...(alignment ? { alignment } : {}),
+            ...(firstLineIndentCm ? { firstLineIndentCm } : {}),
             text: txt
           });
         }
@@ -508,6 +751,7 @@ export function buildSurgicalIndexFromSmartPages(pages = [], schoolProfile = {})
     letterTitle: titleText || 'SURAT DINAS SEKOLAH',
     nomorSurat: nomorSurat || '',
     schoolName: schoolProfile?.schoolName || 'SMK IT Al-Hawari',
+    ...(options?.letterOptions ? { pageSetup: normalizePageSetupOptions(options.letterOptions) } : {}),
     pages: astPages.map((p) => p.summary)
   };
 
@@ -935,17 +1179,75 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
   const allowLayoutRestructure = Boolean(options.allowLayoutRestructure);
   const warnings = [];
   const changes = [];
-  const indexObj = buildSurgicalIndexFromSmartPages(pages, schoolProfile);
+  const indexObj = buildSurgicalIndexFromSmartPages(pages, schoolProfile, options);
   const { astPages, nodeMap, roleNodes } = indexObj;
 
   let appliedCount = 0;
   let mode = 'surgical';
+  const pageFormatPatches = [];
+  const pendingListConversions = [];
   const patches = Array.isArray(editedJson?.patches) ? editedJson.patches : null;
 
   if (patches && patches.length > 0) {
     for (const patch of patches) {
       if (!patch || typeof patch !== 'object') continue;
       const op = String(patch.op || '').trim();
+
+      if (op === 'setPageFormat') {
+        pageFormatPatches.push(patch);
+        const fmtKeys = Object.keys(patch).filter((k) => k !== 'op').join(', ') || 'halaman';
+        recordSurgicalChange(changes, 'pageFormat', 'Format Halaman & Tipografi', '-', fmtKeys);
+        appliedCount++;
+        continue;
+      }
+
+      if (op === 'setParagraphFormat') {
+        const targets = (patch.blockId === '*' || String(patch.target || '').toLowerCase() === 'all')
+          ? indexObj.orderedBlocks.filter((e) => e.kind === 'paragraph')
+          : Array.isArray(patch.blockIds)
+            ? patch.blockIds.map((id) => nodeMap.get(id)).filter((e) => e && e.kind === 'paragraph')
+            : (() => {
+                const single = nodeMap.get(patch.blockId);
+                return single && single.kind === 'paragraph' ? [single] : [];
+              })();
+        if (targets.length === 0) {
+          warnings.push(`Paragraf target format tidak ditemukan: ${patch.blockId || '*'}`);
+          continue;
+        }
+        let fmtApplied = 0;
+        for (const t of targets) {
+          if (applyAstParagraphFormat(t.node, patch)) fmtApplied++;
+        }
+        if (fmtApplied > 0) {
+          const fmtDesc = Object.keys(patch).filter((k) => !['op', 'blockId', 'blockIds', 'target'].includes(k)).join(', ');
+          recordSurgicalChange(changes, 'paragraphFormat', `Format ${targets.length} Paragraf`, '-', fmtDesc);
+          appliedCount++;
+        }
+        continue;
+      }
+
+      if (op === 'convertParagraphsToList') {
+        const ids = Array.isArray(patch.blockIds) ? patch.blockIds : [];
+        const entries = ids.map((id) => nodeMap.get(id)).filter((e) => e && e.kind === 'paragraph');
+        if (entries.length === 0) {
+          warnings.push('Blok paragraf untuk dijadikan daftar (list) tidak ditemukan.');
+          continue;
+        }
+        pendingListConversions.push({
+          entries,
+          listStyle: patch.listStyle ?? (patch.ordered === false ? 'bullet' : 'decimal'),
+          startAt: patch.startAt
+        });
+        recordSurgicalChange(
+          changes,
+          'convertList',
+          `Ubah ${entries.length} Paragraf Jadi Daftar (${patch.listStyle || 'decimal'})`,
+          `${entries.length} paragraf`,
+          `Daftar ${patch.listStyle || 'decimal'}`
+        );
+        appliedCount++;
+        continue;
+      }
 
       if (op === 'setField') {
         const target = String(patch.target || '').toLowerCase();
@@ -1021,6 +1323,12 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
           recordSurgicalChange(changes, 'meta', 'Perihal & Tujuan Surat', prevMeta, getNodePlainText(entry.node).replace(/\s+/g, ' ').trim());
           appliedCount++;
         }
+      } else if (op === 'setTableFormat' && entry.kind === 'table') {
+        if (applyTableFormatAst(entry.node, patch)) {
+          const fmtKeys = Object.keys(patch).filter((k) => !['op', 'blockId'].includes(k)).join(', ');
+          recordSurgicalChange(changes, 'tableFormat', `Format Tabel (${entry.blockId})`, '-', fmtKeys);
+          appliedCount++;
+        }
       } else if (op === 'setTableCell' && entry.kind === 'table') {
         const rows = collectTableAstRows(entry.node);
         const rIdx = Number(patch.row);
@@ -1069,16 +1377,38 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
             recordSurgicalChange(changes, 'list', `Daftar Poin #${itemIdx + 1}`, prevLi, String(patch.text ?? ''));
             appliedCount++;
           }
-        } else if (Array.isArray(patch.items) && patch.items.length > 0) {
-          const prevList = liNodes.map(li => getNodePlainText(li).trim()).join('; ');
-          const tplLi = cloneAstNode(liNodes[0] || { type: 'element', tag: 'li', attrs: {}, children: [] });
-          entry.node.children = patch.items.map((txt, i) => {
-            const li = liNodes[i] || cloneAstNode(tplLi);
-            updateInlineElementTextPreservingStyle(li, String(txt ?? ''));
-            return li;
-          });
-          recordSurgicalChange(changes, 'list', `Daftar Poin Hal. ${entry.pageIndex + 1}`, prevList, patch.items.join('; '));
-          appliedCount++;
+        } else {
+          let listChanged = false;
+          if (patch.listStyle !== undefined || patch.ordered !== undefined || patch.startAt !== undefined) {
+            const prevStyle = parseListNodeMeta(entry.node).listStyle;
+            const targetStyle = patch.listStyle !== undefined
+              ? patch.listStyle
+              : (patch.ordered === false ? 'bullet' : (prevStyle === 'bullet' ? 'decimal' : prevStyle));
+            if (applyListStyleToAstNode(entry.node, targetStyle, patch.startAt)) {
+              listChanged = true;
+              if (!Array.isArray(patch.items) || patch.items.length === 0) {
+                recordSurgicalChange(
+                  changes,
+                  'listStyle',
+                  `Gaya Penomoran Daftar Hal. ${entry.pageIndex + 1}`,
+                  prevStyle,
+                  `${targetStyle}${Number(patch.startAt) > 1 ? ` (mulai ${patch.startAt})` : ''}`
+                );
+              }
+            }
+          }
+          if (Array.isArray(patch.items) && patch.items.length > 0) {
+            const prevList = liNodes.map(li => getNodePlainText(li).trim()).join('; ');
+            const tplLi = cloneAstNode(liNodes[0] || { type: 'element', tag: 'li', attrs: {}, children: [] });
+            entry.node.children = patch.items.map((txt, i) => {
+              const li = liNodes[i] || cloneAstNode(tplLi);
+              updateInlineElementTextPreservingStyle(li, String(txt ?? ''));
+              return li;
+            });
+            recordSurgicalChange(changes, 'list', `Daftar Poin Hal. ${entry.pageIndex + 1}`, prevList, patch.items.join('; '));
+            listChanged = true;
+          }
+          if (listChanged) appliedCount++;
         }
       } else if (op === 'insertParagraphAfter' || op === 'insertParagraphBefore') {
         const idxInParent = entry.parentArray.indexOf(entry.node);
@@ -1108,6 +1438,35 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
         }
       }
     }
+
+    // Jalankan konversi paragraf menjadi daftar (ul/ol) secara terurut setelah seluruh patch blok selesai
+    for (const conv of pendingListConversions) {
+      const valid = conv.entries.filter((e) => Array.isArray(e.parentArray) && e.parentArray.includes(e.node));
+      if (valid.length === 0) continue;
+      const anchor = valid[0];
+      const anchorIdx = anchor.parentArray.indexOf(anchor.node);
+      if (anchorIdx === -1) continue;
+      const spec = getListStyleSpec(conv.listStyle, true);
+      const listNode = {
+        type: 'element',
+        tag: spec.htmlTag,
+        attrs: {},
+        children: valid.map((e) => ({
+          type: 'element',
+          tag: 'li',
+          attrs: {},
+          children: Array.isArray(e.node.children) && e.node.children.length > 0
+            ? e.node.children.map(cloneAstNode)
+            : textToInlineAst(getNodePlainText(e.node).trim())
+        }))
+      };
+      applyListStyleToAstNode(listNode, conv.listStyle, conv.startAt);
+      anchor.parentArray.splice(anchorIdx, 1, listNode);
+      for (let k = 1; k < valid.length; k++) {
+        const remIdx = valid[k].parentArray.indexOf(valid[k].node);
+        if (remIdx !== -1) valid[k].parentArray.splice(remIdx, 1);
+      }
+    }
   } else if (editedJson?.editScope === 'restructure' && allowLayoutRestructure) {
     return {
       appliedCount: 0,
@@ -1120,6 +1479,18 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
   } else if (Array.isArray(editedJson?.blocks)) {
     mode = 'reconciled';
     appliedCount = reconcileLegacyBlocksOntoAstPages(indexObj, editedJson, schoolProfile, warnings, changes);
+  }
+
+  const extractedPageSetup = extractPageSetupFromAiPayload(
+    {
+      ...(editedJson && typeof editedJson === 'object' ? editedJson : {}),
+      patches: pageFormatPatches
+    },
+    options.letterOptions || {}
+  );
+  if (extractedPageSetup && pageFormatPatches.length === 0) {
+    recordSurgicalChange(changes, 'pageFormat', 'Format Halaman & Tipografi', '-', Object.keys(extractedPageSetup.partial).join(', '));
+    appliedCount++;
   }
 
   const nextPages = astPages.map((p) => ({
@@ -1141,7 +1512,8 @@ export function applySurgicalPatchesToSmartPages(pages = [], editedJson = {}, op
     pages: nextPages,
     meta: { title: nextTitle, nomorSurat: nextNomor },
     warnings,
-    changes
+    changes,
+    ...(extractedPageSetup ? { pageSetupUpdates: extractedPageSetup.partial, pageSetup: extractedPageSetup.full } : {})
   };
 }
 
@@ -1214,9 +1586,10 @@ function updateModelCellPreservingStyle(rowCells, colIdx, newText, paragraphInde
 /**
  * Membangun indeks bedah dari `DocumentModel` (untuk Lembar Kerja / `wordCanvas.js`).
  */
-export function buildSurgicalIndexFromDocModel(docModel = {}) {
+export function buildSurgicalIndexFromDocModel(docModel = {}, options = {}) {
   const blocks = Array.isArray(docModel?.blocks) ? docModel.blocks : [];
   const blockMap = new Map();
+  const orderedBlocks = [];
   const indexedBlocks = [];
   let titleBlock = null;
   let metaBlock = null;
@@ -1236,7 +1609,9 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
     }
     if (b.type === 'identityTable') {
       const blockId = `p0_id${counters.id++}`;
-      blockMap.set(blockId, { blockId, kind: 'identityTable', block: b, modelIndex });
+      const entry = { blockId, kind: 'identityTable', block: b, modelIndex };
+      blockMap.set(blockId, entry);
+      orderedBlocks.push(entry);
       indexedBlocks.push({
         blockId,
         type: 'identityTable',
@@ -1246,7 +1621,9 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
     }
     if (b.type === 'table') {
       const blockId = `p0_t${counters.t++}`;
-      blockMap.set(blockId, { blockId, kind: 'table', block: b, modelIndex });
+      const entry = { blockId, kind: 'table', block: b, modelIndex };
+      blockMap.set(blockId, entry);
+      orderedBlocks.push(entry);
       const rowsSummary = (b.rows || []).map((rowEntry, rIdx) => {
         const isObjRow = rowEntry && !Array.isArray(rowEntry);
         const cells = isObjRow ? (rowEntry.cells || []) : (Array.isArray(rowEntry) ? rowEntry : []);
@@ -1277,7 +1654,9 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
     }
     if (b.type === 'letterSignature') {
       const blockId = `p0_sig${counters.sig++}`;
-      blockMap.set(blockId, { blockId, kind: 'signature', block: b, modelIndex });
+      const entry = { blockId, kind: 'signature', block: b, modelIndex };
+      blockMap.set(blockId, entry);
+      orderedBlocks.push(entry);
       indexedBlocks.push({
         blockId,
         type: 'signature',
@@ -1287,11 +1666,16 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
     }
     if (b.type === 'list') {
       const blockId = `p0_list${counters.list++}`;
-      blockMap.set(blockId, { blockId, kind: 'list', block: b, modelIndex });
+      const entry = { blockId, kind: 'list', block: b, modelIndex };
+      blockMap.set(blockId, entry);
+      orderedBlocks.push(entry);
+      const listStyle = normalizeListStyle(b.listStyle, b.ordered !== false);
       indexedBlocks.push({
         blockId,
         type: 'list',
-        ordered: Boolean(b.ordered),
+        ordered: listStyle !== 'bullet',
+        listStyle,
+        ...(Number(b.startAt) > 1 ? { startAt: Number(b.startAt) } : {}),
         items: (b.items || []).map((it, idx) => ({
           itemIndex: idx,
           text: typeof it === 'string' ? it : (Array.isArray(it) ? it.map((r) => r.text).join('') : String(it?.text ?? ''))
@@ -1305,15 +1689,25 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
         : String(b.text || '').trim();
       if (!text) return;
       const blockId = `p0_b${counters.b++}`;
-      blockMap.set(blockId, { blockId, kind: 'paragraph', block: b, modelIndex });
-      indexedBlocks.push({ blockId, type: b.type, text });
+      const entry = { blockId, kind: 'paragraph', block: b, modelIndex };
+      blockMap.set(blockId, entry);
+      orderedBlocks.push(entry);
+      indexedBlocks.push({
+        blockId,
+        type: b.type,
+        ...(b.alignment ? { alignment: b.alignment } : {}),
+        ...(b.firstLineIndentCm ? { firstLineIndentCm: b.firstLineIndentCm } : {}),
+        text
+      });
     }
   });
 
+  const baseOpts = options?.letterOptions || docModel?.pageSetup || docModel?.letterData?.options || null;
   const snapshot = {
     surgicalMode: 'doc_model',
     letterTitle: titleBlock?.title || docModel?.meta?.title || 'SURAT DINAS',
     nomorSurat: String(titleBlock?.nomor || '').replace(/^Nomor\s*:\s*/i, '').trim(),
+    ...(baseOpts ? { pageSetup: normalizePageSetupOptions(baseOpts) } : {}),
     hideMetaRecipient: !metaBlock || metaBlock.isDeleted,
     ...(metaBlock && !metaBlock.isDeleted
       ? {
@@ -1325,7 +1719,7 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
     pages: [{ pageNumber: 1, blocks: indexedBlocks }]
   };
 
-  return { blockMap, titleBlock, metaBlock, snapshot };
+  return { blockMap, orderedBlocks, titleBlock, metaBlock, snapshot };
 }
 
 /**
@@ -1334,16 +1728,74 @@ export function buildSurgicalIndexFromDocModel(docModel = {}) {
 export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, options = {}) {
   const allowLayoutRestructure = Boolean(options.allowLayoutRestructure);
   const cloned = JSON.parse(JSON.stringify(docModel));
-  const { blockMap, titleBlock, metaBlock } = buildSurgicalIndexFromDocModel(cloned);
+  const { blockMap, orderedBlocks, titleBlock, metaBlock } = buildSurgicalIndexFromDocModel(cloned, options);
   const warnings = [];
   const changes = [];
   let appliedCount = 0;
+  const pageFormatPatches = [];
+  const pendingListConversions = [];
 
   const patches = Array.isArray(editedJson?.patches) ? editedJson.patches : null;
   if (patches && patches.length > 0) {
     for (const patch of patches) {
       if (!patch || typeof patch !== 'object') continue;
       const op = String(patch.op || '').trim();
+
+      if (op === 'setPageFormat') {
+        pageFormatPatches.push(patch);
+        const fmtKeys = Object.keys(patch).filter((k) => k !== 'op').join(', ') || 'halaman';
+        recordSurgicalChange(changes, 'pageFormat', 'Format Halaman & Tipografi', '-', fmtKeys);
+        appliedCount++;
+        continue;
+      }
+
+      if (op === 'setParagraphFormat') {
+        const targets = (patch.blockId === '*' || String(patch.target || '').toLowerCase() === 'all')
+          ? orderedBlocks.filter((e) => e.kind === 'paragraph')
+          : Array.isArray(patch.blockIds)
+            ? patch.blockIds.map((id) => blockMap.get(id)).filter((e) => e && e.kind === 'paragraph')
+            : (() => {
+                const single = blockMap.get(patch.blockId);
+                return single && single.kind === 'paragraph' ? [single] : [];
+              })();
+        if (targets.length === 0) {
+          warnings.push(`Paragraf model target format tidak ditemukan: ${patch.blockId || '*'}`);
+          continue;
+        }
+        let fmtCount = 0;
+        for (const t of targets) {
+          if (applyDocModelParagraphFormat(t.block, patch)) fmtCount++;
+        }
+        if (fmtCount > 0) {
+          const fmtDesc = Object.keys(patch).filter((k) => !['op', 'blockId', 'blockIds', 'target'].includes(k)).join(', ');
+          recordSurgicalChange(changes, 'paragraphFormat', `Format ${targets.length} Paragraf`, '-', fmtDesc);
+          appliedCount++;
+        }
+        continue;
+      }
+
+      if (op === 'convertParagraphsToList') {
+        const ids = Array.isArray(patch.blockIds) ? patch.blockIds : [];
+        const entries = ids.map((id) => blockMap.get(id)).filter((e) => e && e.kind === 'paragraph');
+        if (entries.length === 0) {
+          warnings.push('Blok paragraf model untuk dijadikan daftar tidak ditemukan.');
+          continue;
+        }
+        pendingListConversions.push({
+          entries,
+          listStyle: patch.listStyle ?? (patch.ordered === false ? 'bullet' : 'decimal'),
+          startAt: patch.startAt
+        });
+        recordSurgicalChange(
+          changes,
+          'convertList',
+          `Ubah ${entries.length} Paragraf Jadi Daftar (${patch.listStyle || 'decimal'})`,
+          `${entries.length} paragraf`,
+          `Daftar ${patch.listStyle || 'decimal'}`
+        );
+        appliedCount++;
+        continue;
+      }
 
       if (op === 'setField' && titleBlock) {
         const target = String(patch.target || '').toLowerCase();
@@ -1433,6 +1885,17 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
           recordSurgicalChange(changes, 'identity', 'Hapus Baris Identitas', `${rem.label} ${rem.value}`, '(dihapus)');
           appliedCount++;
         }
+      } else if (op === 'setTableFormat' && entry.kind === 'table') {
+        if (patch.borderStyle !== undefined) entry.block.borderStyle = String(patch.borderStyle).trim().toLowerCase();
+        if (patch.headerShading !== undefined) entry.block.headerShading = Boolean(patch.headerShading);
+        if (patch.headerBold !== undefined) entry.block.headerBold = Boolean(patch.headerBold);
+        if (patch.align !== undefined) entry.block.align = normalizeAlignment(patch.align) || 'left';
+        if (Array.isArray(patch.colWidthsPct) && patch.colWidthsPct.length > 0) {
+          entry.block.colWidthsPct = patch.colWidthsPct.map((n) => Math.max(4, Math.min(90, Number(n) || 10)));
+        }
+        const fmtKeys = Object.keys(patch).filter((k) => !['op', 'blockId'].includes(k)).join(', ');
+        recordSurgicalChange(changes, 'tableFormat', `Format Tabel (${entry.blockId})`, '-', fmtKeys);
+        appliedCount++;
       } else if (op === 'setTableCell' && entry.kind === 'table') {
         const rIdx = Number(patch.row);
         const cIdx = Number(patch.col);
@@ -1460,6 +1923,43 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
           entry.block.rows.splice(idx, 1);
           recordSurgicalChange(changes, 'deleteRow', `Hapus Baris (${entry.blockId}, Brs ${idx + 1})`, `Baris ${idx + 1}`, '(dihapus)');
           appliedCount++;
+        }
+      } else if ((op === 'setList' || op === 'setListItem') && entry.kind === 'list') {
+        entry.block.items = entry.block.items || [];
+        if (op === 'setListItem') {
+          const itemIdx = Number(patch.itemIndex);
+          if (entry.block.items[itemIdx] !== undefined) {
+            const prevLi = typeof entry.block.items[itemIdx] === 'string'
+              ? entry.block.items[itemIdx]
+              : String(entry.block.items[itemIdx]?.text ?? '');
+            const nextTxt = String(patch.text ?? '');
+            entry.block.items[itemIdx] = typeof entry.block.items[itemIdx] === 'string' ? nextTxt : { text: nextTxt };
+            recordSurgicalChange(changes, 'list', `Daftar Poin #${itemIdx + 1}`, prevLi, nextTxt);
+            appliedCount++;
+          }
+        } else {
+          let listChanged = false;
+          if (patch.listStyle !== undefined || patch.ordered !== undefined || patch.startAt !== undefined) {
+            const prevStyle = normalizeListStyle(entry.block.listStyle, entry.block.ordered !== false);
+            const targetStyle = patch.listStyle !== undefined
+              ? normalizeListStyle(patch.listStyle, true)
+              : (patch.ordered === false ? 'bullet' : (prevStyle === 'bullet' ? 'decimal' : prevStyle));
+            entry.block.listStyle = targetStyle;
+            entry.block.ordered = targetStyle !== 'bullet';
+            if (patch.startAt !== undefined) {
+              const s = Math.max(1, parseInt(patch.startAt, 10) || 1);
+              if (s > 1) entry.block.startAt = s;
+              else delete entry.block.startAt;
+            }
+            recordSurgicalChange(changes, 'listStyle', `Gaya Penomoran Daftar`, prevStyle, targetStyle);
+            listChanged = true;
+          }
+          if (Array.isArray(patch.items) && patch.items.length > 0) {
+            entry.block.items = patch.items.map((txt) => String(txt ?? ''));
+            recordSurgicalChange(changes, 'list', `Daftar Poin (${entry.blockId})`, '-', entry.block.items.join('; '));
+            listChanged = true;
+          }
+          if (listChanged) appliedCount++;
         }
       } else if (op === 'setSignature' && entry.kind === 'signature') {
         const prevSig = `${entry.block.city || ''}, ${entry.block.date || ''} · ${entry.block.name || ''}`;
@@ -1495,7 +1995,93 @@ export function applySurgicalPatchesToDocModel(docModel = {}, editedJson = {}, o
       }
     }
 
-    return { appliedCount, mode: 'surgical', docModel: cloned, warnings, changes };
+    for (const conv of pendingListConversions) {
+      const valid = conv.entries.filter((e) => cloned.blocks.includes(e.block));
+      if (valid.length === 0) continue;
+      const spec = getListStyleSpec(conv.listStyle, true);
+      const startAt = Math.max(1, parseInt(conv.startAt || 1, 10) || 1);
+      const listBlock = {
+        type: 'list',
+        ordered: spec.htmlTag === 'ol',
+        listStyle: spec.key,
+        ...(startAt > 1 ? { startAt } : {}),
+        items: valid.map((e) =>
+          Array.isArray(e.block.runs) && e.block.runs.length > 0
+            ? e.block.runs.map((r) => ({ ...r }))
+            : [{ text: String(e.block.text || '') }]
+        )
+      };
+      const firstIdx = cloned.blocks.indexOf(valid[0].block);
+      if (firstIdx !== -1) {
+        cloned.blocks.splice(firstIdx, 1, listBlock);
+        for (let k = 1; k < valid.length; k++) {
+          const remIdx = cloned.blocks.indexOf(valid[k].block);
+          if (remIdx !== -1) cloned.blocks.splice(remIdx, 1);
+        }
+      }
+    }
+
+    const baseDocOpts = options.letterOptions || cloned.pageSetup || cloned.letterData?.options || {};
+    const extractedPageSetup = extractPageSetupFromAiPayload(
+      { ...(editedJson && typeof editedJson === 'object' ? editedJson : {}), patches: pageFormatPatches },
+      baseDocOpts
+    );
+    if (extractedPageSetup) {
+      const full = extractedPageSetup.full;
+      cloned.paperSize = full.paperSize;
+      cloned.profile = full.paperSize === 'f4' ? 'suratDinasF4' : (cloned.profile || 'suratDinas');
+      cloned.orientation = full.orientation;
+      cloned.customMargins = full.margins;
+      cloned.fontFamily = full.fontFamily;
+      cloned.fontSize = full.fontSize;
+      cloned.lineSpacing = full.lineSpacing;
+      cloned.paragraphSpacing = full.paragraphSpacing;
+      cloned.pageNumbering = full.pageNumbering;
+      cloned.pageSetup = full;
+      if (cloned.letterData) {
+        cloned.letterData.options = { ...(cloned.letterData.options || {}), ...full };
+      }
+      if (pageFormatPatches.length === 0) {
+        recordSurgicalChange(changes, 'pageFormat', 'Format Halaman & Tipografi', '-', Object.keys(extractedPageSetup.partial).join(', '));
+        appliedCount++;
+      }
+    }
+
+    return {
+      appliedCount,
+      mode: 'surgical',
+      docModel: cloned,
+      warnings,
+      changes,
+      ...(extractedPageSetup ? { pageSetupUpdates: extractedPageSetup.partial, pageSetup: extractedPageSetup.full } : {})
+    };
+  }
+
+  const topOnlyPageSetup = extractPageSetupFromAiPayload(
+    editedJson,
+    options.letterOptions || cloned.pageSetup || cloned.letterData?.options || {}
+  );
+  if (topOnlyPageSetup && (!Array.isArray(editedJson?.blocks) || editedJson.blocks.length === 0) && editedJson?.editScope !== 'restructure') {
+    const full = topOnlyPageSetup.full;
+    cloned.paperSize = full.paperSize;
+    cloned.orientation = full.orientation;
+    cloned.customMargins = full.margins;
+    cloned.fontFamily = full.fontFamily;
+    cloned.fontSize = full.fontSize;
+    cloned.lineSpacing = full.lineSpacing;
+    cloned.paragraphSpacing = full.paragraphSpacing;
+    cloned.pageNumbering = full.pageNumbering;
+    cloned.pageSetup = full;
+    recordSurgicalChange(changes, 'pageFormat', 'Format Halaman & Tipografi', '-', Object.keys(topOnlyPageSetup.partial).join(', '));
+    return {
+      appliedCount: 1,
+      mode: 'surgical',
+      docModel: cloned,
+      warnings,
+      changes,
+      pageSetupUpdates: topOnlyPageSetup.partial,
+      pageSetup: topOnlyPageSetup.full
+    };
   }
 
   if (editedJson?.editScope === 'restructure' && allowLayoutRestructure) {

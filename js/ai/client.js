@@ -9,8 +9,28 @@
 
 import { store, getBuiltinFallbackConfigs, getBuiltinSystemKey } from '../state.js';
 import { POLISHER_SYSTEM_PROMPT, buildPolisherUserPrompt, EDITOR_SYSTEM_PROMPT, buildEditorUserPrompt } from './prompts.js';
+import {
+  CHAT_COPILOT_SYSTEM_PROMPT,
+  DIRECT_CANVAS_SYSTEM_SUFFIX,
+  isDirectExecutionCommand,
+  buildChatCopilotUserPrompt,
+  buildConversationHistoryForAi,
+  normalizeAiChatResponse
+} from './chatEngine.js';
 import { formatSmartNomorSurat } from '../letters/numbering.js';
+import {
+  getSchoolCodeFromProfile,
+  detectTargetUnitFromText,
+  resolveSchoolProfileForUnit,
+  adaptTextForSchoolUnit
+} from '../letters/schoolProfile.js';
 import { shouldAllowLayoutRestructure } from './surgicalEdit.js';
+import {
+  extractPageSetupFromAiPayload,
+  normalizeAlignment,
+  normalizeListStyle,
+  ptToTwips
+} from '../letters/wordFormat.js';
 
 // Proxy default Cloudflare Functions (produksi)
 const DEFAULT_PROXY_ENDPOINT = '/api/ai';
@@ -291,12 +311,16 @@ export async function executeAiRequest({
   onChunk,
   signal,
   timeoutMs,
-  attachments = null
+  attachments = null,
+  conversationHistory = []
 }) {
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   const effectiveTimeoutMs = timeoutMs || (hasAttachments ? 26000 : 12000);
   const provider = config.provider || 'gemini';
   const apiKey = (config.apiKey || '').trim();
+  const safeHistory = Array.isArray(conversationHistory)
+    ? conversationHistory.filter(h => h && (h.role === 'user' || h.role === 'assistant') && String(h.text || '').trim())
+    : [];
 
   // 1. PROVIDER: GOOGLE GEMINI
   if (provider === 'gemini') {
@@ -307,7 +331,7 @@ export async function executeAiRequest({
       const res = await fetch(DEFAULT_PROXY_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, systemPrompt, stream, model: normalizeGeminiModel(config.model), attachments }),
+        body: JSON.stringify({ prompt, systemPrompt, stream, model: normalizeGeminiModel(config.model), attachments, conversationHistory: safeHistory }),
         signal
       });
       if (!res.ok) {
@@ -339,6 +363,10 @@ export async function executeAiRequest({
       if (String(targetModel).startsWith('gemini-2.5')) {
         generationConfig.thinkingConfig = { thinkingBudget: 0 };
       }
+      const historyContents = safeHistory.map((h) => ({
+        role: h.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: String(h.text || '') }]
+      }));
       const userParts = [{ text: prompt }];
       if (hasAttachments) {
         attachments.forEach((att) => {
@@ -353,7 +381,7 @@ export async function executeAiRequest({
         });
       }
       const nextPayload = {
-        contents: [{ role: 'user', parts: userParts }],
+        contents: [...historyContents, { role: 'user', parts: userParts }],
         generationConfig
       };
       if (systemPrompt) {
@@ -478,6 +506,9 @@ export async function executeAiRequest({
   const messages = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
+  }
+  for (const h of safeHistory) {
+    messages.push({ role: h.role === 'assistant' ? 'assistant' : 'user', content: String(h.text || '') });
   }
   if (hasAttachments) {
     const hasPdf = attachments.some((a) => String(a?.mimeType || '').includes('pdf'));
@@ -604,7 +635,8 @@ export async function callAiApi({
   signal,
   preferredApiId,
   attachments = null,
-  preferGeminiForMultimodal = false
+  preferGeminiForMultimodal = false,
+  conversationHistory = []
 }) {
   const vault = store.getApiVault();
   const candidateConfigs = [];
@@ -674,7 +706,8 @@ export async function callAiApi({
         stream,
         onChunk,
         signal,
-        attachments
+        attachments,
+        conversationHistory
       });
       return result;
     } catch (err) {
@@ -692,7 +725,17 @@ export async function callAiApi({
 /**
  * Panggilan AI Terstruktur dengan Validasi Skema & Retry Maksimal 2x
  */
-export async function callAiWithValidation({ prompt, systemPrompt, validator, onChunk, signal, preferredApiId }) {
+export async function callAiWithValidation({
+  prompt,
+  systemPrompt,
+  validator,
+  onChunk,
+  signal,
+  preferredApiId,
+  attachments = null,
+  preferGeminiForMultimodal = false,
+  conversationHistory = []
+}) {
   let attempts = 0;
   const maxRetries = 2;
   let currentPrompt = prompt;
@@ -709,7 +752,10 @@ export async function callAiWithValidation({ prompt, systemPrompt, validator, on
         stream: !!onChunk,
         onChunk,
         signal,
-        preferredApiId
+        preferredApiId,
+        attachments,
+        preferGeminiForMultimodal,
+        conversationHistory
       });
 
       const cleaned = cleanJsonOutput(rawText);
@@ -745,6 +791,132 @@ ${prompt}
   }
 
   throw new Error(`AI gagal menghasilkan data yang valid setelah ${maxRetries} kali percobaan retry:\n- ${lastErrors.join('\n- ')}`);
+}
+
+/**
+ * Panggilan AI Copilot Percakapan Multi-Turn (gaya ChatGPT + Eksekusi Surgical/Draft Surat)
+ */
+export async function callAiChatTurn({
+  conversationHistory = [],
+  userMessage = '',
+  activeDocumentSnapshot = null,
+  targetWorkspace = 'smart-canvas',
+  schoolProfile = null,
+  preferredUnitId = 'auto',
+  preferredApiId = null,
+  attachments = null,
+  attachmentsMeta = [],
+  allowLayoutRestructure,
+  executionMode = 'confirm',
+  signal
+} = {}) {
+  const stateNow = store.getState();
+  const baseSchool = schoolProfile || store.getSchoolProfile();
+  const explicitUnit = (preferredUnitId === 'smp' || preferredUnitId === 'smk') ? preferredUnitId : null;
+  const openDocText = activeDocumentSnapshot
+    ? [
+        activeDocumentSnapshot.letterTitle || '',
+        activeDocumentSnapshot.nomorSurat || '',
+        activeDocumentSnapshot.signer?.name || ''
+      ].join(' ')
+    : '';
+  const detectedFromPrompt = detectTargetUnitFromText(userMessage, null);
+  const detectedFromOpenDoc = targetWorkspace !== 'none' && openDocText
+    ? detectTargetUnitFromText(openDocText, null)
+    : null;
+  const recentHistoryText = (conversationHistory || []).slice(-3).map(m => m?.text || '').join(' ');
+  const detectedFromHistory = detectTargetUnitFromText(recentHistoryText, null);
+  const resolvedUnitId = explicitUnit
+    || detectedFromPrompt
+    || detectedFromOpenDoc
+    || detectedFromHistory
+    || baseSchool?.unitId
+    || 'smk';
+  const school = resolveSchoolProfileForUnit(resolvedUnitId, baseSchool, stateNow.kopGallery || []);
+
+  const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+  const kbSelection = store.getSmartAiReferencesForPrompt(String(userMessage || '').slice(0, 600), 3);
+  const allowRestructure = allowLayoutRestructure !== undefined
+    ? Boolean(allowLayoutRestructure)
+    : shouldAllowLayoutRestructure(userMessage);
+
+  const userPrompt = buildChatCopilotUserPrompt({
+    userMessage,
+    activeDocumentSnapshot,
+    targetWorkspace,
+    schoolName: school.schoolName,
+    principalName: school.principalName,
+    schoolCode: getSchoolCodeFromProfile(school),
+    unitId: school.unitId,
+    npsn: school.npsn,
+    address: school.address,
+    tuName: school.tuName,
+    dateStr,
+    references: kbSelection.references,
+    matchMode: kbSelection.matchMode,
+    totalKnowledgeCount: kbSelection.totalKnowledgeCount,
+    allowLayoutRestructure: allowRestructure,
+    attachmentsMeta,
+    executionMode
+  });
+
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  const historySlice = buildConversationHistoryForAi(conversationHistory, 8);
+
+  const effectiveSystemPrompt = executionMode === 'direct_apply'
+    ? `${CHAT_COPILOT_SYSTEM_PROMPT}\n\n${DIRECT_CANVAS_SYSTEM_SUFFIX}`
+    : CHAT_COPILOT_SYSTEM_PROMPT;
+
+  const expectsDirectAction = executionMode === 'direct_apply' && isDirectExecutionCommand(userMessage);
+
+  const parsed = await callAiWithValidation({
+    prompt: userPrompt,
+    systemPrompt: effectiveSystemPrompt,
+    preferredApiId,
+    attachments,
+    preferGeminiForMultimodal: hasAttachments,
+    conversationHistory: historySlice,
+    signal,
+    validator: (data) => {
+      if (!data || typeof data !== 'object') {
+        return { valid: false, errors: ['Output harus berupa objek JSON percakapan AI.'] };
+      }
+      if (expectsDirectAction) {
+        const hasDraft = Boolean(
+          data.letterDraft && typeof data.letterDraft === 'object'
+          && (Array.isArray(data.letterDraft.blocks) || data.letterDraft.templatePreset || data.letterDraft.letterTitle)
+        ) || (Array.isArray(data.blocks) && data.blocks.length > 0) || Boolean(data.templatePreset);
+        const hasEdit = Boolean(
+          data.editPlan && typeof data.editPlan === 'object'
+          && ((Array.isArray(data.editPlan.patches) && data.editPlan.patches.length > 0)
+            || (Array.isArray(data.editPlan.blocks) && data.editPlan.blocks.length > 0))
+        ) || (Array.isArray(data.patches) && data.patches.length > 0);
+        if (!hasDraft && !hasEdit) {
+          return {
+            valid: false,
+            errors: ['Mode Kanvas Langsung AKTIF: perintah menyuruh membuat/mengubah surat. WAJIB kembalikan intent "create_letter" beserta letterDraft lengkap atau "edit_letter" beserta editPlan lengkap, bukan hanya intent "chat".']
+          };
+        }
+      }
+      return { valid: true, errors: [] };
+    }
+  });
+
+  const normalized = normalizeAiChatResponse(parsed, {
+    userMessage,
+    hasActiveDoc: Boolean(activeDocumentSnapshot && targetWorkspace !== 'none'),
+    allowLayoutRestructure: allowRestructure,
+    executionMode,
+    targetUnitId: school.unitId,
+    targetSchoolProfile: school
+  });
+
+  return {
+    ...normalized,
+    targetUnitId: school.unitId,
+    schoolProfile: school,
+    kbSelection
+  };
 }
 
 /**
@@ -808,9 +980,13 @@ export function convertAiBlocksToDocumentBlocks(parsedBlocks = []) {
         runs: [{ text: String(b.text).trim(), bold: true }]
       });
     } else if (b.type === 'list' && Array.isArray(b.items)) {
+      const listStyle = normalizeListStyle(b.listStyle || b.typeStyle || '', b.ordered !== false);
+      const startAt = Math.max(1, parseInt(b.startAt ?? 1, 10) || 1);
       result.push({
         type: 'list',
-        ordered: b.ordered !== false,
+        ordered: listStyle !== 'bullet',
+        listStyle,
+        ...(startAt > 1 ? { startAt } : {}),
         items: b.items.map(it => [{ text: String(it) }])
       });
     } else if (b.type === 'table' && Array.isArray(b.rows) && b.rows.length > 0) {
@@ -825,13 +1001,24 @@ export function convertAiBlocksToDocumentBlocks(parsedBlocks = []) {
       });
     } else if (b.type === 'paragraph') {
       const txt = String(b.text || '').trim();
-      if (txt || b.spacingAfter || b.spacingBefore) {
+      const spBefore = b.spacingBefore !== undefined
+        ? b.spacingBefore
+        : (b.spacingBeforePt !== undefined ? ptToTwips(b.spacingBeforePt) : undefined);
+      const spAfter = b.spacingAfter !== undefined
+        ? b.spacingAfter
+        : (b.spacingAfterPt !== undefined ? ptToTwips(b.spacingAfterPt) : undefined);
+      const fontHalfPt = b.fontSizeHalfPt || (b.fontSizePt ? Math.round(Number(b.fontSizePt) * 2) : undefined);
+      const normAlign = normalizeAlignment(b.alignment);
+      if (txt || spAfter || spBefore) {
         result.push({
           type: 'paragraph',
           style: 'letterBody',
-          ...(b.alignment ? { alignment: b.alignment } : {}),
-          ...(b.spacingBefore !== undefined ? { spacingBefore: b.spacingBefore } : {}),
-          ...(b.spacingAfter !== undefined ? { spacingAfter: b.spacingAfter } : {}),
+          ...(normAlign ? { alignment: normAlign } : {}),
+          ...(b.firstLineIndentCm !== undefined ? { firstLineIndentCm: Number(b.firstLineIndentCm) } : {}),
+          ...(b.leftIndentCm !== undefined ? { leftIndentCm: Number(b.leftIndentCm) } : {}),
+          ...(b.lineSpacing ? { lineSpacing: String(b.lineSpacing) } : {}),
+          ...(spBefore !== undefined ? { spacingBefore: spBefore } : {}),
+          ...(spAfter !== undefined ? { spacingAfter: spAfter } : {}),
           runs: Array.isArray(b.runs) && b.runs.length > 0
             ? b.runs
             : [{
@@ -839,7 +1026,7 @@ export function convertAiBlocksToDocumentBlocks(parsedBlocks = []) {
                 ...(b.bold ? { bold: true } : {}),
                 ...(b.italic ? { italic: true } : {}),
                 ...(b.underline ? { underline: true } : {}),
-                ...(b.fontSizeHalfPt ? { fontSizeHalfPt: b.fontSizeHalfPt } : {})
+                ...(fontHalfPt ? { fontSizeHalfPt: fontHalfPt } : {})
               }]
         });
       }
@@ -857,7 +1044,11 @@ export function convertAiBlocksToDocumentBlocks(parsedBlocks = []) {
 }
 
 export async function polishMessyDocumentWithAi(messyText, options = {}) {
-  const school = options.schoolProfile || store.getSchoolProfile();
+  const stateNow = store.getState();
+  const baseSchool = options.schoolProfile || store.getSchoolProfile();
+  const detectedUnit = options.targetUnitId
+    || detectTargetUnitFromText(messyText, baseSchool?.unitId || 'smk');
+  const school = resolveSchoolProfileForUnit(detectedUnit, baseSchool, stateNow.kopGallery || []);
   const dateStr = options.dateStr || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
   const kbSelection = store.getSmartAiReferencesForPrompt(String(messyText || '').slice(0, 600), 2);
 
@@ -865,6 +1056,9 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
     messyText,
     schoolName: school.schoolName,
     principalName: school.principalName,
+    schoolCode: getSchoolCodeFromProfile(school),
+    npsn: school.npsn,
+    address: school.address,
     dateStr,
     references: kbSelection.references,
     matchMode: kbSelection.matchMode,
@@ -888,15 +1082,23 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
 
   const title = (parsed.letterTitle || parsed.title || 'SURAT DINAS SEKOLAH').trim();
   const rawNomor = (parsed.nomorSurat || '').trim();
+  const schoolCode = getSchoolCodeFromProfile(school);
   const smartNomor = formatSmartNomorSurat({
     rawNomor,
     contextText: `${title} ${parsed.hal || ''} ${parsed.perihal || ''} ${messyText.slice(0, 300)}`,
-    forcedTypeCode: parsed.kodeJenisSurat || ''
+    forcedTypeCode: parsed.kodeJenisSurat || '',
+    schoolCode
   });
 
-  const resolvedPaper = ['a4', 'f4', 'letter'].includes(String(parsed.paperSize || '').toLowerCase())
-    ? String(parsed.paperSize).toLowerCase()
-    : (options.paperSize || 'a4');
+  const extractedSetup = extractPageSetupFromAiPayload(parsed, options);
+  const resolvedSetup = extractedSetup ? extractedSetup.full : null;
+  const resolvedPaper = resolvedSetup?.paperSize
+    || (['a4', 'f4', 'letter', 'legal'].includes(String(parsed.paperSize || '').toLowerCase())
+      ? String(parsed.paperSize).toLowerCase()
+      : (options.paperSize || 'a4'));
+  const resolvedOrientation = resolvedSetup?.orientation || options.orientation || 'portrait';
+  const resolvedMargins = resolvedSetup?.margins || options.margins;
+  const mergedOptions = resolvedSetup ? { ...options, ...resolvedSetup } : options;
 
   const letterTitleBlock = {
     type: 'letterTitle',
@@ -920,15 +1122,17 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
   }
 
   const docModel = {
+    targetUnitId: school.unitId,
     meta: {
-      title,
+      title: adaptTextForSchoolUnit(title, school.unitId),
       author: school.schoolName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: resolvedPaper === 'f4' ? 'suratDinasF4' : 'suratDinas',
     paperSize: resolvedPaper,
-    orientation: options.orientation || 'portrait',
-    customMargins: options.margins,
+    orientation: resolvedOrientation,
+    customMargins: resolvedMargins,
+    ...(resolvedSetup ? { pageSetup: resolvedSetup } : {}),
     letterData: {
       templateId: 'surat_polisher',
       schoolProfile: school,
@@ -936,7 +1140,7 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
         nomorSurat: smartNomor,
         judulSurat: title
       },
-      options,
+      options: mergedOptions,
       aiLearningMeta: {
         matchMode: kbSelection.matchMode,
         matchedTitle: kbSelection.topReference?.title || null,
@@ -961,7 +1165,7 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
       city: sig.city || school.city || 'Garut',
       date: sig.date || parsed.tanggalSurat || dateStr,
       title: sig.title || school.principalTitle || 'Kepala Sekolah',
-      name: sig.name || school.principalName || 'Dian Nurhadian, S.Pd.',
+      name: sig.name || school.principalName || 'Dian Nurhamdani, S.Pd.',
       nip: sig.nip && sig.nip !== '-' ? sig.nip : (school.principalNip || '-')
     });
   }
@@ -978,7 +1182,16 @@ export async function polishMessyDocumentWithAi(messyText, options = {}) {
  * @returns {Promise<object>} Hasil edit JSON terstruktur
  */
 export async function editDocumentWithAi(currentSnapshot, userInstruction, options = {}) {
-  const school = options.schoolProfile || store.getSchoolProfile();
+  const stateNow = store.getState();
+  const baseSchool = options.schoolProfile || store.getSchoolProfile();
+  const snapText = [
+    currentSnapshot?.letterTitle || '',
+    currentSnapshot?.nomorSurat || '',
+    currentSnapshot?.signer?.name || ''
+  ].join(' ');
+  const detectedUnit = options.targetUnitId
+    || detectTargetUnitFromText(userInstruction, detectTargetUnitFromText(snapText, baseSchool?.unitId || 'smk'));
+  const school = resolveSchoolProfileForUnit(detectedUnit, baseSchool, stateNow.kopGallery || []);
   const dateStr = options.dateStr || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
   const allowLayoutRestructure = options.allowLayoutRestructure !== undefined
     ? Boolean(options.allowLayoutRestructure)
@@ -989,6 +1202,7 @@ export async function editDocumentWithAi(currentSnapshot, userInstruction, optio
     userInstruction,
     schoolName: school.schoolName,
     principalName: school.principalName,
+    schoolCode: getSchoolCodeFromProfile(school),
     dateStr,
     allowLayoutRestructure
   });

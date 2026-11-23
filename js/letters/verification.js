@@ -271,9 +271,9 @@ export function buildSignerSelectionInfo(school = {}, signerRole = 'kepala_sekol
     ? signerRole
     : 'kepala_sekolah';
 
-  const schoolName = school?.name || 'SMK IT Al-Hawari';
+  const schoolName = school?.schoolName || school?.name || 'SMK IT Al-Hawari';
   const principalTitle = school?.principalTitle || 'Kepala Sekolah';
-  const principalName = school?.principalName || 'Dian Nurhadian, S.Pd.';
+  const principalName = school?.principalName || 'Dian Nurhamdani, S.Pd.';
   const principalNip = school?.principalNip || '-';
   const principalRank = school?.principalRank || `Kepala ${schoolName}`;
 
@@ -430,7 +430,7 @@ const TYPE_AUTHENTICATION_NOTES = Object.freeze({
 export function buildTypeSpecificVerificationDetails(typeCode = 'TU', entry = {}, school = {}) {
   const code = String(typeCode || 'TU').toUpperCase().trim() || 'TU';
   const typeLabel = getTypeLabel(code);
-  const schoolName = school?.name || 'SMK IT Al-Hawari';
+  const schoolName = school?.schoolName || school?.name || 'SMK IT Al-Hawari';
   const recipient = entry.recipientName || '-';
   const perihal = entry.perihal || entry.title || '-';
   const nomor = entry.nomorSurat || '-';
@@ -510,9 +510,9 @@ export function buildVerificationPayload({
     perihal: String(entry.perihal || entry.title || '-').trim(),
     recipientName: String(entry.recipientName || '-').trim(),
     tanggalSurat: String(entry.tanggalSurat || '-').trim(),
-    schoolName: school?.name || 'SMK IT Al-Hawari',
+    schoolName: school?.schoolName || school?.name || 'SMK IT Al-Hawari',
     schoolNpsn: school?.npsn || '',
-    schoolAddress: [school?.address, school?.district, school?.regency].filter(Boolean).join(', '),
+    schoolAddress: [school?.address, school?.district, school?.city || school?.regency, school?.province].filter(Boolean).join(', '),
     signerRole: signerInfo.signerRole,
     signerTitle: signerInfo.signerTitle,
     signerName: signerInfo.signerName,

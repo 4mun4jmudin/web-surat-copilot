@@ -9,6 +9,14 @@ import { parseDocxForEditing, applyCanvasEditsToDocx } from '../docx/patch.js';
 import { renderDocx } from '../docx/render.js';
 import { downloadFile } from '../utils/download.js';
 import { showToast } from './notification.js';
+import { uiIcon } from './icons.js';
+import {
+  SCHOOL_UNITS,
+  adaptDocumentModelForUnit,
+  normalizeUnitId
+} from '../letters/schoolProfile.js';
+import { extractDocumentMetadata, buildDocumentDownloadFilename } from '../letters/smartNaming.js';
+import { buildMetaAutoScanBarHtml, wireMetaAutoScanBar } from './vaultSaveHelper.js';
 
 let currentSearchQuery = '';
 let currentCategoryFilter = 'all';
@@ -16,6 +24,7 @@ let filterOnlyAiRef = false;
 let filterOnlyMaster = false;
 let currentVaultSort = 'master_first';
 let currentVaultViewMode = 'grid';
+let selectedVaultTargetMode = 'ask'; // 'ask' | 'smp' | 'smk'
 
 /**
  * Menghitung jarak Damerau-Levenshtein (mendukung salah ketik huruf, kurang/lebih huruf, dan huruf tertukar posisi seperti "surta" -> "surat")
@@ -274,22 +283,22 @@ export function searchAndRankLetters(letters = [], rawQuery = '') {
   return scoredResults;
 }
 
-const V_SVG_LAYERS_30 = `<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>`;
-const V_SVG_DOC = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`;
-const V_SVG_STAR = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
-const V_SVG_BOLT = (size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`;
-const V_SVG_SEARCH_15 = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
-const V_SVG_UPLOAD_15 = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
-const V_SVG_CAL_12 = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
-const V_SVG_USER_12 = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-const V_SVG_DL_13 = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
-const V_SVG_COPY_13 = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-const V_SVG_TRASH_13 = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+const V_SVG_LAYERS_30 = uiIcon('layers', 24);
+const V_SVG_DOC = (size = 18) => uiIcon('docClean', size);
+const V_SVG_STAR = (size = 18) => uiIcon('star', size);
+const V_SVG_BOLT = (size = 18) => uiIcon('bolt', size);
+const V_SVG_SEARCH_15 = uiIcon('search', 15);
+const V_SVG_UPLOAD_15 = uiIcon('upload', 14);
+const V_SVG_CAL_12 = uiIcon('calendar', 12);
+const V_SVG_USER_12 = uiIcon('user', 12);
+const V_SVG_DL_13 = uiIcon('download', 13);
+const V_SVG_COPY_13 = uiIcon('copy', 13);
+const V_SVG_TRASH_13 = uiIcon('trash', 13);
 
 function getCategoryPillIcon(cat) {
-  if (cat === 'all') return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`;
-  if (cat === 'Surat Tugas') return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`;
-  if (cat === 'Surat Undangan') return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>`;
+  if (cat === 'all') return uiIcon('grid', 13);
+  if (cat === 'Surat Tugas') return uiIcon('briefcase', 13);
+  if (cat === 'Surat Undangan') return uiIcon('mail', 13);
   if (cat === 'Dokumen Impor') return V_SVG_DL_13;
   return V_SVG_DOC(13);
 }
@@ -305,37 +314,39 @@ export function renderVaultView(container) {
   const categories = ['all', ...Array.from(new Set([...baseCategories, ...presentCategories]))];
 
   container.innerHTML = `
-    <div id="dropzone-docx-vault" class="view-atmosphere" style="transition: background 0.2s ease;">
-      <div class="view-shell vault-view-container">
+    <div id="dropzone-docx-vault" class="view-atmosphere" style="transition: outline 0.15s ease;">
+      <div class="view-shell view-shell-fluid vault-view-container">
 
         <!-- HEADER GUDANG SURAT -->
-        <div class="view-page-header" style="margin-bottom: 12px;">
+        <div class="view-page-header" style="margin-bottom: 18px;">
           <div class="view-header-lead">
-            <span style="margin-top: 2px;">${V_SVG_LAYERS_30}</span>
-            <span class="view-header-divider"></span>
+            <div class="view-header-badge">${V_SVG_LAYERS_30}</div>
             <div>
               <h2 class="view-title">
                 <span>Gudang Template &amp; Draf Surat Sekolah</span>
-                <span class="status-chip status-chip-green">✏️ Dapat Diedit &amp; Disesuaikan Kembali</span>
+                <span class="status-chip status-chip-green">${uiIcon('edit', 12)}<span>Dapat Diedit &amp; Disesuaikan Kembali</span></span>
               </h2>
               <p class="view-subtitle">
-                Kumpulan template, draf, dan arsip surat sekolah yang dapat digunakan kembali atau diedit ulang di <strong>Lembar Kerja</strong>, serta menjadi referensi penulisan untuk AI <strong>Copilot (Surat Keluar)</strong>.
+                Kumpulan template, draf, dan arsip surat sekolah yang dapat digunakan kembali atau diedit ulang di <strong>Lembar Kerja</strong>, serta menjadi referensi penulisan untuk AI <strong>Copilot</strong>. <span style="color:#64748b;">(Tarik &amp; lepas file <code>.docx</code> ke halaman ini untuk impor instan).</span>
               </p>
             </div>
           </div>
-        </div>
 
-        <!-- ACTION BAR -->
-        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 18px;">
-          <input type="file" id="input-upload-docx-vault" accept=".docx" class="hidden">
-          <button id="btn-upload-docx-vault" class="btn btn-secondary" style="padding: 8px 16px; font-weight: 600; border-radius: 8px;">
-            ${V_SVG_UPLOAD_15}
-            <span>Unggah Berkas .docx / .doc</span>
-          </button>
-          <button id="btn-create-new-from-vault" class="btn btn-primary" style="padding: 8px 18px; font-weight: 700; border-radius: 8px;">
-            + Buat Surat Baru dari Word
-          </button>
-          <span style="font-size: 11.5px; color: #64748b; margin-left: 4px;">(Atau seret &amp; lepas berkas Word <code>.docx</code> langsung ke halaman ini)</span>
+          <div class="view-header-actions">
+            <button type="button" id="btn-vault-normalize-all" class="btn btn-secondary" style="padding: 8px 14px; font-weight: 600; border-radius: 8px; font-size: 13px; border-color: #bbf7d0; color: #156c3b; background: #f0fdf4;" title="Rapikan penamaan file arsip gudang secara otomatis mengikuti isi dokumen">
+              ${uiIcon('sparkle', 14)}
+              <span>Rapikan Nama Arsip</span>
+            </button>
+            <input type="file" id="input-upload-docx-vault" accept=".docx" class="hidden">
+            <button id="btn-upload-docx-vault" class="btn btn-secondary" style="padding: 8px 15px; font-weight: 600; border-radius: 8px; font-size: 13px;">
+              ${V_SVG_UPLOAD_15}
+              <span>Unggah .docx</span>
+            </button>
+            <button id="btn-create-new-from-vault" class="btn btn-primary" style="padding: 8px 16px; font-weight: 700; border-radius: 8px; font-size: 13px;">
+              ${uiIcon('plus', 14)}
+              <span>Buat Surat Baru</span>
+            </button>
+          </div>
         </div>
 
         <!-- 3 KARTU STATISTIK KPI -->
@@ -344,7 +355,7 @@ export function renderVaultView(container) {
             <div class="kpi-icon-box kpi-icon-green">${V_SVG_DOC(20)}</div>
             <div>
               <div style="font-size: 12.5px; font-weight: 600; color: #334155;">Total Surat Tersimpan</div>
-              <div style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 4px;">
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 4px;">
                 ${allLetters.length} <span style="font-size: 13px; font-weight: 500; color: #475569;">dokumen</span>
               </div>
             </div>
@@ -355,14 +366,15 @@ export function renderVaultView(container) {
             <div class="kpi-icon-box kpi-icon-amber">${V_SVG_STAR(20)}</div>
             <div>
               <div style="font-size: 12.5px; font-weight: 600; color: #334155;">Pembelajaran AI &amp; Master Terkunci</div>
-              <div style="font-size: 24px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 4px;">
-                ${masterLetters.length} ⭐ <span style="font-size: 13px; font-weight: 700; color: #92400e;">Master Terkunci</span>
+              <div class="kpi-value" style="font-size: 24px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap;">
+                <span>${masterLetters.length}</span>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:700;color:#92400e;">${uiIcon('starFilled', 13)}<span>Master Terkunci</span></span>
               </div>
-              <div style="font-size: 11px; color: #78350f; margin-top: 2px;">
-                ${aiRefLetters.length} dari ${allLetters.length} arsip aktif dipelajari AI (Master ⭐ diprioritaskan &amp; dilindungi)
+              <div style="font-size: 11px; color: #78350f; margin-top: 3px;">
+                ${aiRefLetters.length} dari ${allLetters.length} arsip aktif dipelajari AI (Master diprioritaskan &amp; dilindungi)
               </div>
             </div>
-            <div class="kpi-watermark" style="color: #15803d;">${V_SVG_STAR(56)}</div>
+            <div class="kpi-watermark" style="color: #d97706;">${V_SVG_STAR(56)}</div>
           </div>
 
           <div class="kpi-card tint-blue">
@@ -372,6 +384,7 @@ export function renderVaultView(container) {
               <div style="font-size: 14.5px; font-weight: 800; color: #1e3a8a; margin-top: 3px;">Fuzzy Match &amp; Ranking Nama</div>
               <div style="font-size: 11.5px; color: #475569; margin-top: 2px;">Menemukan surat meski terdapat kesalahan penulisan.</div>
             </div>
+            <div class="kpi-watermark" style="color: #2563eb;">${V_SVG_BOLT(54)}</div>
           </div>
         </div>
 
@@ -379,13 +392,13 @@ export function renderVaultView(container) {
         <div class="filter-bar-card">
           <div style="position: relative; flex: 1; min-width: 260px;">
             <span class="icon-input-leading" style="color: #64748b;">${V_SVG_SEARCH_15}</span>
-            <input type="text" id="input-vault-search" class="icon-input-control" style="padding-right: 32px;"
+            <input type="text" id="input-vault-search" class="icon-input-control" style="padding-right: 34px;"
               placeholder="Ketik nama surat, perihal, nomor, atau kata kunci lainnya..." autocomplete="off" spellcheck="false" value="${escapeHtml(currentSearchQuery)}">
             <button type="button" id="btn-clear-vault-search" class="${currentSearchQuery ? '' : 'hidden'}" title="Bersihkan pencarian"
-              style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: none; background: #e2e8f0; color: #475569; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;">✕</button>
+              style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: none; background: #e2e8f0; color: #475569; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;">${uiIcon('x', 11)}</button>
           </div>
 
-          <div class="icon-input-wrap" style="width: 195px;">
+          <div class="icon-input-wrap" style="width: 205px;">
             <span class="icon-input-leading">${getCategoryPillIcon('all')}</span>
             <select id="select-vault-category" class="icon-input-control" style="cursor: pointer;">
               ${categories.map(cat => `
@@ -394,10 +407,10 @@ export function renderVaultView(container) {
             </select>
           </div>
 
-          <div class="icon-input-wrap" style="width: 185px;">
-            <span class="icon-input-leading">⇅</span>
+          <div class="icon-input-wrap" style="width: 205px;">
+            <span class="icon-input-leading">${uiIcon('sort', 14)}</span>
             <select id="select-vault-sort" class="icon-input-control" style="cursor: pointer;">
-              <option value="master_first" ${currentVaultSort === 'master_first' ? 'selected' : ''}>Urut: ⭐ Master Terkunci Dulu</option>
+              <option value="master_first" ${currentVaultSort === 'master_first' ? 'selected' : ''}>Urut: Master Terkunci Dulu</option>
               <option value="newest" ${currentVaultSort === 'newest' ? 'selected' : ''}>Urut: Terbaru</option>
               <option value="oldest" ${currentVaultSort === 'oldest' ? 'selected' : ''}>Urut: Terlama</option>
               <option value="title_asc" ${currentVaultSort === 'title_asc' ? 'selected' : ''}>Urut: Judul (A - Z)</option>
@@ -408,7 +421,7 @@ export function renderVaultView(container) {
 
         <!-- PILL KATEGORI + TOGGLE GRID/LIST -->
         <div class="filter-pills-bar">
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+          <div style="display: flex; gap: 7px; flex-wrap: wrap; align-items: center;">
             ${categories.map(cat => {
               const isAct = currentCategoryFilter === cat;
               const label = cat === 'all' ? 'Semua Surat' : cat;
@@ -420,23 +433,42 @@ export function renderVaultView(container) {
               `;
             }).join('')}
 
-            <button type="button" class="pill-tab ${filterOnlyMaster ? 'pill-gold-active' : ''} btn-toggle-master-filter" title="Tampilkan hanya Master Template bertanda Bintang & Terkunci">
-              <span>⭐</span>
+            <button type="button" class="pill-tab ${filterOnlyMaster ? 'pill-gold-active' : ''} btn-toggle-master-filter" title="Tampilkan hanya Master Template bertanda Bintang &amp; Terkunci">
+              ${uiIcon('starFilled', 13)}
               <span>Master Terkunci (${masterLetters.length})</span>
             </button>
 
             <button type="button" class="pill-tab ${filterOnlyAiRef ? 'pill-amber-active' : ''} btn-toggle-ai-filter">
-              <span>✨</span>
+              ${uiIcon('sparkle', 13)}
               <span>${filterOnlyAiRef ? 'Acuan AI Aktif' : 'Hanya Acuan AI'}</span>
             </button>
           </div>
 
           <div class="vault-view-toggle-group">
             <button type="button" class="vault-view-toggle-btn btn-vault-view-mode ${currentVaultViewMode === 'grid' ? 'active' : ''}" data-mode="grid" title="Tampilan Kartu Grid">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              ${uiIcon('grid', 15)}
             </button>
             <button type="button" class="vault-view-toggle-btn btn-vault-view-mode ${currentVaultViewMode === 'list' ? 'active' : ''}" data-mode="list" title="Tampilan Daftar Tabel">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+              ${uiIcon('list', 15)}
+            </button>
+          </div>
+        </div>
+
+        <!-- PEMILIH TARGET SEKOLAH & KEPALA SEKOLAH (SMP / SMK) -->
+        <div class="vault-unit-target-bar">
+          <div class="vault-unit-target-lead">
+            ${uiIcon('building', 15)}
+            <span><strong>Target Sekolah &amp; Pejabat Kepsek saat Buka/Edit:</strong></span>
+          </div>
+          <div class="vault-unit-target-pills">
+            <button type="button" class="pill-tab ${selectedVaultTargetMode === 'ask' ? 'active' : ''} btn-vault-unit-mode" data-unit-mode="ask" title="Tanyakan SMP atau SMK setiap kali membuka dokumen dari Gudang">
+              <span>Pilih Saat Buka (SMP / SMK)</span>
+            </button>
+            <button type="button" class="pill-tab ${selectedVaultTargetMode === 'smp' ? 'active' : ''} btn-vault-unit-mode" data-unit-mode="smp" title="Buka &amp; adaptasi otomatis ke SMP IT Al-Hawari (Kepsek: ${escapeHtml(SCHOOL_UNITS.smp.principalName)})">
+              <span>SMP IT &bull; Kepsek: ${escapeHtml(SCHOOL_UNITS.smp.principalName)}</span>
+            </button>
+            <button type="button" class="pill-tab ${selectedVaultTargetMode === 'smk' ? 'active' : ''} btn-vault-unit-mode" data-unit-mode="smk" title="Buka &amp; adaptasi otomatis ke SMK IT Al-Hawari (Kepsek: ${escapeHtml(SCHOOL_UNITS.smk.principalName)})">
+              <span>SMK IT &bull; Kepsek: ${escapeHtml(SCHOOL_UNITS.smk.principalName)}</span>
             </button>
           </div>
         </div>
@@ -461,8 +493,9 @@ function buildVaultMasterLockBtnHtml(letter) {
     : 'Beri Bintang & Kunci sebagai Master Template terbaik untuk acuan prioritas AI Copilot';
   return `
     <button type="button" class="vault-master-pill ${isMaster ? 'is-master' : ''} btn-toggle-master-lock" data-id="${letter.id}" title="${titleAttr}">
-      <span>${isMaster ? '⭐' : '☆'}</span>
-      <span>${isMaster ? 'Master Terkunci 🔒' : 'Jadikan Master'}</span>
+      ${isMaster ? uiIcon('starFilled', 12) : uiIcon('star', 12)}
+      <span>${isMaster ? 'Master Terkunci' : 'Jadikan Master'}</span>
+      ${isMaster ? uiIcon('lock', 11) : ''}
     </button>
   `;
 }
@@ -474,8 +507,9 @@ function buildVaultAiRefBtnHtml(letter) {
     : (isRef ? 'Dipakai sebagai referensi belajar AI Copilot. Klik untuk nonaktifkan.' : 'Aktifkan agar dipelajari AI Copilot.');
   return `
     <button type="button" class="btn-toggle-ai-ref" data-id="${letter.id}" title="${titleAttr}"
-      style="background: ${isRef ? '#fef3c7' : '#f8fafc'}; border: 1px solid ${isRef ? '#fcd34d' : '#cbd5e1'}; color: ${isRef ? '#b45309' : '#64748b'}; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer;">
-      ${isRef ? '✨ Dipelajari AI' : '☆ Nonaktif AI'}
+      style="display:inline-flex; align-items:center; gap:4px; background: ${isRef ? '#fef3c7' : '#f8fafc'}; border: 1px solid ${isRef ? '#fcd34d' : '#cbd5e1'}; color: ${isRef ? '#b45309' : '#64748b'}; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer;">
+      ${isRef ? uiIcon('sparkle', 11) : uiIcon('eyeOff', 11)}
+      <span>${isRef ? 'Dipelajari AI' : 'Nonaktif AI'}</span>
     </button>
   `;
 }
@@ -517,18 +551,20 @@ function buildVaultCardsHtml(allLetters) {
   if (ranked.length === 0) {
     return `
       <div class="empty-illustration-card">
-        <span style="font-size: 38px; display: block; margin-bottom: 10px;">📭</span>
+        <div class="view-header-badge" style="width: 60px; height: 60px; border-radius: 16px; margin: 0 auto 14px auto;">
+          ${uiIcon('inbox', 28)}
+        </div>
         <h4 style="color: #0f172a; font-size: 16px; font-weight: 800; margin-bottom: 6px;">Tidak Ada Surat yang Cocok</h4>
         <p style="color: #64748b; font-size: 13px; max-width: 460px; margin: 0 auto 16px auto;">
           Belum ada surat pada kategori ini yang mendekati kata kunci <b>"${escapeHtml(currentSearchQuery.trim())}"</b>.
         </p>
-        <button id="btn-empty-reset" class="btn btn-secondary btn-sm">Reset Filter Pencarian</button>
+        <button id="btn-empty-reset" class="btn btn-secondary btn-sm">${uiIcon('reset', 13)}<span>Reset Filter Pencarian</span></button>
       </div>
     `;
   }
 
   const queryHeaderHtml = hasActiveQuery ? `
-    <div style="margin-bottom: 12px; font-size: 12.5px; color: #475569; display: flex; align-items: center; justify-content: space-between;">
+    <div style="margin-bottom: 12px; font-size: 12.5px; color: #334155; background: rgba(255,255,255,0.9); border: 1px solid #dbe3eb; border-radius: 10px; padding: 8px 14px; display: flex; align-items: center; justify-content: space-between;">
       <span>Menampilkan <strong>${ranked.length}</strong> surat yang paling mendekati pencarian <b>"${escapeHtml(currentSearchQuery.trim())}"</b>:</span>
     </div>
   ` : '';
@@ -536,46 +572,63 @@ function buildVaultCardsHtml(allLetters) {
   if (currentVaultViewMode === 'list') {
     return `
       ${queryHeaderHtml}
-      <div class="ui-card" style="overflow: hidden;">
-        <div style="overflow-x: auto;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <div class="ui-card" style="padding: 0; overflow: hidden;">
+        <div class="responsive-table-wrap">
+          <table class="enterprise-table responsive-data-table vault-list-table">
             <thead>
-              <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0; text-align: left; color: #475569; font-size: 12px;">
-                <th style="padding: 11px 14px;">Kategori &amp; Judul Surat</th>
-                <th style="padding: 11px 14px;">Nomor Surat</th>
-                <th style="padding: 11px 14px;">Tanggal / Pihak Terkait</th>
-                <th style="padding: 11px 14px; text-align: center;">Acuan AI</th>
-                <th style="padding: 11px 14px; text-align: right;">Tindakan</th>
+              <tr>
+                <th style="width: 17%; min-width: 155px;">Kategori &amp; Status</th>
+                <th style="width: 30%; min-width: 230px;">Judul &amp; Keperluan Dokumen</th>
+                <th style="width: 16%; min-width: 150px;">Nomor &amp; Tanggal Surat</th>
+                <th style="width: 14%; min-width: 135px;">Pihak Terkait</th>
+                <th style="width: 9%; min-width: 105px; text-align: center;">Acuan AI</th>
+                <th style="width: 14%; min-width: 220px; text-align: right;">Tindakan</th>
               </tr>
             </thead>
             <tbody>
               ${ranked.map(({ item: letter }) => {
                 const isLocked = Boolean(letter.isLockedTemplate || letter.isMasterTemplate);
                 return `
-                <tr style="border-bottom: 1px solid #f1f5f9; ${letter.isMasterTemplate ? 'background: #fffbeb;' : ''}">
-                  <td style="padding: 11px 14px;">
-                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px;">
-                      <span class="status-chip ${letter.category === 'Dokumen Impor' ? 'status-chip-blue' : 'status-chip-green'}" style="font-size: 10px;">
-                        ${escapeHtml(letter.category || 'Surat Dinas')}
-                      </span>
-                      ${buildVaultMasterLockBtnHtml(letter)}
+                <tr style="${letter.isMasterTemplate ? 'background: rgba(254, 249, 195, 0.35);' : ''}">
+                  <td data-label="Kategori &amp; Status">
+                    <div class="td-value-stack">
+                      <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
+                        <span class="status-chip ${letter.category === 'Dokumen Impor' ? 'status-chip-blue' : 'status-chip-green'}" style="font-size: 10.5px;">
+                          ${escapeHtml(letter.category || 'Surat Dinas')}
+                        </span>
+                        ${buildVaultMasterLockBtnHtml(letter)}
+                      </div>
                     </div>
-                    <div style="font-weight: 700; color: #0f172a;">${escapeHtml(letter.title)}</div>
                   </td>
-                  <td style="padding: 11px 14px; font-weight: 600; color: #334155; font-size: 12px;">${escapeHtml(letter.nomorSurat || '-')}</td>
-                  <td style="padding: 11px 14px; font-size: 12px; color: #475569;">
-                    <div>${escapeHtml(letter.tanggalSurat || '-')}</div>
-                    <div style="color: #64748b;">${escapeHtml(letter.targetPerson || '-')}</div>
+                  <td data-label="Judul &amp; Keperluan">
+                    <div class="td-value-stack">
+                      <div style="font-weight: 700; color: #0f172a; line-height: 1.38; overflow-wrap: anywhere;">${escapeHtml(letter.title)}</div>
+                      ${letter.perihal && letter.perihal !== '-' && letter.perihal !== letter.title ? `<div style="font-size: 11.5px; color: #475569; margin-top: 3px; line-height: 1.4; overflow-wrap: anywhere;">${escapeHtml(letter.perihal)}</div>` : ''}
+                    </div>
                   </td>
-                  <td style="padding: 11px 14px; text-align: center;">
+                  <td data-label="Nomor &amp; Tanggal" style="font-size: 12px; color: #334155;">
+                    <div class="td-value-stack">
+                      <div style="font-family: Consolas, monospace; font-weight: 700; overflow-wrap: anywhere;">${escapeHtml(letter.nomorSurat || '-')}</div>
+                      <div style="font-size: 11.5px; color: #64748b; margin-top: 3px;">${escapeHtml(letter.tanggalSurat || '-')}</div>
+                    </div>
+                  </td>
+                  <td data-label="Pihak Terkait" style="font-size: 12px; color: #334155;">
+                    <div class="td-value-stack">
+                      <span style="font-weight: 600; overflow-wrap: anywhere;">${escapeHtml(letter.targetPerson || '-')}</span>
+                    </div>
+                  </td>
+                  <td data-label="Acuan AI" style="text-align: center;">
                     ${buildVaultAiRefBtnHtml(letter)}
                   </td>
-                  <td style="padding: 11px 14px; text-align: right; white-space: nowrap;">
-                    <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}">Buka di Word</button>
-                    <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}">.docx</button>
-                    <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Lihat &amp; Pulihkan Riwayat Versi">🕒 ${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1}</button>
-                    <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru">${V_SVG_COPY_13}</button>
-                    <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" style="color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.65' : '1'};" title="${isLocked ? 'Terkunci (⭐ Master Template). Buka kunci untuk menghapus.' : 'Hapus dari Gudang'}">${isLocked ? '🔒' : V_SVG_TRASH_13}</button>
+                  <td data-label="Tindakan" class="td-actions-cell" style="text-align: right;">
+                    <div class="table-action-group">
+                      <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}">${uiIcon('docClean', 13)}<span>Buka di Word</span></button>
+                      <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}">${V_SVG_DL_13}<span>.docx</span></button>
+                      <button class="btn btn-sm btn-secondary btn-square-sm btn-rename-vault-letter" data-id="${letter.id}" title="Rapikan / Ubah Nama Dokumen (Format Sistem / AI)">${uiIcon('edit', 13)}</button>
+                      <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Lihat &amp; Pulihkan Riwayat Versi">${uiIcon('history', 13)}<span>${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1}</span></button>
+                      <button class="btn btn-sm btn-secondary btn-square-sm btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru">${V_SVG_COPY_13}</button>
+                      <button class="btn btn-sm btn-secondary btn-square-sm btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" style="color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.65' : '1'};" title="${isLocked ? 'Terkunci (Master Template). Buka kunci untuk menghapus.' : 'Hapus dari Gudang'}">${isLocked ? uiIcon('lock', 13) : V_SVG_TRASH_13}</button>
+                    </div>
                   </td>
                 </tr>
               `;
@@ -589,7 +642,7 @@ function buildVaultCardsHtml(allLetters) {
 
   return `
     ${queryHeaderHtml}
-    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px;">
+    <div class="vault-cards-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr)); gap: 16px; margin-bottom: 24px;">
       ${ranked.map(({ item: letter, isFuzzy }, idx) => {
         const isMaster = Boolean(letter.isMasterTemplate);
         const isLocked = Boolean(letter.isLockedTemplate || isMaster);
@@ -608,7 +661,7 @@ function buildVaultCardsHtml(allLetters) {
                   <span class="status-chip ${chipClass}" style="font-size: 11px;">
                     ${escapeHtml(cat)}
                   </span>
-                  ${isTopMatch ? `<span class="status-chip status-chip-green" style="font-size: 10px;">🎯 Paling Dekat</span>` : (hasActiveQuery && isFuzzy ? `<span class="status-chip status-chip-blue" style="font-size: 10px;">✓ Toleransi Typo</span>` : '')}
+                  ${isTopMatch ? `<span class="status-chip status-chip-green" style="font-size: 10px;">${uiIcon('target', 11)}<span>Paling Dekat</span></span>` : (hasActiveQuery && isFuzzy ? `<span class="status-chip status-chip-blue" style="font-size: 10px;">${uiIcon('check', 11)}<span>Toleransi Typo</span></span>` : '')}
                 </div>
                 <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
                   ${buildVaultMasterLockBtnHtml(letter)}
@@ -621,15 +674,16 @@ function buildVaultCardsHtml(allLetters) {
                   ${V_SVG_DOC(22)}
                 </div>
                 <div style="flex: 1; min-width: 0;">
-                  <strong style="font-size: 14px; font-weight: 800; color: #0f172a; display: block; line-height: 1.3; margin-bottom: 3px;">
+                  <strong style="font-size: 14px; font-weight: 800; color: #0f172a; display: block; line-height: 1.35; margin-bottom: 4px; overflow-wrap: anywhere;">
                     ${escapeHtml(letter.title)}
                   </strong>
-                  <div style="font-size: 11.5px; font-weight: 600; color: #334155; margin-bottom: 5px; word-break: break-word;">
+                  <div style="font-size: 11.5px; font-weight: 600; color: #334155; margin-bottom: 4px; word-break: break-word;">
                     Nomor: ${escapeHtml(letter.nomorSurat || '-')}
                   </div>
+                  ${letter.perihal && letter.perihal !== '-' && letter.perihal !== letter.title ? `<div style="font-size: 11.5px; color: #475569; margin-bottom: 5px; line-height: 1.35; overflow-wrap: anywhere;"><strong>Keperluan:</strong> ${escapeHtml(letter.perihal)}</div>` : ''}
                   <div style="font-size: 11.5px; color: #64748b; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                     <span style="display: inline-flex; align-items: center; gap: 4px;">${V_SVG_CAL_12} ${escapeHtml(letter.tanggalSurat || '-')}</span>
-                    ${letter.targetPerson && letter.targetPerson !== '-' ? `<span style="display: inline-flex; align-items: center; gap: 4px;">${V_SVG_USER_12} ${escapeHtml(letter.targetPerson)}</span>` : ''}
+                    ${letter.targetPerson && letter.targetPerson !== '-' ? `<span style="display: inline-flex; align-items: center; gap: 4px; overflow-wrap: anywhere;">${V_SVG_USER_12} ${escapeHtml(letter.targetPerson)}</span>` : ''}
                   </div>
                 </div>
               </div>
@@ -639,23 +693,26 @@ function buildVaultCardsHtml(allLetters) {
               </p>
             </div>
 
-            <div style="padding-top: 4px; display: flex; gap: 6px; align-items: center;">
-              <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}" style="flex: 1; height: 34px; font-weight: 600; border-radius: 8px;">
-                <span style="background: rgba(255,255,255,0.2); padding: 1px 4px; border-radius: 3px; font-size: 10px; font-weight: 800;">W</span>
+            <div style="padding-top: 6px; border-top: 1px solid #f1f5f9; display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <button class="btn btn-sm btn-primary btn-load-letter" data-id="${letter.id}" style="flex: 1; min-width: 110px; height: 34px; font-weight: 600; border-radius: 8px;">
+                ${uiIcon('docClean', 13)}
                 <span>Buka di Word</span>
               </button>
               <button class="btn btn-sm btn-secondary btn-download-vault-letter" data-id="${letter.id}" title="Unduh berkas .docx" style="height: 34px; padding: 0 10px; border-radius: 8px; font-weight: 600;">
                 ${V_SVG_DL_13}
                 <span>.docx</span>
               </button>
-              <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Riwayat Versi (${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1} versi)" style="height: 34px; padding: 0 8px; border-radius: 8px; font-weight: 600;">
-                🕒${Array.isArray(letter.versionHistory) && letter.versionHistory.length > 1 ? ` ${letter.versionHistory.length}` : ''}
+              <button class="btn btn-sm btn-secondary btn-rename-vault-letter" data-id="${letter.id}" title="Rapikan / Ubah Nama Dokumen (Format Sistem / Pindai AI)" style="height: 34px; width: 34px; padding: 0; border-radius: 8px;">
+                ${uiIcon('edit', 13)}
+              </button>
+              <button class="btn btn-sm btn-secondary btn-vault-history" data-id="${letter.id}" title="Riwayat Versi (${Array.isArray(letter.versionHistory) ? letter.versionHistory.length : 1} versi)" style="height: 34px; padding: 0 9px; border-radius: 8px; font-weight: 600;">
+                ${uiIcon('history', 13)}${Array.isArray(letter.versionHistory) && letter.versionHistory.length > 1 ? `<span>${letter.versionHistory.length}</span>` : ''}
               </button>
               <button class="btn btn-sm btn-secondary btn-duplicate-letter" data-id="${letter.id}" title="Duplikasi sebagai salinan baru (tanpa kunci)" style="height: 34px; width: 34px; padding: 0; border-radius: 8px;">
                 ${V_SVG_COPY_13}
               </button>
-              <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" title="${isLocked ? 'Terkunci sebagai ⭐ Master Template. Buka kunci bintang dahulu untuk menghapus.' : 'Hapus dari Gudang'}" style="height: 34px; width: 34px; padding: 0; border-radius: 8px; color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.68' : '1'};">
-                ${isLocked ? '🔒' : V_SVG_TRASH_13}
+              <button class="btn btn-sm btn-secondary btn-delete-vault-letter" data-id="${letter.id}" data-locked="${isLocked ? '1' : '0'}" title="${isLocked ? 'Terkunci sebagai Master Template. Buka kunci bintang dahulu untuk menghapus.' : 'Hapus dari Gudang'}" style="height: 34px; width: 34px; padding: 0; border-radius: 8px; color: ${isLocked ? '#94a3b8' : '#dc2626'}; opacity: ${isLocked ? '0.68' : '1'};">
+                ${isLocked ? uiIcon('lock', 13) : V_SVG_TRASH_13}
               </button>
             </div>
           </div>
@@ -749,12 +806,59 @@ function bindVaultEvents(container) {
     };
   }
 
+  // 4. Pilihan Unit Sekolah & Pejabat TTD saat Buka/Edit File Gudang
+  container.querySelectorAll('.btn-vault-unit-mode').forEach(btn => {
+    btn.onclick = () => {
+      selectedVaultTargetMode = btn.dataset.unitMode || 'ask';
+      renderVaultView(container);
+    };
+  });
+
   // 5. Tombol Buat Surat Baru -> Switch ke tab canvas
   const btnCreate = container.querySelector('#btn-create-new-from-vault');
   if (btnCreate) {
     btnCreate.onclick = () => {
       const canvasTab = document.querySelector('.nav-tab[data-tab="canvas"]');
       if (canvasTab) canvasTab.click();
+    };
+  }
+
+  // 5B. Rapikan penamaan semua file Gudang non-master sekaligus
+  const btnNormalizeAll = container.querySelector('#btn-vault-normalize-all');
+  if (btnNormalizeAll) {
+    btnNormalizeAll.onclick = () => {
+      const list = store.getLetterVault();
+      let updatedCount = 0;
+      for (const item of list) {
+        if (!item || item.isLockedTemplate || item.isMasterTemplate) continue;
+        const m = extractDocumentMetadata({
+          docModel: item.document || null,
+          uploadedDocx: item.uploadedDocx || null,
+          schoolProfile: store.getEffectiveSchoolForDocument(item.document || item),
+          fallbackTitle: item.title,
+          fallbackNomor: item.nomorSurat,
+          fallbackDate: item.tanggalSurat,
+          fallbackPerihal: item.perihal,
+          fallbackRecipient: item.targetPerson
+        });
+        if (m.formattedTitle && (m.formattedTitle !== item.title || m.perihal !== item.perihal || m.recipientName !== item.targetPerson)) {
+          store.updateLetterVaultEntry(item.id, {
+            title: m.formattedTitle,
+            category: item.source === 'upload' && m.category ? m.category : (m.category || item.category),
+            perihal: m.perihal || item.perihal,
+            targetPerson: m.recipientName || item.targetPerson,
+            tanggalSurat: m.tanggalSurat || item.tanggalSurat,
+            summary: m.summary || item.summary
+          });
+          updatedCount += 1;
+        }
+      }
+      if (updatedCount > 0) {
+        renderVaultView(container);
+        showToast(`✓ ${updatedCount} nama & metadata dokumen Gudang dirapikan otomatis!`, 'success');
+      } else {
+        showToast('Seluruh dokumen Gudang sudah memiliki penamaan yang rapih.', 'info');
+      }
     };
   }
 
@@ -814,9 +918,9 @@ function bindVaultCardActions(container) {
       const id = btn.dataset.id;
       const updated = store.toggleMasterTemplate(id);
       if (updated?.isMasterTemplate) {
-        showToast('⭐ Dokumen ditandai sebagai Master Template Terkunci & prioritas utama pembelajaran AI!', 'success');
+        showToast('Dokumen ditandai sebagai Master Template Terkunci & prioritas utama pembelajaran AI!', 'success');
       } else {
-        showToast('🔓 Kunci Master Template dibuka.', 'info');
+        showToast('Kunci Master Template dibuka.', 'info');
       }
       renderVaultView(container);
     };
@@ -833,26 +937,116 @@ function bindVaultCardActions(container) {
     };
   });
 
-  // 8. Buka di Word Canvas / Word Pro
+function promptUnitChoiceForVaultLetter(letter, container, onPicked) {
+  if (selectedVaultTargetMode === 'smp' || selectedVaultTargetMode === 'smk') {
+    onPicked(selectedVaultTargetMode);
+    return;
+  }
+
+  const activeUnit = store.getActiveUnitId();
+  container.querySelector('#vault-unit-choice-modal')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'vault-unit-choice-modal';
+  overlay.className = 'modal-overlay';
+
+  const units = [SCHOOL_UNITS.smp, SCHOOL_UNITS.smk];
+  overlay.innerHTML = `
+    <div class="modal-card" style="max-width: 620px; width: 95%;">
+      <div class="modal-header">
+        <h3>${uiIcon('building', 17)}<span>Pilih Sekolah &amp; Pejabat Penanda Tangan</span></h3>
+        <button type="button" class="btn btn-sm btn-secondary btn-square-sm" id="btn-close-vault-unit" aria-label="Tutup">${uiIcon('x', 15)}</button>
+      </div>
+      <div class="modal-body" style="display: grid; gap: 12px;">
+        <div style="font-size: 13px; color: #334155;">
+          Dokumen <strong>${escapeHtml(letter?.title || 'Surat Gudang')}</strong> akan disesuaikan kop, kode nomor surat, serta nama Kepala Sekolah secara otomatis sesuai unit yang Anda pilih:
+        </div>
+        <div class="vault-unit-modal-grid">
+          ${units.map(u => {
+            const isActive = u.unitId === activeUnit;
+            const accent = u.unitId === 'smp' ? '#1d4ed8' : '#15803d';
+            const bgTint = u.unitId === 'smp' ? '#eff6ff' : '#f0fdf4';
+            const borderTint = u.unitId === 'smp' ? '#bfdbfe' : '#bbf7d0';
+            return `
+              <button type="button" class="vault-unit-choice-card" data-pick-unit="${u.unitId}" style="border-color: ${borderTint};">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:6px;">
+                  <span style="font-size:11px; font-weight:800; padding:2px 8px; border-radius:999px; background:${bgTint}; color:${accent}; border:1px solid ${borderTint};">
+                    ${u.unitShortBadge} &bull; ${u.schoolCode}
+                  </span>
+                  ${isActive ? `<span class="status-chip status-chip-green" style="font-size:10px;">Unit Aktif</span>` : ''}
+                </div>
+                <strong style="font-size:14px; color:#0f172a; display:block; margin-bottom:4px;">${escapeHtml(u.schoolName)}</strong>
+                <div style="font-size:12px; color:#475569; margin-bottom:8px; line-height:1.45;">
+                  <div>Kepsek: <strong style="color:#0f172a;">${escapeHtml(u.principalName)}</strong></div>
+                  <div>NPSN: ${escapeHtml(u.npsn)} &bull; Pola: ${escapeHtml(u.numberingPattern.replace('{urut}', '001').replace('{bulanRomawi}', 'XI').replace('{tahun}', '2026'))}</div>
+                </div>
+                <div style="font-size:12px; font-weight:700; color:${accent}; display:inline-flex; align-items:center; gap:5px;">
+                  ${uiIcon('docClean', 13)}
+                  <span>Buka &amp; Edit untuk ${u.unitShortBadge} →</span>
+                </div>
+              </button>
+            `;
+          }).join('')}
+        </div>
+        <label style="display:inline-flex; align-items:center; gap:7px; font-size:12px; color:#475569; cursor:pointer;">
+          <input type="checkbox" id="chk-remember-vault-unit" style="width:15px;height:15px;" />
+          <span>Ingat pilihan sekolah ini selama di halaman Gudang Surat</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-vault-unit">Batal</button>
+      </div>
+    </div>
+  `;
+
+  container.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#btn-close-vault-unit').onclick = close;
+  overlay.querySelector('#btn-cancel-vault-unit').onclick = close;
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) close();
+  });
+  overlay.querySelectorAll('[data-pick-unit]').forEach(cardBtn => {
+    cardBtn.onclick = () => {
+      const pickedUnit = normalizeUnitId(cardBtn.dataset.pickUnit);
+      const remember = Boolean(overlay.querySelector('#chk-remember-vault-unit')?.checked);
+      if (remember) {
+        selectedVaultTargetMode = pickedUnit;
+      }
+      close();
+      onPicked(pickedUnit);
+    };
+  });
+}
+
+function openVaultLetterWithUnit(letter, container, targetUnitId) {
+  const unitId = normalizeUnitId(targetUnitId);
+  const unitInfo = SCHOOL_UNITS[unitId] || SCHOOL_UNITS.smk;
+  const isSmartTarget = Boolean(letter?.preferSmartCanvas || (letter?.document && store.isSmartTemplateDocument(letter.document)));
+  const success = store.loadLetterToCanvas(letter.id, { targetUnitId: unitId });
+  if (success) {
+    if (isSmartTarget) {
+      showToast(`✓ Dimuat ke Word Pro untuk ${unitInfo.unitLabel} (Kepsek: ${unitInfo.principalName})!`, 'success');
+      const smartTab = document.querySelector('.nav-tab[data-tab="smart-canvas"]');
+      if (smartTab) smartTab.click();
+    } else {
+      showToast(`✓ Dimuat ke Lembar Kerja untuk ${unitInfo.unitLabel} (Kepsek: ${unitInfo.principalName})!`, 'success');
+      const canvasTab = document.querySelector('.nav-tab[data-tab="canvas"]');
+      if (canvasTab) canvasTab.click();
+    }
+  } else {
+    showToast('Gagal memuat dokumen.', 'error');
+  }
+}
+
+  // 8. Buka di Word Canvas / Word Pro (Pilih SMP atau SMK & Kepsek otomatis terpilih)
   container.querySelectorAll('.btn-load-letter').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
       const letter = store.getLetterVault().find(l => l.id === id);
-      const isSmartTarget = Boolean(letter?.preferSmartCanvas || (letter?.document && store.isSmartTemplateDocument(letter.document)));
-      const success = store.loadLetterToCanvas(id);
-      if (success) {
-        if (isSmartTarget) {
-          showToast('Dokumen multi-halaman dimuat ke Word Pro (1:1 MS Word)!', 'success');
-          const smartTab = document.querySelector('.nav-tab[data-tab="smart-canvas"]');
-          if (smartTab) smartTab.click();
-        } else {
-          showToast('Dokumen berhasil dimuat ke Lembar Kerja Word.', 'success');
-          const canvasTab = document.querySelector('.nav-tab[data-tab="canvas"]');
-          if (canvasTab) canvasTab.click();
-        }
-      } else {
-        showToast('Gagal memuat dokumen.', 'error');
-      }
+      if (!letter) return;
+      promptUnitChoiceForVaultLetter(letter, container, (pickedUnit) => {
+        openVaultLetterWithUnit(letter, container, pickedUnit);
+      });
     };
   });
 
@@ -863,24 +1057,129 @@ function bindVaultCardActions(container) {
       const letter = store.getLetterVault().find(l => l.id === id);
       if (!letter) return;
 
-      showToast(`Menyiapkan berkas .docx untuk ${letter.title}...`, 'info');
+      const unitToUse = (selectedVaultTargetMode === 'smp' || selectedVaultTargetMode === 'smk')
+        ? selectedVaultTargetMode
+        : store.getActiveUnitId();
+
+      showToast(`Menyiapkan berkas .docx untuk ${letter.title} (${unitToUse.toUpperCase()})...`, 'info');
       try {
         let blob;
         if (letter.uploadedDocx?.rawBytes) {
-          // Berkas yang diupload: Gunakan rawBytes atau patch
           blob = new Blob([letter.uploadedDocx.rawBytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
         } else if (letter.document) {
-          blob = await renderDocx(letter.document, 'blob');
+          const adaptedDoc = adaptDocumentModelForUnit(letter.document, unitToUse, {
+            activeSchoolProfile: store.getSchoolProfile(),
+            kopGallery: store.getState().kopGallery || []
+          });
+          blob = await renderDocx(adaptedDoc, 'blob');
         } else {
           blob = await renderDocx(store.getState().document, 'blob');
         }
 
-        const safeTitle = (letter.title || 'surat_dinas').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 45);
-        downloadFile(blob, `${safeTitle}.docx`);
-        showToast('Berkas .docx berhasil diunduh.', 'success');
+        const fileName = buildDocumentDownloadFilename({
+          kind: 'vault',
+          title: letter.title,
+          perihal: letter.perihal,
+          recipientName: letter.targetPerson,
+          tanggalSurat: letter.tanggalSurat,
+          unitId: unitToUse,
+          schoolProfile: store.getSchoolProfile()
+        });
+        downloadFile(blob, fileName);
+        showToast(`Berkas ${fileName} berhasil diunduh.`, 'success');
       } catch (err) {
         showToast(`Gagal mengunduh: ${err.message}`, 'error');
       }
+    };
+  });
+
+  // 9A. Rapikan / Ubah Nama Dokumen Gudang (Format Sistem + Pindai AI)
+  container.querySelectorAll('.btn-rename-vault-letter').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const letter = store.getLetterVault().find(l => l.id === id);
+      if (!letter) return;
+
+      container.querySelector('#vault-rename-modal')?.remove();
+      const overlay = document.createElement('div');
+      overlay.id = 'vault-rename-modal';
+      overlay.className = 'modal-overlay';
+      const school = store.getEffectiveSchoolForDocument(letter.document || letter) || store.getSchoolProfile();
+      const autoMeta = extractDocumentMetadata({
+        docModel: letter.document || null,
+        uploadedDocx: letter.uploadedDocx || null,
+        schoolProfile: school,
+        fallbackTitle: letter.title,
+        fallbackNomor: letter.nomorSurat,
+        fallbackDate: letter.tanggalSurat,
+        fallbackPerihal: letter.perihal,
+        fallbackRecipient: letter.targetPerson
+      });
+
+      overlay.innerHTML = `
+        <div class="modal-card" style="max-width: 520px; width: 94%;">
+          <div class="modal-header">
+            <h3>${uiIcon('edit', 16)}<span>Rapikan Nama &amp; Metadata Arsip Gudang</span></h3>
+            <button type="button" class="btn btn-sm btn-secondary btn-square-sm" id="btn-close-vrename">${uiIcon('x', 14)}</button>
+          </div>
+          <div class="modal-body" style="display:grid; gap:10px;">
+            <div id="vrename-scan-slot">${buildMetaAutoScanBarHtml({ statusText: 'Pratinjau Format Sistem siap — atau klik Pindai AI' })}</div>
+            <div><label class="form-label">Judul Arsip</label><input id="vr-title" class="form-input" value="${escapeHtml(letter.title || autoMeta.formattedTitle)}" /></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div><label class="form-label">Kategori</label><input id="vr-cat" class="form-input" value="${escapeHtml(letter.category || autoMeta.category)}" /></div>
+              <div><label class="form-label">Tanggal Surat</label><input id="vr-date" class="form-input" value="${escapeHtml(letter.tanggalSurat || autoMeta.tanggalSurat)}" /></div>
+            </div>
+            <div><label class="form-label">Pihak Terkait / Sasaran</label><input id="vr-person" class="form-input" value="${escapeHtml(letter.targetPerson || autoMeta.recipientName)}" /></div>
+            <div><label class="form-label">Keperluan / Perihal</label><input id="vr-hal" class="form-input" value="${escapeHtml(letter.perihal || autoMeta.perihal)}" /></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-vrename">Batal</button>
+            <button type="button" class="btn btn-primary" id="btn-save-vrename">Simpan Perubahan Nama</button>
+          </div>
+        </div>
+      `;
+      container.appendChild(overlay);
+      const cleanupScan = wireMetaAutoScanBar({
+        rootEl: overlay.querySelector('.modal-body'),
+        getContext: () => ({
+          docModel: letter.document || null,
+          uploadedDocx: letter.uploadedDocx || null,
+          schoolProfile: school,
+          fallbackTitle: letter.title,
+          fallbackNomor: letter.nomorSurat,
+          fallbackDate: letter.tanggalSurat
+        }),
+        fields: {
+          titleEl: overlay.querySelector('#vr-title'),
+          categoryEl: overlay.querySelector('#vr-cat'),
+          dateEl: overlay.querySelector('#vr-date'),
+          recipientEl: overlay.querySelector('#vr-person'),
+          perihalEl: overlay.querySelector('#vr-hal')
+        },
+        forTemplate: false,
+        autoAiOnOpen: false
+      });
+      const closeModal = () => {
+        cleanupScan();
+        overlay.remove();
+      };
+      overlay.querySelector('#btn-close-vrename').onclick = closeModal;
+      overlay.querySelector('#btn-cancel-vrename').onclick = closeModal;
+      overlay.addEventListener('click', (ev) => { if (ev.target === overlay) closeModal(); });
+      overlay.querySelector('#btn-save-vrename').onclick = () => {
+        const nextTitle = overlay.querySelector('#vr-title').value.trim() || letter.title;
+        store.updateLetterVaultEntry(letter.id, {
+          title: nextTitle,
+          category: overlay.querySelector('#vr-cat').value.trim() || letter.category,
+          tanggalSurat: overlay.querySelector('#vr-date').value.trim() || letter.tanggalSurat,
+          targetPerson: overlay.querySelector('#vr-person').value.trim() || letter.targetPerson,
+          perihal: overlay.querySelector('#vr-hal').value.trim() || letter.perihal
+        });
+        closeModal();
+        renderVaultView(container);
+        showToast('✓ Nama & metadata dokumen Gudang diperbarui.', 'success');
+      };
     };
   });
 
@@ -899,8 +1198,8 @@ function bindVaultCardActions(container) {
       modalWrap.innerHTML = `
         <div class="modal-card" style="max-width: 660px; width: 95%; max-height: 88vh; display: flex; flex-direction: column;">
           <div class="modal-header">
-            <h3>🕒 Riwayat Versi: ${escapeHtml(letter.title)}</h3>
-            <button type="button" class="modal-close" id="btn-close-v-hist">&times;</button>
+            <h3>${uiIcon('history', 16)}<span>Riwayat Versi: ${escapeHtml(letter.title)}</span></h3>
+            <button type="button" class="btn btn-sm btn-secondary btn-square-sm" id="btn-close-v-hist" aria-label="Tutup">${uiIcon('x', 15)}</button>
           </div>
           <div class="modal-body" style="overflow-y: auto; display: grid; gap: 9px;">
             ${versions.length === 0
@@ -914,11 +1213,14 @@ function bindVaultCardActions(container) {
                   return `
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 13px; border:1px solid ${idx === 0 ? '#86efac' : '#e2e8f0'}; background:${idx === 0 ? '#f0fdf4' : '#ffffff'}; border-radius:10px;">
                       <div style="min-width:0;">
-                        <div style="font-size:13px; font-weight:700; color:#0f172a;">
-                          ${idx === 0 ? '✓ Versi Aktif Terbaru · ' : `Versi #${versions.length - idx} · `}${escapeHtml(ver.note || 'Simpan Perubahan')}
+                        <div style="font-size:13px; font-weight:700; color:#0f172a; display:flex; align-items:center; gap:5px;">
+                          ${idx === 0 ? `${uiIcon('checkCircle', 13)}<span>Versi Aktif Terbaru ·</span>` : `<span>Versi #${versions.length - idx} ·</span>`}<span>${escapeHtml(ver.note || 'Simpan Perubahan')}</span>
                         </div>
-                        <div style="font-size:11.5px; color:#64748b; margin-top:2px;">
-                          🕒 ${escapeHtml(dtStr)} · 👤 ${escapeHtml(ver.savedBy || 'Pengguna')} · No: ${escapeHtml(ver.nomorSurat || '-')}
+                        <div style="font-size:11.5px; color:#64748b; margin-top:3px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                          <span style="display:inline-flex;align-items:center;gap:4px;">${uiIcon('clock', 11)}${escapeHtml(dtStr)}</span>
+                          <span>·</span>
+                          <span style="display:inline-flex;align-items:center;gap:4px;">${uiIcon('user', 11)}${escapeHtml(ver.savedBy || 'Pengguna')}</span>
+                          <span>· No: ${escapeHtml(ver.nomorSurat || '-')}</span>
                         </div>
                       </div>
                       ${idx > 0 && ver.document
@@ -948,12 +1250,10 @@ function bindVaultCardActions(container) {
             return;
           }
           closeHist();
-          store.loadLetterToCanvas(id);
-          const isSmartTarget = Boolean(restored.preferSmartCanvas || (restored.document && store.isSmartTemplateDocument(restored.document)));
-          const tab = document.querySelector(`.nav-tab[data-tab="${isSmartTarget ? 'smart-canvas' : 'canvas'}"]`);
-          showToast('✓ Versi dokumen berhasil dipulihkan & dibuka di editor!', 'success');
-          if (tab) tab.click();
-          else renderVaultView(container);
+          const pickedUnit = (selectedVaultTargetMode === 'smp' || selectedVaultTargetMode === 'smk')
+            ? selectedVaultTargetMode
+            : store.getActiveUnitId();
+          openVaultLetterWithUnit(restored, container, pickedUnit);
         };
       });
     };
@@ -990,7 +1290,7 @@ function bindVaultCardActions(container) {
       if (!letter) return;
 
       if (letter.isLockedTemplate || letter.isMasterTemplate) {
-        showToast('Dokumen ⭐ Master Terkunci dilindungi dari penghapusan. Klik tombol ⭐ Master Terkunci untuk membuka kunci terlebih dahulu.', 'warning');
+        showToast('Dokumen Master Terkunci dilindungi dari penghapusan. Klik tombol Master Terkunci untuk membuka kunci terlebih dahulu.', 'warning');
         return;
       }
 
@@ -1020,24 +1320,31 @@ async function processUploadedDocx(file, container) {
     const arrayBuffer = await file.arrayBuffer();
     const parsed = await parseDocxForEditing(arrayBuffer);
 
-    // Buat entri baru di Gudang Surat
+    const uploadedPayload = {
+      rawBytes: new Uint8Array(arrayBuffer),
+      fileName: file.name,
+      parsedMeta: parsed.meta,
+      structured: parsed.structured,
+      paragraphs: parsed.editableParagraphs
+    };
+    const metaDoc = extractDocumentMetadata({
+      uploadedDocx: uploadedPayload,
+      schoolProfile: store.getSchoolProfile(),
+      fallbackTitle: file.name.replace(/\.docx$/i, '')
+    });
+
+    // Buat entri baru di Gudang Surat dengan penamaan terstruktur otomatis
     const newEntry = store.addLetterVaultEntry({
-      title: parsed.meta.title || file.name.replace(/\.docx$/i, ''),
-      nomorSurat: parsed.meta.nomor || '-',
-      tanggalSurat: parsed.meta.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-      category: 'Dokumen Impor',
-      targetPerson: parsed.meta.signer || '-',
-      perihal: parsed.meta.title,
-      summary: `Dokumen .docx resmi diunggah: "${file.name}". Berisi ${parsed.editableParagraphs.length} paragraf dengan preservasi format asli 100%.`,
+      title: metaDoc.formattedTitle || parsed.meta.title || file.name.replace(/\.docx$/i, ''),
+      nomorSurat: metaDoc.nomorSurat || parsed.meta.nomor || '-',
+      tanggalSurat: metaDoc.tanggalSurat || parsed.meta.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
+      category: metaDoc.category || 'Dokumen Impor',
+      targetPerson: metaDoc.recipientName || parsed.meta.signer || '-',
+      perihal: metaDoc.perihal || parsed.meta.title,
+      summary: `${metaDoc.summary} (Berkas asli: "${file.name}")`,
       isAiReference: true,
       source: 'upload',
-      uploadedDocx: {
-        rawBytes: new Uint8Array(arrayBuffer),
-        fileName: file.name,
-        parsedMeta: parsed.meta,
-        structured: parsed.structured,
-        paragraphs: parsed.editableParagraphs
-      }
+      uploadedDocx: uploadedPayload
     });
 
     // Otomatis atur berkas aktif di Lembar Kerja Word

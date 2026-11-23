@@ -15,16 +15,24 @@ import {
   claimNextOutgoingSequence,
   defaultVerificationStoreFactory,
   defaultWorkspaceStoreFactory,
+  deleteUnitBlob,
   ensureInitialUsers,
   getDriveConfigSafe,
   getEffectivePermissions,
+  getPrivateWorkspace,
   getSyncMeta,
+  getUnitBlob,
+  getUnitDefaultsSnapshot,
   hashPasswordWithSalt,
   jsonResponse,
   mergeApiVaultData,
   mergeCollectionById,
+  normalizeUserUnitScope,
+  resolveRequestUnit,
   resolveServerHmacSecret,
   sanitizePublicUser,
+  savePrivateWorkspace,
+  setUnitBlob,
   sha256Hex,
   signSessionToken,
   verifyPasswordHash
@@ -136,22 +144,29 @@ async function handleLogin(body, wsStore, env) {
 
   const secret = await resolveServerHmacSecret(wsStore, env);
   const token = signSessionToken(users[idx], secret);
-  const permissions = await getEffectivePermissions(wsStore);
+  const unitInfo = resolveRequestUnit(users[idx], body?.unit || body?.unitId || '');
+  const activeUnitId = unitInfo.ok
+    ? unitInfo.unitId
+    : (users[idx].unitId === 'smp' ? 'smp' : 'smk');
+  const permissions = await getEffectivePermissions(wsStore, activeUnitId);
   const { publicStatus } = await getDriveConfigSafe(wsStore, env);
 
   return jsonResponse({
     ok: true,
     token,
+    unitId: activeUnitId,
+    availableUnits: normalizeUserUnitScope(users[idx].unitId, users[idx].role) === 'all' ? ['smk', 'smp'] : [activeUnitId],
     user: sanitizePublicUser(users[idx]),
     permissions,
     driveStatus: publicStatus
   }, 200);
 }
 
-async function handleBootstrap(user, wsStore, env) {
+async function handleBootstrap(user, unitId, wsStore, env) {
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const [
-    schoolProfile,
-    kopGallery,
+    storedSchoolProfile,
+    storedKopGallery,
     letterVault,
     apiVault,
     agendaBook,
@@ -160,42 +175,51 @@ async function handleBootstrap(user, wsStore, env) {
     permissions,
     users,
     driveCfg,
-    syncMeta
+    syncMeta,
+    privateWorkspace
   ] = await Promise.all([
-    wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
     wsStore.get(BLOB_KEYS.API_VAULT, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.AGENDA_BOOK, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
-    getEffectivePermissions(wsStore),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.AGENDA_BOOK, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
+    getEffectivePermissions(wsStore, unitId),
     user.role === 'admin' ? ensureInitialUsers(wsStore, env) : Promise.resolve(null),
     getDriveConfigSafe(wsStore, env),
-    getSyncMeta(wsStore)
+    getSyncMeta(wsStore, unitId),
+    getPrivateWorkspace(wsStore, unitId, user.id)
   ]);
+
+  const schoolProfile = storedSchoolProfile || defaults.schoolProfile;
+  const kopGallery = (Array.isArray(storedKopGallery) && storedKopGallery.length > 0)
+    ? storedKopGallery
+    : defaults.kopGallery;
 
   const activeUsersSummary = user.role === 'admin'
     ? (users || []).map(sanitizePublicUser)
     : undefined;
 
-  const sortedOutgoing = Array.isArray(outgoingList) ? sortOutgoingList(outgoingList) : null;
+  const sortedOutgoing = Array.isArray(outgoingList) ? sortOutgoingList(outgoingList) : [];
   const sortedIncoming = Array.isArray(incomingList) ? sortIncomingLetters(incomingList, 'newest') : [];
-  const pendingAccCount = Array.isArray(sortedOutgoing)
-    ? sortedOutgoing.filter(i => i?.verificationStatus === 'pending_acc' || i?.accStatus === 'pending').length
-    : syncMeta.pendingAccCount;
+  const pendingAccCount = sortedOutgoing.filter(i => i?.verificationStatus === 'pending_acc' || i?.accStatus === 'pending').length;
 
   return jsonResponse({
     ok: true,
+    unitId,
+    availableUnits: normalizeUserUnitScope(user.unitId, user.role) === 'all' ? ['smk', 'smp'] : [unitId],
     user: sanitizePublicUser(user),
     permissions,
     driveStatus: driveCfg.publicStatus,
     syncRev: syncMeta.rev,
     pendingAccCount,
     users: activeUsersSummary,
+    privateWorkspace: privateWorkspace || null,
     workspace: {
-      schoolProfile: schoolProfile || null,
-      kopGallery: Array.isArray(kopGallery) ? kopGallery : null,
+      unitId,
+      schoolProfile,
+      kopGallery,
       letterVault: Array.isArray(letterVault) ? letterVault : null,
       apiVault: apiVault?.items ? apiVault : null,
       agendaBook: Array.isArray(agendaBook) ? agendaBook : null,
@@ -206,13 +230,16 @@ async function handleBootstrap(user, wsStore, env) {
   }, 200);
 }
 
-async function handleSaveState(user, body, wsStore, env, fetchImpl) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleSaveState(user, unitId, body, wsStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const savedKeys = [];
 
   if (body.schoolProfile && typeof body.schoolProfile === 'object') {
-    await wsStore.setJSON(BLOB_KEYS.SCHOOL_PROFILE, {
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, {
       ...body.schoolProfile,
+      unitId,
+      schoolCode: body.schoolProfile.schoolCode || defaults.schoolProfile.schoolCode,
       updatedAt: new Date().toISOString(),
       updatedBy: user.username
     });
@@ -220,11 +247,13 @@ async function handleSaveState(user, body, wsStore, env, fetchImpl) {
   }
 
   if (Array.isArray(body.kopGallery)) {
-    await wsStore.setJSON(BLOB_KEYS.KOP_GALLERY, body.kopGallery);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, body.kopGallery);
     savedKeys.push('kopGallery');
 
     if (body.syncDriveItem && body.syncDriveItem.type === 'kop') {
       await callGasBridge(wsStore, env, 'archive_kop', {
+        unitId,
+        schoolName: defaults.schoolProfile.schoolName,
         item: body.syncDriveItem.item,
         actorUsername: user.username
       }, fetchImpl);
@@ -232,15 +261,17 @@ async function handleSaveState(user, body, wsStore, env, fetchImpl) {
   }
 
   if (Array.isArray(body.letterVault)) {
-    const existing = (await wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' })) || [];
+    const existing = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, { type: 'json' })) || [];
     const merged = body.replaceLetterVault
       ? body.letterVault
       : mergeCollectionById(existing, body.letterVault, body.deletedIds || []);
-    await wsStore.setJSON(BLOB_KEYS.LETTER_VAULT, merged);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, merged);
     savedKeys.push('letterVault');
 
     if (body.syncDriveItem && body.syncDriveItem.type === 'vault' && body.syncDriveItem.item) {
       const gasRes = await callGasBridge(wsStore, env, 'archive_vault', {
+        unitId,
+        schoolName: defaults.schoolProfile.schoolName,
         item: body.syncDriveItem.item,
         docxBase64: body.syncDriveItem.docxBase64 || '',
         actorUsername: user.username
@@ -251,7 +282,7 @@ async function handleSaveState(user, body, wsStore, env, fetchImpl) {
             ? { ...v, driveFileId: gasRes.data.driveFileId, driveUrl: gasRes.data.driveUrl, driveSynced: true }
             : v
         ));
-        await wsStore.setJSON(BLOB_KEYS.LETTER_VAULT, updatedVault);
+        await setUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, updatedVault);
       }
     }
   }
@@ -277,43 +308,44 @@ async function handleSaveState(user, body, wsStore, env, fetchImpl) {
   }
 
   if (Array.isArray(body.agendaBook)) {
-    await wsStore.setJSON(BLOB_KEYS.AGENDA_BOOK, body.agendaBook);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.AGENDA_BOOK, body.agendaBook);
     savedKeys.push('agendaBook');
   }
 
   let syncMeta = null;
   if (savedKeys.length > 0) {
-    syncMeta = await bumpSyncMeta(wsStore, `save:${savedKeys.join(',')}`);
+    syncMeta = await bumpSyncMeta(wsStore, `save:${savedKeys.join(',')}`, null, unitId);
   }
 
   return jsonResponse({
     ok: true,
+    unitId,
     savedKeys,
     syncRev: syncMeta?.rev,
     syncedAt: new Date().toISOString()
   }, 200);
 }
 
-async function handleMigrateLocal(user, body, wsStore) {
-  const existingOutgoing = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+async function handleMigrateLocal(user, unitId, body, wsStore) {
+  const existingOutgoing = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const incomingOutgoing = Array.isArray(body.outgoingLetters) ? body.outgoingLetters : [];
   const mergedOutgoing = sortOutgoingList(mergeCollectionById(existingOutgoing, incomingOutgoing));
   if (incomingOutgoing.length > 0) {
-    await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, mergedOutgoing);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, mergedOutgoing);
   }
 
-  const existingVault = (await wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' })) || [];
+  const existingVault = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, { type: 'json' })) || [];
   const incomingVault = Array.isArray(body.letterVault) ? body.letterVault : [];
   const mergedVault = mergeCollectionById(existingVault, incomingVault);
   if (incomingVault.length > 0) {
-    await wsStore.setJSON(BLOB_KEYS.LETTER_VAULT, mergedVault);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, mergedVault);
   }
 
-  const existingKop = (await wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' })) || [];
+  const existingKop = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, { type: 'json' })) || [];
   const incomingKop = Array.isArray(body.kopGallery) ? body.kopGallery : [];
   const mergedKop = mergeCollectionById(existingKop, incomingKop);
   if (incomingKop.length > 0) {
-    await wsStore.setJSON(BLOB_KEYS.KOP_GALLERY, mergedKop);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, mergedKop);
   }
 
   const existingApi = await wsStore.get(BLOB_KEYS.API_VAULT, { type: 'json' });
@@ -325,19 +357,21 @@ async function handleMigrateLocal(user, body, wsStore) {
     await wsStore.setJSON(BLOB_KEYS.API_VAULT, mergedApi);
   }
 
-  const existingProfile = await wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' });
+  const existingProfile = await getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' });
   if (!existingProfile && body.schoolProfile) {
-    await wsStore.setJSON(BLOB_KEYS.SCHOOL_PROFILE, {
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, {
       ...body.schoolProfile,
+      unitId,
       migratedBy: user.username,
       updatedAt: new Date().toISOString()
     });
   }
 
-  const syncMeta = await bumpSyncMeta(wsStore, 'migrate_local', mergedOutgoing);
+  const syncMeta = await bumpSyncMeta(wsStore, 'migrate_local', mergedOutgoing, unitId);
 
   return jsonResponse({
     ok: true,
+    unitId,
     syncRev: syncMeta.rev,
     counts: {
       outgoingLetters: mergedOutgoing.length,
@@ -348,8 +382,9 @@ async function handleMigrateLocal(user, body, wsStore) {
   }, 200);
 }
 
-async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetchImpl) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleRecordOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const authorizeSah = Boolean(body.authorizeSah);
   const requestAcc = Boolean(body.requestAcc) && !authorizeSah;
   const requestedSignerRole = String(body.signerRole || 'kepala_sekolah').trim();
@@ -365,8 +400,8 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
 
   const entry = body.entry || {};
   const year = String(entry.year || new Date().getFullYear());
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
-  const claimedSeq = await claimNextOutgoingSequence(wsStore, existingList, year, Number(entry.sequenceNumber) || 0);
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const claimedSeq = await claimNextOutgoingSequence(wsStore, existingList, year, Number(entry.sequenceNumber) || 0, unitId);
   const finalNomor = syncNomorSequence(entry.nomorSurat, claimedSeq);
 
   const snapshot = entry.documentSnapshot ? JSON.parse(JSON.stringify(entry.documentSnapshot)) : null;
@@ -383,12 +418,14 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
   if (authorizeSah && payload?.verificationId) {
     payload.sequenceNumber = claimedSeq;
     payload.nomorSurat = finalNomor;
+    if (!payload.schoolName) payload.schoolName = defaults.schoolProfile.schoolName;
     if (Array.isArray(payload.details)) {
       payload.details = payload.details.map(d => (
         d?.label === 'Nomor Surat Resmi' ? { ...d, value: finalNomor } : d
       ));
     }
     const pubRec = buildPublicVerificationRecord(payload, user, roleCheck.delegated);
+    pubRec.unitId = unitId;
     await verifyStore.setJSON(pubRec.verificationId, pubRec, { onlyIfNew: true });
     verificationRecord = stripVerificationSecrets(pubRec);
     cloudSynced = true;
@@ -396,6 +433,7 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
 
   const finalItem = {
     ...entry,
+    unitId,
     id: entry.id || `out-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     sequenceNumber: claimedSeq,
     year,
@@ -427,6 +465,8 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
   };
 
   const gasRes = await callGasBridge(wsStore, env, 'archive_outgoing', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: finalItem,
     docxBase64: body.docxBase64 || '',
     actorUsername: user.username
@@ -441,15 +481,17 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
   }
 
   const nextList = sortOutgoingList([finalItem, ...existingList.filter(i => i.id !== finalItem.id)]);
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
   const syncMeta = await bumpSyncMeta(
     wsStore,
     requestAcc ? 'acc_requested' : (authorizeSah ? 'outgoing_sah' : 'outgoing_recorded'),
-    nextList
+    nextList,
+    unitId
   );
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: finalItem,
     verification: verificationRecord,
     syncRev: syncMeta.rev,
@@ -457,8 +499,9 @@ async function handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetch
   }, 201);
 }
 
-async function handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fetchImpl) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleAuthorizeOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const itemId = String(body.outgoingId || '').trim();
   const requestedRole = String(body.signerRole || 'kepala_sekolah').trim();
 
@@ -467,22 +510,25 @@ async function handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fe
     return jsonResponse({ ok: false, error: roleCheck.reason }, 403);
   }
 
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const target = existingList.find(i => i.id === itemId);
   if (!target) {
     return jsonResponse({ ok: false, error: 'Catatan Surat Keluar tidak ditemukan.' }, 404);
   }
 
-  const payload = body.verificationPayload || {};
+  const payload = body.verificationPayload ? { ...body.verificationPayload } : {};
   if (!payload.verificationId) {
     return jsonResponse({ ok: false, error: 'Payload verifikasi QR tidak valid.' }, 400);
   }
+  if (!payload.schoolName) payload.schoolName = defaults.schoolProfile.schoolName;
 
   const pubRec = buildPublicVerificationRecord(payload, user, roleCheck.delegated);
+  pubRec.unitId = unitId;
   await verifyStore.setJSON(pubRec.verificationId, pubRec);
 
   const updatedItem = {
     ...target,
+    unitId,
     signerRole: payload.signerRole || requestedRole,
     signerTitle: payload.signerTitle || target.signerTitle,
     signerName: payload.signerName || target.signerName,
@@ -508,10 +554,12 @@ async function handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fe
   };
 
   const nextList = sortOutgoingList(existingList.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'outgoing_authorized', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'outgoing_authorized', nextList, unitId);
 
   const gasRes = await callGasBridge(wsStore, env, 'update_outgoing_status', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: updatedItem,
     statusAction: 'SAH_QR',
     actorUsername: user.username,
@@ -520,6 +568,7 @@ async function handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fe
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: updatedItem,
     verification: stripVerificationSecrets(pubRec),
     syncRev: syncMeta.rev,
@@ -527,13 +576,14 @@ async function handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fe
   }, 200);
 }
 
-async function handleRevokeOutgoing(user, body, wsStore, verifyStore, env, fetchImpl) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleRevokeOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const itemId = String(body.outgoingId || '').trim();
   const nextStatus = body.status === 'sah' ? 'sah' : 'revoked';
   const reason = String(body.reason || '').trim();
 
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const target = existingList.find(i => i.id === itemId);
   if (!target) {
     return jsonResponse({ ok: false, error: 'Catatan Surat Keluar tidak ditemukan.' }, 404);
@@ -569,43 +619,46 @@ async function handleRevokeOutgoing(user, body, wsStore, verifyStore, env, fetch
   };
 
   const nextList = sortOutgoingList(existingList.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, nextStatus === 'revoked' ? 'outgoing_revoked' : 'outgoing_restored', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, nextStatus === 'revoked' ? 'outgoing_revoked' : 'outgoing_restored', nextList, unitId);
 
   await callGasBridge(wsStore, env, 'update_outgoing_status', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: updatedItem,
     statusAction: nextStatus === 'revoked' ? 'CABUT_SAH' : 'SAHKAN_ULANG',
     actorUsername: user.username,
     note: updatedItem.revokedReason
   }, fetchImpl);
 
-  return jsonResponse({ ok: true, item: updatedItem, syncRev: syncMeta.rev }, 200);
+  return jsonResponse({ ok: true, unitId, item: updatedItem, syncRev: syncMeta.rev }, 200);
 }
 
-async function handleDeleteOutgoing(user, body, wsStore) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleDeleteOutgoing(user, unitId, body, wsStore) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
   const canDel = user.role === 'admin' || user.role === 'kepsek' || (user.role === 'tu' && permissions.allowTuDeleteOutgoing === true);
   if (!canDel) {
     return jsonResponse({ ok: false, error: 'Hanya Admin atau Kepala Sekolah yang dapat menghapus catatan Surat Keluar terkunci.' }, 403);
   }
   const itemId = String(body.outgoingId || '').trim();
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const nextList = existingList.filter(i => i.id !== itemId);
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'outgoing_deleted', nextList);
-  return jsonResponse({ ok: true, remaining: nextList.length, syncRev: syncMeta.rev }, 200);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'outgoing_deleted', nextList, unitId);
+  return jsonResponse({ ok: true, unitId, remaining: nextList.length, syncRev: syncMeta.rev }, 200);
 }
 
-async function handleUpdatePermissions(user, body, wsStore) {
+async function handleUpdatePermissions(user, unitId, body, wsStore) {
   if (user.role !== 'admin' && user.role !== 'kepsek') {
     return jsonResponse({ ok: false, error: 'Hanya Kepala Sekolah atau Administrator yang dapat mengatur persetujuan hak akses.' }, 403);
   }
 
-  const current = await getEffectivePermissions(wsStore);
+  const current = await getEffectivePermissions(wsStore, unitId);
   const patch = body.permissions || {};
 
   const next = {
     ...current,
+    unitId,
     allowTuSignPrincipal: patch.allowTuSignPrincipal !== undefined ? Boolean(patch.allowTuSignPrincipal) : current.allowTuSignPrincipal,
     allowTuSignKepsekDanTu: patch.allowTuSignKepsekDanTu !== undefined ? Boolean(patch.allowTuSignKepsekDanTu) : current.allowTuSignKepsekDanTu,
     note: patch.note !== undefined ? String(patch.note).slice(0, 240) : current.note,
@@ -621,9 +674,9 @@ async function handleUpdatePermissions(user, body, wsStore) {
     if (patch.allowTuDeleteIncoming !== undefined) next.allowTuDeleteIncoming = Boolean(patch.allowTuDeleteIncoming);
   }
 
-  await wsStore.setJSON(BLOB_KEYS.PERMISSIONS, next);
-  const syncMeta = await bumpSyncMeta(wsStore, 'permissions_updated');
-  return jsonResponse({ ok: true, permissions: next, syncRev: syncMeta.rev }, 200);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.PERMISSIONS, next);
+  const syncMeta = await bumpSyncMeta(wsStore, 'permissions_updated', null, unitId);
+  return jsonResponse({ ok: true, unitId, permissions: next, syncRev: syncMeta.rev }, 200);
 }
 
 async function handleManageUsers(user, body, wsStore, env) {
@@ -643,6 +696,8 @@ async function handleManageUsers(user, body, wsStore, env) {
     const username = String(body.username || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
     const displayName = String(body.displayName || '').trim();
     const role = ['admin', 'kepsek', 'tu'].includes(body.role) ? body.role : 'tu';
+    const assignedUnitId = normalizeUserUnitScope(body.assignedUnitId ?? body.userUnitId ?? body.unitId, role);
+    const defaultUnit = assignedUnitId === 'smp' ? 'smp' : 'smk';
     const password = String(body.password || '');
 
     if (!username || username.length < 3 || password.length < 6) {
@@ -658,6 +713,8 @@ async function handleManageUsers(user, body, wsStore, env) {
       username,
       displayName: displayName || username,
       role,
+      unitId: assignedUnitId,
+      defaultUnit,
       active: true,
       isDefaultAccount: false,
       passwordSalt: salt,
@@ -680,6 +737,11 @@ async function handleManageUsers(user, body, wsStore, env) {
 
   if (op === 'update') {
     const nextRole = ['admin', 'kepsek', 'tu'].includes(body.role) ? body.role : target.role;
+    const rawUnitOverride = body.assignedUnitId ?? body.userUnitId;
+    const nextUnitScope = rawUnitOverride !== undefined
+      ? normalizeUserUnitScope(rawUnitOverride, nextRole)
+      : normalizeUserUnitScope(target.unitId, nextRole);
+    const nextDefaultUnit = nextUnitScope === 'smp' ? 'smp' : (nextUnitScope === 'smk' ? 'smk' : (target.defaultUnit || 'smk'));
     const nextActive = body.active !== undefined ? Boolean(body.active) : (target.active !== false);
 
     // Pastikan selalu ada minimal 1 Admin aktif
@@ -694,6 +756,8 @@ async function handleManageUsers(user, body, wsStore, env) {
       ...target,
       displayName: body.displayName !== undefined ? String(body.displayName).trim() : target.displayName,
       role: nextRole,
+      unitId: nextUnitScope,
+      defaultUnit: nextDefaultUnit,
       active: nextActive,
       updatedAt: nowIso
     };
@@ -772,13 +836,14 @@ async function handleConfigureDrive(user, body, wsStore, env, fetchImpl) {
   }, testRes.ok ? 200 : 502);
 }
 
-async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
+async function handleSyncDrive(user, unitId, body, wsStore, env, fetchImpl) {
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const [outgoingList, incomingList, letterVault, kopGallery, schoolProfile, apiVault] = await Promise.all([
-    wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
     wsStore.get(BLOB_KEYS.API_VAULT, { type: 'json' })
   ]);
 
@@ -787,6 +852,8 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
     const target = list.find(i => i.id === body.outgoingId);
     if (!target) return jsonResponse({ ok: false, error: 'Surat tidak ditemukan.' }, 404);
     const gasRes = await callGasBridge(wsStore, env, 'archive_outgoing', {
+      unitId,
+      schoolName: (schoolProfile || defaults.schoolProfile).schoolName,
       item: target,
       docxBase64: body.docxBase64 || '',
       actorUsername: user.username
@@ -806,15 +873,16 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
           }
         : i
     ));
-    await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, updated);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, updated);
     const { publicStatus } = await getDriveConfigSafe(wsStore, env);
-    return jsonResponse({ ok: true, item: updated.find(i => i.id === target.id), driveStatus: publicStatus }, 200);
+    return jsonResponse({ ok: true, unitId, item: updated.find(i => i.id === target.id), driveStatus: publicStatus }, 200);
   }
 
   const backupSnapshot = {
+    unitId,
     exportedAt: new Date().toISOString(),
     exportedBy: user.username,
-    schoolProfile: schoolProfile || null,
+    schoolProfile: schoolProfile || defaults.schoolProfile,
     outgoingLetters: (Array.isArray(outgoingList) ? outgoingList : []).map(({ manageToken, qrDataUrl, ...rest }) => rest),
     incomingLetters: (Array.isArray(incomingList) ? incomingList : []).map(({ previewThumbDataUrl, ...rest }) => rest),
     letterVault: Array.isArray(letterVault) ? letterVault : [],
@@ -823,6 +891,8 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
   };
 
   const backupRes = await callGasBridge(wsStore, env, 'backup_snapshot', {
+    unitId,
+    schoolName: (schoolProfile || defaults.schoolProfile).schoolName,
     snapshot: backupSnapshot,
     actorUsername: user.username
   }, fetchImpl);
@@ -830,6 +900,7 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
 
   return jsonResponse({
     ok: backupRes.ok,
+    unitId,
     driveStatus: publicStatus,
     backupFileUrl: backupRes.data?.backupFileUrl || '',
     sheetUrl: backupRes.data?.sheetUrl || '',
@@ -838,15 +909,17 @@ async function handleSyncDrive(user, body, wsStore, env, fetchImpl) {
 }
 
 /**
- * Polling ringan untuk pembaruan SPA real-time tanpa refresh halaman.
+ * Polling ringan untuk status ACC/pengesahan per unit tanpa mengganggu kanvas maupun ruang kerja akun lain.
  */
-async function handlePollUpdates(user, url, wsStore, env) {
+async function handlePollUpdates(user, unitId, url, wsStore, env) {
   const since = Number(url.searchParams.get('since') || 0);
-  const meta = await getSyncMeta(wsStore);
+  const lite = url.searchParams.get('lite') === '1';
+  const meta = await getSyncMeta(wsStore, unitId);
 
   if (since > 0 && meta.rev <= since) {
     return jsonResponse({
       ok: true,
+      unitId,
       changed: false,
       rev: meta.rev,
       lastEvent: meta.lastEvent,
@@ -854,6 +927,34 @@ async function handlePollUpdates(user, url, wsStore, env) {
     }, 200);
   }
 
+  if (lite) {
+    const [permissions, outgoingList] = await Promise.all([
+      getEffectivePermissions(wsStore, unitId),
+      getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })
+    ]);
+    const sortedOutgoing = Array.isArray(outgoingList) ? sortOutgoingList(outgoingList) : [];
+    const pendingAccCount = sortedOutgoing.filter(
+      i => i?.verificationStatus === 'pending_acc' || i?.accStatus === 'pending'
+    ).length;
+
+    return jsonResponse({
+      ok: true,
+      unitId,
+      lite: true,
+      changed: true,
+      rev: meta.rev,
+      lastEvent: meta.lastEvent,
+      pendingAccCount,
+      permissions,
+      workspace: {
+        unitId,
+        outgoingLetters: sortedOutgoing
+      },
+      syncedAt: new Date().toISOString()
+    }, 200);
+  }
+
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const [
     permissions,
     outgoingList,
@@ -864,13 +965,13 @@ async function handlePollUpdates(user, url, wsStore, env) {
     letterVault,
     apiVault
   ] = await Promise.all([
-    getEffectivePermissions(wsStore),
-    wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
+    getEffectivePermissions(wsStore, unitId),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' }),
     getDriveConfigSafe(wsStore, env),
-    wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.KOP_GALLERY, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.LETTER_VAULT, { type: 'json' }),
     wsStore.get(BLOB_KEYS.API_VAULT, { type: 'json' })
   ]);
 
@@ -882,6 +983,7 @@ async function handlePollUpdates(user, url, wsStore, env) {
 
   return jsonResponse({
     ok: true,
+    unitId,
     changed: true,
     rev: meta.rev,
     lastEvent: meta.lastEvent,
@@ -889,8 +991,9 @@ async function handlePollUpdates(user, url, wsStore, env) {
     permissions,
     driveStatus: driveCfg.publicStatus,
     workspace: {
-      schoolProfile: schoolProfile || null,
-      kopGallery: Array.isArray(kopGallery) ? kopGallery : null,
+      unitId,
+      schoolProfile: schoolProfile || defaults.schoolProfile,
+      kopGallery: (Array.isArray(kopGallery) && kopGallery.length > 0) ? kopGallery : defaults.kopGallery,
       letterVault: Array.isArray(letterVault) ? letterVault : null,
       apiVault: apiVault?.items ? apiVault : null,
       outgoingLetters: sortedOutgoing,
@@ -903,15 +1006,17 @@ async function handlePollUpdates(user, url, wsStore, env) {
 /**
  * Mengajukan permintaan ACC Kepala Sekolah untuk surat keluar yang belum disahkan QR.
  */
-async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
+async function handleRequestAcc(user, unitId, body, wsStore, env, fetchImpl) {
   const itemId = String(body.outgoingId || '').trim();
   const requestedRole = String(body.signerRole || 'kepala_sekolah').trim();
   const requestNote = String(body.requestNote || '').trim().slice(0, 240);
+  const defaults = getUnitDefaultsSnapshot(unitId);
 
-  const [existingList, schoolProfile] = await Promise.all([
-    wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' })
+  const [existingList, storedSchoolProfile] = await Promise.all([
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' })
   ]);
+  const schoolProfile = storedSchoolProfile || defaults.schoolProfile;
   const list = Array.isArray(existingList) ? existingList : [];
   const target = list.find(i => i.id === itemId);
   if (!target) {
@@ -921,7 +1026,7 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
     return jsonResponse({ ok: false, error: 'Surat ini sudah berstatus SAH dan memiliki QR verifikasi.' }, 400);
   }
 
-  const signerInfo = buildSignerSelectionInfo(schoolProfile || {}, requestedRole);
+  const signerInfo = buildSignerSelectionInfo(schoolProfile, requestedRole);
   const nowIso = new Date().toISOString();
   const nextTitle = body.title ? String(body.title).trim().slice(0, 200) : target.title;
   const nextNomor = body.nomorSurat ? String(body.nomorSurat).trim().slice(0, 120) : target.nomorSurat;
@@ -935,6 +1040,7 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
 
   const updatedItem = {
     ...target,
+    unitId,
     title: nextTitle,
     nomorSurat: nextNomor,
     recipientName: nextRecipient,
@@ -962,10 +1068,12 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
   };
 
   const nextList = sortOutgoingList(list.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'acc_requested', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'acc_requested', nextList, unitId);
 
   const gasRes = await callGasBridge(wsStore, env, 'update_outgoing_status', {
+    unitId,
+    schoolName: schoolProfile.schoolName,
     item: updatedItem,
     statusAction: 'MINTA_ACC',
     actorUsername: user.username,
@@ -974,6 +1082,7 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: updatedItem,
     syncRev: syncMeta.rev,
     driveSync: gasRes
@@ -983,15 +1092,16 @@ async function handleRequestAcc(user, body, wsStore, env, fetchImpl) {
 /**
  * Kepala Sekolah atau Admin meng-ACC antrean surat, menerbitkan barcode QR & arsip Drive.
  */
-async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl) {
+async function handleApproveAcc(user, unitId, body, wsStore, verifyStore, env, fetchImpl) {
   if (user.role !== 'kepsek' && user.role !== 'admin') {
     return jsonResponse({ ok: false, error: 'Hanya Kepala Sekolah atau Administrator yang dapat meng-ACC dan menerbitkan Barcode QR.' }, 403);
   }
 
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const itemId = String(body.outgoingId || '').trim();
   const [existingList, storedSchool] = await Promise.all([
-    wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
-    wsStore.get(BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' })
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' }),
+    getUnitBlob(wsStore, unitId, BLOB_KEYS.SCHOOL_PROFILE, { type: 'json' })
   ]);
   const list = Array.isArray(existingList) ? existingList : [];
   const target = list.find(i => i.id === itemId);
@@ -999,7 +1109,7 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
     return jsonResponse({ ok: false, error: 'Surat antrean ACC tidak ditemukan.' }, 404);
   }
 
-  const school = storedSchool || body.schoolProfile || {};
+  const school = storedSchool || body.schoolProfile || defaults.schoolProfile;
   const finalSignerRole = String(body.signerRole || target.signerRole || 'kepala_sekolah').trim();
 
   const payload = body.verificationPayload?.verificationId
@@ -1016,9 +1126,11 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
           verificationUrl: vUrl
         });
       })();
+  if (!payload.schoolName) payload.schoolName = school.schoolName || defaults.schoolProfile.schoolName;
 
   const qrDataUrl = body.qrDataUrl || generateQrPngDataUrl(payload.verificationUrl);
   const pubRec = buildPublicVerificationRecord(payload, user, false);
+  pubRec.unitId = unitId;
   await verifyStore.setJSON(pubRec.verificationId, pubRec);
 
   let updatedSnapshot = target.documentSnapshot ? JSON.parse(JSON.stringify(target.documentSnapshot)) : null;
@@ -1047,6 +1159,7 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
   const nowIso = new Date().toISOString();
   const updatedItem = {
     ...target,
+    unitId,
     signerRole: payload.signerRole || finalSignerRole,
     signerTitle: payload.signerTitle || target.signerTitle,
     signerName: payload.signerName || target.signerName,
@@ -1079,6 +1192,8 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
   let gasRes;
   if (docxBase64) {
     gasRes = await callGasBridge(wsStore, env, 'archive_outgoing', {
+      unitId,
+      schoolName: school.schoolName || defaults.schoolProfile.schoolName,
       item: updatedItem,
       docxBase64,
       actorUsername: user.username
@@ -1092,6 +1207,8 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
     }
   } else {
     gasRes = await callGasBridge(wsStore, env, 'update_outgoing_status', {
+      unitId,
+      schoolName: school.schoolName || defaults.schoolProfile.schoolName,
       item: updatedItem,
       statusAction: 'ACC_KEPSEK_SAH',
       actorUsername: user.username,
@@ -1100,11 +1217,12 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
   }
 
   const nextList = sortOutgoingList(list.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'acc_approved', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'acc_approved', nextList, unitId);
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: updatedItem,
     verification: stripVerificationSecrets(pubRec),
     syncRev: syncMeta.rev,
@@ -1115,14 +1233,15 @@ async function handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl
 /**
  * Kepala Sekolah atau Admin menolak permintaan ACC agar TU dapat merevisi surat.
  */
-async function handleRejectAcc(user, body, wsStore, env, fetchImpl) {
+async function handleRejectAcc(user, unitId, body, wsStore, env, fetchImpl) {
   if (user.role !== 'kepsek' && user.role !== 'admin') {
     return jsonResponse({ ok: false, error: 'Hanya Kepala Sekolah atau Administrator yang dapat menolak pengajuan ACC.' }, 403);
   }
 
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const itemId = String(body.outgoingId || '').trim();
   const reason = String(body.reason || '').trim().slice(0, 300) || 'Perlu revisi oleh TU sebelum pengesahan Kepala Sekolah.';
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const target = existingList.find(i => i.id === itemId);
   if (!target) {
     return jsonResponse({ ok: false, error: 'Surat antrean ACC tidak ditemukan.' }, 404);
@@ -1143,10 +1262,12 @@ async function handleRejectAcc(user, body, wsStore, env, fetchImpl) {
   };
 
   const nextList = sortOutgoingList(existingList.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'acc_rejected', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'acc_rejected', nextList, unitId);
 
   const gasRes = await callGasBridge(wsStore, env, 'update_outgoing_status', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: updatedItem,
     statusAction: 'TOLAK_ACC',
     actorUsername: user.username,
@@ -1155,6 +1276,7 @@ async function handleRejectAcc(user, body, wsStore, env, fetchImpl) {
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: updatedItem,
     syncRev: syncMeta.rev,
     driveSync: gasRes
@@ -1164,9 +1286,9 @@ async function handleRejectAcc(user, body, wsStore, env, fetchImpl) {
 /**
  * Membatalkan pengajuan ACC yang masih menunggu (kembali ke status non-QR).
  */
-async function handleCancelAcc(user, body, wsStore) {
+async function handleCancelAcc(user, unitId, body, wsStore) {
   const itemId = String(body.outgoingId || '').trim();
-  const existingList = (await wsStore.get(BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, { type: 'json' })) || [];
   const target = existingList.find(i => i.id === itemId);
   if (!target) {
     return jsonResponse({ ok: false, error: 'Catatan Surat Keluar tidak ditemukan.' }, 404);
@@ -1191,17 +1313,18 @@ async function handleCancelAcc(user, body, wsStore) {
   };
 
   const nextList = sortOutgoingList(existingList.map(i => (i.id === itemId ? updatedItem : i)));
-  await wsStore.setJSON(BLOB_KEYS.OUTGOING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'acc_cancelled', nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.OUTGOING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'acc_cancelled', nextList, unitId);
 
-  return jsonResponse({ ok: true, item: updatedItem, syncRev: syncMeta.rev }, 200);
+  return jsonResponse({ ok: true, unitId, item: updatedItem, syncRev: syncMeta.rev }, 200);
 }
 
 /**
  * Mencatat Surat Masuk baru (Gambar / PDF / Foto Kamera), menyimpan cadangan berkas di server,
  * dan langsung mengunggah berkas ke Google Drive melalui Apps Script Bridge (`archive_incoming`).
  */
-async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
+async function handleRecordIncoming(user, unitId, body, wsStore, env, fetchImpl) {
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const rawEntry = body.entry || {};
   const namaSurat = String(rawEntry.namaSurat || '').trim().slice(0, 200);
   if (!namaSurat) {
@@ -1216,7 +1339,7 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
     return jsonResponse({ ok: false, error: 'Ukuran berkas melebihi batas unggah (maksimal ~3,8 MB).' }, 400);
   }
 
-  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
   const list = Array.isArray(existingList) ? existingList : [];
   const nowDate = new Date();
   const year = String(rawEntry.year || nowDate.getFullYear());
@@ -1236,6 +1359,7 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
   const nowIso = nowDate.toISOString();
   const finalItem = {
     id,
+    unitId,
     sequenceNumber: nextSeq,
     year,
     kodeSurat,
@@ -1265,8 +1389,9 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
   };
 
   // Simpan salinan berkas biner di blob terpisah agar daftar tetap ringan (<1ms poll) dan pratinjau selalu tersedia
-  await wsStore.setJSON(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, {
+  await setUnitBlob(wsStore, unitId, `${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, {
     id,
+    unitId,
     fileName,
     mimeType,
     fileKind,
@@ -1277,6 +1402,8 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
 
   // Unggah langsung ke Google Drive melalui Bridge Apps Script
   const gasRes = await callGasBridge(wsStore, env, 'archive_incoming', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: finalItem,
     fileBase64,
     fileName,
@@ -1304,12 +1431,13 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
   }
 
   const nextList = sortIncomingLetters([finalItem, ...list.filter(i => i.id !== id)], 'newest');
-  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_recorded');
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_recorded', null, unitId);
   const { publicStatus } = await getDriveConfigSafe(wsStore, env);
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: finalItem,
     incomingLetters: nextList,
     syncRev: syncMeta.rev,
@@ -1326,17 +1454,18 @@ async function handleRecordIncoming(user, body, wsStore, env, fetchImpl) {
 /**
  * Mengambil berkas lampiran Surat Masuk (Gambar/PDF/Foto) dari cloud blob untuk pratinjau atau unduhan.
  */
-async function handleGetIncomingFile(url, wsStore) {
+async function handleGetIncomingFile(unitId, url, wsStore) {
   const id = String(url.searchParams.get('id') || '').trim();
   if (!id) {
     return jsonResponse({ ok: false, error: 'Parameter id Surat Masuk wajib diisi.' }, 400);
   }
-  const fileRecord = await wsStore.get(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
+  const fileRecord = await getUnitBlob(wsStore, unitId, `${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
   if (!fileRecord || !fileRecord.fileBase64) {
     return jsonResponse({ ok: false, error: 'Berkas lampiran Surat Masuk tidak ditemukan di penyimpanan cloud.' }, 404);
   }
   return jsonResponse({
     ok: true,
+    unitId,
     id: fileRecord.id,
     fileName: fileRecord.fileName,
     mimeType: fileRecord.mimeType,
@@ -1348,12 +1477,13 @@ async function handleGetIncomingFile(url, wsStore) {
 /**
  * Mengunggah ulang berkas Surat Masuk yang belum tersinkron ke Google Drive.
  */
-async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
+async function handleSyncIncomingDrive(user, unitId, body, wsStore, env, fetchImpl) {
+  const defaults = getUnitDefaultsSnapshot(unitId);
   const id = String(body.incomingId || '').trim();
   if (!id) {
     return jsonResponse({ ok: false, error: 'ID Surat Masuk wajib diisi.' }, 400);
   }
-  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
   const list = Array.isArray(existingList) ? existingList : [];
   const target = list.find(i => i.id === id);
   if (!target) {
@@ -1365,7 +1495,7 @@ async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
   let mimeType = target.mimeType;
 
   if (!fileBase64) {
-    const fileRec = await wsStore.get(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
+    const fileRec = await getUnitBlob(wsStore, unitId, `${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`, { type: 'json' });
     if (fileRec?.fileBase64) {
       fileBase64 = fileRec.fileBase64;
       fileName = fileRec.fileName || fileName;
@@ -1377,6 +1507,8 @@ async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
   }
 
   const gasRes = await callGasBridge(wsStore, env, 'archive_incoming', {
+    unitId,
+    schoolName: defaults.schoolProfile.schoolName,
     item: target,
     fileBase64,
     fileName,
@@ -1395,7 +1527,7 @@ async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
       ? 'Google Apps Script (Code.gs) belum mendukung archive_incoming. Salin handler archive_incoming ke script.google.com lalu Deploy Versi Baru.'
       : (gasRes.error || 'Google Drive Bridge belum mengembalikan ID file untuk archive_incoming.');
     const updatedErrList = list.map(i => (i.id === id ? { ...i, driveSynced: false, driveError: errMsg } : i));
-    await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, updatedErrList);
+    await setUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, updatedErrList);
     return jsonResponse({ ok: false, needGasUpdate, error: errMsg, item: updatedErrList.find(i => i.id === id) }, 502);
   }
 
@@ -1408,12 +1540,13 @@ async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
     driveError: ''
   };
   const nextList = sortIncomingLetters(list.map(i => (i.id === id ? updatedItem : i)), 'newest');
-  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
-  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_drive_synced');
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, nextList);
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_drive_synced', null, unitId);
   const { publicStatus } = await getDriveConfigSafe(wsStore, env);
 
   return jsonResponse({
     ok: true,
+    unitId,
     item: updatedItem,
     incomingLetters: nextList,
     syncRev: syncMeta.rev,
@@ -1424,33 +1557,58 @@ async function handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl) {
 /**
  * Menghapus catatan Surat Masuk (dan membersihkan salinan file blob terkait).
  */
-async function handleDeleteIncoming(user, body, wsStore, env, fetchImpl) {
-  const permissions = await getEffectivePermissions(wsStore);
+async function handleDeleteIncoming(user, unitId, body, wsStore, env, fetchImpl) {
+  const permissions = await getEffectivePermissions(wsStore, unitId);
   const canDel = user.role === 'admin' || user.role === 'kepsek' || (user.role === 'tu' && permissions.allowTuDeleteIncoming !== false);
   if (!canDel) {
     return jsonResponse({ ok: false, error: 'Anda tidak memiliki izin menghapus arsip Surat Masuk.' }, 403);
   }
   const id = String(body.incomingId || '').trim();
-  const existingList = (await wsStore.get(BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
+  const existingList = (await getUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, { type: 'json' })) || [];
   const list = Array.isArray(existingList) ? existingList : [];
   const target = list.find(i => i.id === id);
   const nextList = list.filter(i => i.id !== id);
-  await wsStore.setJSON(BLOB_KEYS.INCOMING_LIST, nextList);
+  await setUnitBlob(wsStore, unitId, BLOB_KEYS.INCOMING_LIST, nextList);
 
-  if (typeof wsStore.delete === 'function') {
-    try { await wsStore.delete(`${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`); } catch {}
-  }
+  await deleteUnitBlob(wsStore, unitId, `${BLOB_KEYS.INCOMING_FILE_PREFIX}${id}`);
 
   if (target?.driveFileId) {
     await callGasBridge(wsStore, env, 'delete_incoming', {
+      unitId,
       incomingId: id,
       driveFileId: target.driveFileId,
       actorUsername: user.username
     }, fetchImpl);
   }
 
-  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_deleted');
-  return jsonResponse({ ok: true, remaining: nextList.length, incomingLetters: nextList, syncRev: syncMeta.rev }, 200);
+  const syncMeta = await bumpSyncMeta(wsStore, 'incoming_deleted', null, unitId);
+  return jsonResponse({ ok: true, unitId, remaining: nextList.length, incomingLetters: nextList, syncRev: syncMeta.rev }, 200);
+}
+
+/**
+ * Ruang Kerja Pribadi & Riwayat Chat AI Privat per Akun (terisolasi dari pengguna lain).
+ */
+async function handleGetPrivateWorkspace(user, unitId, wsStore) {
+  const privateWorkspace = await getPrivateWorkspace(wsStore, unitId, user.id);
+  return jsonResponse({
+    ok: true,
+    unitId,
+    ownerUserId: user.id,
+    privateWorkspace: privateWorkspace || null
+  }, 200);
+}
+
+async function handleSavePrivateWorkspace(user, unitId, body, wsStore) {
+  const payload = (body.privateWorkspace && typeof body.privateWorkspace === 'object')
+    ? body.privateWorkspace
+    : body;
+  const saved = await savePrivateWorkspace(wsStore, unitId, user.id, payload);
+  return jsonResponse({
+    ok: true,
+    unitId,
+    ownerUserId: user.id,
+    updatedAt: saved?.updatedAt || new Date().toISOString()
+  }, 200);
 }
 
 /**
@@ -1487,24 +1645,35 @@ export async function handleWorkspaceRequest(req, options = {}) {
   }
 
   if (method === 'GET') {
+    const unitCheck = resolveRequestUnit(user, url.searchParams.get('unit') || url.searchParams.get('unitId') || '');
+    if (!unitCheck.ok) {
+      return jsonResponse({ ok: false, error: unitCheck.error }, unitCheck.status || 403);
+    }
+    const unitId = unitCheck.unitId;
+
     if (action === 'session') {
-      const permissions = await getEffectivePermissions(wsStore);
+      const permissions = await getEffectivePermissions(wsStore, unitId);
       const { publicStatus } = await getDriveConfigSafe(wsStore, env);
       return jsonResponse({
         ok: true,
+        unitId,
+        availableUnits: normalizeUserUnitScope(user.unitId, user.role) === 'all' ? ['smk', 'smp'] : [unitId],
         user: sanitizePublicUser(user),
         permissions,
         driveStatus: publicStatus
       }, 200);
     }
     if (action === 'bootstrap') {
-      return handleBootstrap(user, wsStore, env);
+      return handleBootstrap(user, unitId, wsStore, env);
     }
     if (action === 'poll_updates') {
-      return handlePollUpdates(user, url, wsStore, env);
+      return handlePollUpdates(user, unitId, url, wsStore, env);
+    }
+    if (action === 'get_private_workspace') {
+      return handleGetPrivateWorkspace(user, unitId, wsStore);
     }
     if (action === 'get_incoming_file') {
-      return handleGetIncomingFile(url, wsStore);
+      return handleGetIncomingFile(unitId, url, wsStore);
     }
     return jsonResponse({ ok: false, error: `Aksi GET tidak dikenali: ${action}` }, 400);
   }
@@ -1513,29 +1682,38 @@ export async function handleWorkspaceRequest(req, options = {}) {
     let body = {};
     try { body = await req.json(); } catch { return jsonResponse({ ok: false, error: 'Payload JSON tidak valid.' }, 400); }
 
+    const requestedUnit = url.searchParams.get('unit') || body.activeUnitId || body.unit || (action === 'manage_users' ? '' : body.unitId) || '';
+    const unitCheck = resolveRequestUnit(user, requestedUnit);
+    if (!unitCheck.ok) {
+      return jsonResponse({ ok: false, error: unitCheck.error }, unitCheck.status || 403);
+    }
+    const unitId = unitCheck.unitId;
+
     switch (action) {
       case 'save_state':
-        return handleSaveState(user, body, wsStore, env, fetchImpl);
+        return handleSaveState(user, unitId, body, wsStore, env, fetchImpl);
+      case 'save_private_workspace':
+        return handleSavePrivateWorkspace(user, unitId, body, wsStore);
       case 'migrate_local':
-        return handleMigrateLocal(user, body, wsStore);
+        return handleMigrateLocal(user, unitId, body, wsStore);
       case 'record_outgoing':
-        return handleRecordOutgoing(user, body, wsStore, verifyStore, env, fetchImpl);
+        return handleRecordOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl);
       case 'authorize_outgoing':
-        return handleAuthorizeOutgoing(user, body, wsStore, verifyStore, env, fetchImpl);
+        return handleAuthorizeOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl);
       case 'request_acc':
-        return handleRequestAcc(user, body, wsStore, env, fetchImpl);
+        return handleRequestAcc(user, unitId, body, wsStore, env, fetchImpl);
       case 'approve_acc':
-        return handleApproveAcc(user, body, wsStore, verifyStore, env, fetchImpl);
+        return handleApproveAcc(user, unitId, body, wsStore, verifyStore, env, fetchImpl);
       case 'reject_acc':
-        return handleRejectAcc(user, body, wsStore, env, fetchImpl);
+        return handleRejectAcc(user, unitId, body, wsStore, env, fetchImpl);
       case 'cancel_acc':
-        return handleCancelAcc(user, body, wsStore);
+        return handleCancelAcc(user, unitId, body, wsStore);
       case 'revoke_outgoing':
-        return handleRevokeOutgoing(user, body, wsStore, verifyStore, env, fetchImpl);
+        return handleRevokeOutgoing(user, unitId, body, wsStore, verifyStore, env, fetchImpl);
       case 'delete_outgoing':
-        return handleDeleteOutgoing(user, body, wsStore);
+        return handleDeleteOutgoing(user, unitId, body, wsStore);
       case 'update_permissions':
-        return handleUpdatePermissions(user, body, wsStore);
+        return handleUpdatePermissions(user, unitId, body, wsStore);
       case 'manage_users':
         return handleManageUsers(user, body, wsStore, env);
       case 'change_password':
@@ -1543,13 +1721,13 @@ export async function handleWorkspaceRequest(req, options = {}) {
       case 'configure_drive':
         return handleConfigureDrive(user, body, wsStore, env, fetchImpl);
       case 'sync_drive':
-        return handleSyncDrive(user, body, wsStore, env, fetchImpl);
+        return handleSyncDrive(user, unitId, body, wsStore, env, fetchImpl);
       case 'record_incoming':
-        return handleRecordIncoming(user, body, wsStore, env, fetchImpl);
+        return handleRecordIncoming(user, unitId, body, wsStore, env, fetchImpl);
       case 'sync_incoming_drive':
-        return handleSyncIncomingDrive(user, body, wsStore, env, fetchImpl);
+        return handleSyncIncomingDrive(user, unitId, body, wsStore, env, fetchImpl);
       case 'delete_incoming':
-        return handleDeleteIncoming(user, body, wsStore, env, fetchImpl);
+        return handleDeleteIncoming(user, unitId, body, wsStore, env, fetchImpl);
       default:
         return jsonResponse({ ok: false, error: `Aksi POST tidak dikenali: ${action}` }, 400);
     }

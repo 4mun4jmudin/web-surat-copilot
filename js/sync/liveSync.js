@@ -1,17 +1,20 @@
 /**
- * liveSync.js - Mesin Polling SPA Real-Time Tanpa Refresh Halaman
- * Mendeteksi perubahan ACC Kepala Sekolah / TU / delegasi dari perangkat lain
- * dan memperbarui UI secara mulus tanpa mengganggu draft/kanvas yang sedang diketik.
+ * liveSync.js - Mesin Polling Ringan Status Antrean ACC & Pengesahan QR Tanpa Mengganggu Pekerjaan
+ * Hanya mengecek status ACC/Surat Keluar secara ringan (lite=1) agar tidak menyinkronkan atau menimpa
+ * kanvas, draf, profil, maupun obrolan AI antar perangkat.
  */
 
 import { store } from '../state.js';
-import { getStoredAuthToken, pollWorkspaceUpdates } from './workspaceClient.js';
+import { getActiveWorkspaceUnitId, getStoredAuthToken, pollWorkspaceUpdates } from './workspaceClient.js';
 
-const POLL_INTERVAL_VISIBLE_MS = 3000;
+const POLL_INTERVAL_VISIBLE_MS = 15000;
+const POLL_INTERVAL_HIDDEN_MS = 60000;
+const MIN_WAKE_GAP_MS = 8000;
 
 let pollTimer = null;
 let inFlight = false;
 let currentSyncRev = 1;
+let lastPollTimestamp = 0;
 let deltaListener = null;
 let previousStatusSnapshot = new Map();
 let lifecycleBound = false;
@@ -63,7 +66,9 @@ export function initLiveSync({ onDeltaApplied } = {}) {
     lifecycleBound = true;
     const wakePoll = () => {
       if (document.visibilityState === 'visible' && getStoredAuthToken()) {
-        forcePollNow();
+        if (Date.now() - lastPollTimestamp >= MIN_WAKE_GAP_MS) {
+          forcePollNow();
+        }
       }
     };
     document.addEventListener('visibilitychange', wakePoll);
@@ -89,7 +94,7 @@ function scheduleNextPoll() {
   if (typeof window === 'undefined') return;
   if (!getStoredAuthToken()) return;
   const delay = typeof document !== 'undefined' && document.visibilityState === 'hidden'
-    ? 12000
+    ? POLL_INTERVAL_HIDDEN_MS
     : POLL_INTERVAL_VISIBLE_MS;
   pollTimer = setTimeout(() => {
     forcePollNow();
@@ -102,6 +107,7 @@ export function startLiveSync(initialRev = null) {
   if (initialRev) setLastKnownSyncRev(initialRev);
   else if (st.syncRev) setLastKnownSyncRev(st.syncRev);
   seedOutgoingStatusBaseline(st.outgoingLetters || []);
+  lastPollTimestamp = Date.now();
   scheduleNextPoll();
 }
 
@@ -110,10 +116,11 @@ export function stopLiveSync() {
   pollTimer = null;
   inFlight = false;
   currentSyncRev = 1;
+  lastPollTimestamp = 0;
   previousStatusSnapshot = new Map();
 }
 
-export async function forcePollNow() {
+export async function forcePollNow({ lite = true } = {}) {
   if (inFlight || typeof window === 'undefined') return false;
   if (!getStoredAuthToken() || !store.getState().authUser) {
     stopLiveSync();
@@ -121,8 +128,10 @@ export async function forcePollNow() {
   }
 
   inFlight = true;
+  lastPollTimestamp = Date.now();
   try {
-    const res = await pollWorkspaceUpdates(currentSyncRev);
+    const unitId = store.getActiveUnitId?.() || getActiveWorkspaceUnitId();
+    const res = await pollWorkspaceUpdates(currentSyncRev, { lite, unitId });
     if (res?.ok) {
       if (res.rev) setLastKnownSyncRev(res.rev);
       if (res.changed) {

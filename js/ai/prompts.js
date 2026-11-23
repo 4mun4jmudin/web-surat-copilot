@@ -57,8 +57,11 @@ ATURAN WAJIB:
   ]
 }
 
-ATURAN WAJIB KODE NOMOR SURAT SESUAI JENIS SURAT:
-Format baku nomor surat SMK IT Al-Hawari adalah "{urut}/{KODE_JENIS}.SMKITA/{bulanRomawi}/{tahun}".
+ATURAN WAJIB KODE NOMOR SURAT & 2 UNIT YAYASAN (SMK vs SMP):
+Yayasan menaungi 2 unit aktif:
+- SMK IT AL-HAWARI -> kode "SMKITA", Kepala Sekolah: "Dian Nurhamdani, S.Pd.", format nomor "{urut}/{KODE_JENIS}.SMKITA/{bulanRomawi}/{tahun}" (contoh SKB/KET: "421.3/085/KET.SMKITA/XI/2026")
+- SMP IT AL-HAWARI - CIBIUK -> kode "SMPITA", Kepala Sekolah: "Yangyang Budiman, S.Pd.", format nomor "{urut}/{KODE_JENIS}.SMPITA/{bulanRomawi}/{tahun}" (contoh SKB/KET: "421.2/085/KET.SMPITA/XI/2026")
+Gunakan kode unit (SMKITA atau SMPITA) dan nama sekolah sesuai KONTEKS SEKOLAH yang diberikan!
 Kamu WAJIB memilih {KODE_JENIS} yang tepat berdasarkan jenis atau asal surat:
 - Surat Undangan (rapat guru, orang tua/wali, komite, acara) -> KODE: "UND" -> contoh: "050/UND.SMKITA/XI/2026"
 - Surat dari Tata Usaha (TU) / Administrasi Umum TU -> KODE: "TU" -> contoh: "050/TU.SMKITA/XI/2026"
@@ -76,7 +79,7 @@ Kamu WAJIB memilih {KODE_JENIS} yang tepat berdasarkan jenis atau asal surat:
 - Surat Bidang Kesiswaan / OSIS -> KODE: "KES" -> contoh: "022/KES.SMKITA/XI/2026"
 
 PANDUAN PENULISAN & TATA LETAK KHUSUS:
-- Gunakan bahasa baku PUEBI resmi instansi pendidikan di Indonesia, dan selalu tulis nama sekolah sebagai "SMK IT Al-Hawari" / "SMK IT AL-HAWARI" (bukan SMKS).
+- Gunakan bahasa baku PUEBI resmi instansi pendidikan di Indonesia, dan selalu ikuti nama sekolah sesuai unit target pada konteks ("SMK IT Al-Hawari" untuk SMK atau "SMP IT Al-Hawari - Cibiuk" untuk SMP, bukan SMKS).
 - Jangan mengarang data sensitif (nama orang, NIP, tanggal) jika tidak disebutkan oleh user. Gunakan placeholder jelas seperti "[Nama Lengkap Guru]" atau "[Tanggal Kegiatan]" bila tidak diketahui.
 - Untuk Surat Tugas dengan tabel peserta/pegawai (No | Nama | Jabatan), gunakan "hideMetaRecipient": true, "identityTable" untuk pemberi perintah, dan blok "table" dengan borderStyle "grid" & headerShading false.
 - Untuk paket lengkap "Surat Tugas + SPPD" (3 halaman resmi termasuk Keterangan I & II), kamu DAPAT mengembalikan:
@@ -88,7 +91,7 @@ PANDUAN PENULISAN & TATA LETAK KHUSUS:
 /**
  * Membentuk user prompt untuk AI Copilot dengan dukungan Few-Shot Reference dari Gudang Surat
  */
-function formatKnowledgeReferencesSection({
+export function formatKnowledgeReferencesSection({
   references = [],
   matchMode = references.length > 0 ? 'matched' : 'fresh',
   totalKnowledgeCount = references.length,
@@ -111,7 +114,12 @@ ${references.map((r, i) => {
 
 INSTRUKSI PEMBELAJARAN & PENIRUAN DARI GUDANG SURAT:
 - ${hasMaster ? 'DITEMUKAN MASTER TEMPLATE TERKUNCI (⭐) yang sesuai! WAJIB pelajari, tiru, dan pertahankan tata tulis, tata kelola posisi, gaya paragraf, nilai hideMetaRecipient, susunan identityTable, schema lengkap blok table (borderStyle, headerRow, headerShading, colWidthsPct, colspan, rowspan), serta pageBreak dari Cetak Biru Master di atas secara 1:1, lalu sesuaikan datanya dengan konteks pengguna.' : `Pelajari susunan tata letak, hideMetaRecipient, gaya bahasa, dan pola blok dari arsip referensi Gudang Surat di atas agar hasil ${modePurpose} konsisten dengan standar sekolah kami.`}
-- Output JSON mendukung properti opsional bila dibutuhkan tata letak: "hideMetaRecipient" (boolean), "paperSize" ("A4"|"F4"|"Letter"), "templatePreset", "hideSignature" (boolean), serta blok "table" ({ "type": "table", "borderStyle": "grid"|"sppd"|"none", "headerRow": boolean, "headerShading": boolean, "colWidthsPct": [..], "rows": [[...]] }), "heading", "list", dan { "type": "pageBreak" }.
+- Output JSON mendukung properti opsional bila dibutuhkan tata letak/format Microsoft Word lengkap:
+  * "hideMetaRecipient" (boolean), "hideSignature" (boolean), "templatePreset",
+  * "pageSetup": { "paperSize": "a4"|"f4"|"letter"|"legal", "orientation": "portrait"|"landscape", "margins": { "top": 2.0, "bottom": 2.0, "left": 2.5, "right": 2.0 }, "fontFamily": "Times New Roman"|"Arial"|"Calibri"|"Georgia"|"Garamond", "fontSize": "12", "lineSpacing": "1.0"|"1.15"|"1.5"|"2.0", "paragraphSpacing": "6", "showKop": true, "pageNumbering": { "enabled": true|false, "position": "bottom-center"|"bottom-right"|"top-right", "format": "decimal"|"lowerRoman"|"upperRoman", "startAt": 1 } },
+  * blok "paragraph" mendukung: "alignment" ("left"|"center"|"right"|"both"), "firstLineIndentCm" (mis. 1.25), "leftIndentCm", "spacingBeforePt", "spacingAfterPt", "lineSpacing", "fontSizePt", "bold", "italic", "underline",
+  * blok "list" mendukung numbering penuh: { "type": "list", "ordered": true|false, "listStyle": "decimal"|"lower-alpha"|"upper-alpha"|"lower-roman"|"upper-roman"|"bullet", "startAt": 1, "items": ["..."] },
+  * blok "table" ({ "type": "table", "borderStyle": "grid"|"sppd"|"none", "headerRow": boolean, "headerShading": boolean, "colWidthsPct": [..], "rows": [[...]] }), "heading", dan { "type": "pageBreak" }.
 `.trim();
   }
 
@@ -126,6 +134,10 @@ export function buildCopilotUserPrompt({
   userPrompt,
   schoolName,
   principalName,
+  schoolCode,
+  unitLabel,
+  npsn,
+  address,
   dateStr,
   references = [],
   matchMode = references.length > 0 ? 'matched' : 'fresh',
@@ -137,19 +149,23 @@ export function buildCopilotUserPrompt({
     totalKnowledgeCount,
     modePurpose: 'pembuatan surat'
   });
+  const isSmp = /\bsmp\b/i.test(String(schoolName || schoolCode || unitLabel || ''));
+  const resolvedCode = schoolCode || (isSmp ? 'SMPITA' : 'SMKITA');
+  const resolvedPrincipal = principalName || (isSmp ? 'Yangyang Budiman, S.Pd.' : 'Dian Nurhamdani, S.Pd.');
 
   return `
 Permintaan Pembuatan Dokumen:
 "${userPrompt}"
 
-Informasi Sekolah yang Tersedia:
-- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
-- Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
+Informasi Sekolah yang Tersedia (UNIT TARGET):
+- Nama Sekolah: ${schoolName || (isSmp ? 'SMP IT AL-HAWARI - CIBIUK' : 'SMK IT AL-HAWARI')}
+- Kode Unit Penomoran: ${resolvedCode}
+- Kepala Sekolah (Penanda Tangan): ${resolvedPrincipal}${npsn ? `\n- NPSN: ${npsn}` : ''}${address ? `\n- Alamat: ${address}` : ''}
 - Tanggal Hari Ini: ${dateStr || '14 November 2026'}
 
 ${refSection}
 
-Buatkan surat dinas / dokumen lengkap yang sesuai dalam format JSON sesuai sistem prompt.
+Buatkan surat dinas / dokumen lengkap yang sesuai dalam format JSON sesuai sistem prompt (pastikan kop, teks isi, kode nomor ${resolvedCode}, dan penanda tangan mengikuti unit target di atas).
 `.trim();
 }
 
@@ -198,7 +214,7 @@ ATURAN WAJIB:
     "city": "Garut",
     "date": "14 November 2026",
     "title": "Kepala Sekolah",
-    "name": "Dian Nurhadian, S.Pd.",
+    "name": "Dian Nurhamdani, S.Pd.",
     "nip": "-"
   }
 }
@@ -215,6 +231,9 @@ export function buildPolisherUserPrompt({
   messyText,
   schoolName,
   principalName,
+  schoolCode,
+  npsn,
+  address,
   dateStr,
   references = [],
   matchMode = references.length > 0 ? 'matched' : 'fresh',
@@ -226,6 +245,9 @@ export function buildPolisherUserPrompt({
     totalKnowledgeCount,
     modePurpose: 'perapihan dokumen'
   });
+  const isSmp = /\bsmp\b/i.test(String(schoolName || schoolCode || ''));
+  const resolvedCode = schoolCode || (isSmp ? 'SMPITA' : 'SMKITA');
+  const resolvedPrincipal = principalName || (isSmp ? 'Yangyang Budiman, S.Pd.' : 'Dian Nurhamdani, S.Pd.');
 
   return `
 Draf / Teks Dokumen yang Berantakan untuk Dirapihkan:
@@ -233,9 +255,10 @@ Draf / Teks Dokumen yang Berantakan untuk Dirapihkan:
 ${messyText}
 """
 
-Identitas Sekolah:
-- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
-- Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
+Identitas Sekolah (UNIT TARGET):
+- Nama Sekolah: ${schoolName || (isSmp ? 'SMP IT AL-HAWARI - CIBIUK' : 'SMK IT AL-HAWARI')}
+- Kode Unit Penomoran: ${resolvedCode}
+- Kepala Sekolah (Penanda Tangan): ${resolvedPrincipal}${npsn ? `\n- NPSN: ${npsn}` : ''}${address ? `\n- Alamat: ${address}` : ''}
 - Tanggal Surat: ${dateStr || '14 November 2026'}
 
 ${refSection}
@@ -253,22 +276,26 @@ Tugasmu adalah MENGEDIT DATA, KATA/KALIMAT, atau BARIS TABEL secara BEDAH (SURGI
 
 ATURAN WAJIB:
 1. HANYA kembalikan objek JSON valid (tanpa bungkus markdown \`\`\`json).
-2. KUNCI TATA LETAK & TABEL (DEFAULT): Jika pengguna hanya menyuruh mengubah/menambah/memperbaiki data (nama, jabatan, tujuan, tanggal, nomor surat, ejaan PUEBI, isi rincian, atau menambah/mengubah baris data tabel seperti pegawai/peserta SPPD/Surat Tugas), kamu WAJIB memakai "editScope": "surgical" dan mengembalikan array "patches" yang HANYA menyebut target yang berubah.
-3. DILARANG KERAS membuat ulang tabel, memecah/menggabung sel (colspan/rowspan), mengubah lebar kolom, mengubah borderStyle (grid/sppd/none), memindah halaman, atau menghapus "[QR_SLOT_TERKUNCI]" pada sel kecuali instruksi pengguna secara EKSPLISIT meminta rombak tata letak / desain ulang.
+2. KUNCI TATA LETAK & TABEL (DEFAULT): Jika pengguna hanya menyuruh mengubah/menambah/memperbaiki data (nama, jabatan, tujuan, tanggal, nomor surat, ejaan PUEBI, isi rincian, atau menambah/mengubah baris data tabel seperti pegawai/peserta SPPD/Surat Tugas) ATAU mengatur format halaman/Word (margin, kertas A4/F4/Letter/Legal, potret/lanskap, font, ukuran huruf, spasi baris, indentasi, perataan paragraf, gaya numbering 1/a/A/i/I/bullet, nomor halaman), kamu WAJIB memakai "editScope": "surgical" dan mengembalikan array "patches" yang HANYA menyebut target yang berubah.
+3. DILARANG KERAS membuat ulang tabel, memecah/menggabung sel (colspan/rowspan), mengubah lebar kolom, mengubah borderStyle (grid/sppd/none), memindah halaman, atau menghapus "[QR_SLOT_TERKUNCI]" pada sel kecuali instruksi pengguna secara EKSPLISIT meminta rombak tata letak / desain ulang total.
 4. Untuk menargetkan isi dokumen, ikuti persis "blockId", "row" (indeks 0-based baris), "col" (indeks 0-based sel pada baris tersebut), dan "pIndex" (bila sel memiliki array "paragraphs") dari peta "DOKUMEN SAAT INI".
 5. Operasi "patches" yang didukung:
    - { "op": "setField", "target": "title" | "nomor", "text": "..." }
    - { "op": "setMetaRecipient", "blockId": "p0_meta0", "sifat": "...", "lampiran": "...", "hal": "...", "tujuanLines": ["Kepada", "Yth. ...", "Di Tempat"] }
    - { "op": "setParagraph", "blockId": "p0_b0", "text": "..." }
-   - { "op": "insertParagraphAfter", "blockId": "p0_b0", "text": "..." } / "insertParagraphBefore"
+   - { "op": "setParagraphFormat", "blockId": "p0_b0" | "*" (untuk semua paragraf isi), "blockIds": ["p0_b0", "p0_b1"], "alignment": "left"|"center"|"right"|"both", "firstLineIndentCm": 1.25, "leftIndentCm": 0, "spacingBeforePt": 0, "spacingAfterPt": 6, "lineSpacing": "1.5", "fontSizePt": 12, "fontFamily": "Arial", "bold": true|false, "italic": true|false, "underline": true|false }
+   - { "op": "setPageFormat", "paperSize": "a4"|"f4"|"letter"|"legal", "orientation": "portrait"|"landscape", "margins": { "top": 2.0, "bottom": 2.0, "left": 2.5, "right": 2.0 }, "fontFamily": "Times New Roman"|"Arial"|"Calibri"|"Georgia"|"Garamond", "fontSize": "12", "lineSpacing": "1.15", "paragraphSpacing": "6", "showKop": true|false, "pageNumbering": { "enabled": true|false, "position": "bottom-center"|"bottom-right"|"top-right", "format": "decimal"|"lowerRoman"|"upperRoman", "startAt": 1 } }
+   - { "op": "insertParagraphAfter", "blockId": "p0_b0", "text": "...", "alignment": "left"|"both", "firstLineIndentCm": 0 } / "insertParagraphBefore"
    - { "op": "deleteBlock", "blockId": "p0_b0" } (hanya paragraf/list non-tabel)
    - { "op": "setIdentityRow", "blockId": "p0_id0", "row": 0, "label": "...", "value": ": ..." }
    - { "op": "addIdentityRow", "blockId": "p0_id0", "label": "...", "value": ": ...", "afterRow": 0 } / { "op": "deleteIdentityRow", "blockId": "p0_id0", "row": 0 }
    - { "op": "setTableCell", "blockId": "p1_t0", "row": 1, "col": 1, "text": "..." } -> tambahkan "paragraphIndex": <pIndex> jika sel punya array "paragraphs" (contoh kolom tanda tangan SPPD di samping CATATAN: ubah HANYA pIndex teks tanggal/jabatan/nama, JANGAN PERNAH timpa item dengan "isQrSlot": true / "[QR_SLOT_TERKUNCI]")!
+   - { "op": "setTableFormat", "blockId": "p0_t0", "borderStyle": "grid"|"sppd"|"none", "headerShading": true|false, "headerBold": true|false, "align": "left"|"center"|"right" }
    - { "op": "addTableRow", "blockId": "p0_t0", "cells": ["3", "Ahmad Fauzi", "Guru"], "insertAtRow": 3 }
    - { "op": "deleteTableRow", "blockId": "p0_t0", "row": 2 }
    - { "op": "setSignature", "blockId": "p0_sig0", "city": "Garut", "date": "25 November 2026", "title": "...", "name": "...", "nip": "..." }
-   - { "op": "setList", "blockId": "p0_list0", "items": ["..."] } / { "op": "setListItem", "blockId": "p0_list0", "itemIndex": 0, "text": "..." }
+   - { "op": "setList", "blockId": "p0_list0", "ordered": true|false, "listStyle": "decimal"|"lower-alpha"|"upper-alpha"|"lower-roman"|"upper-roman"|"bullet", "startAt": 1, "items": ["..."] } (boleh tanpa "items" bila hanya ubah gaya numbering) / { "op": "setListItem", "blockId": "p0_list0", "itemIndex": 0, "text": "..." }
+   - { "op": "convertParagraphsToList", "blockIds": ["p0_b1", "p0_b2"], "ordered": true, "listStyle": "lower-alpha", "startAt": 1 }
    - { "op": "appendPage", "blocks": [ ... ] } (untuk menambah halaman lampiran baru di akhir tanpa menyentuh halaman 1..N sebelumnya)
 
 FORMAT OUTPUT WAJIB MODE SURGICAL (UTAMA):
@@ -306,12 +333,16 @@ export function buildEditorUserPrompt({
   userInstruction,
   schoolName,
   principalName,
+  schoolCode,
   dateStr,
   allowLayoutRestructure = false
 }) {
   const modeDirective = allowLayoutRestructure
     ? 'MODE RESTRUKTURISASI DIIZINKAN: Pengguna meminta perubahan tata letak/halaman. Utamakan "patches" (termasuk "appendPage" bila sekadar menambah lampiran akhir), atau gunakan "editScope": "restructure" hanya bila seluruh struktur memang harus disusun ulang.'
     : 'MODE KUNCI TATA LETAK & TABEL (EDIT DATA/TEKS SAJA): DILARANG KERAS merombak tata letak, membuat ulang tabel, mengubah jumlah kolom, mengubah colspan/rowspan/borderStyle, atau menghapus slot QR. Kembalikan HANYA JSON dengan "editScope": "surgical" dan daftar "patches" minimal tepat di blockId / (row, col) yang perlu diubah.';
+  const isSmp = /\bsmp\b/i.test(String(schoolName || schoolCode || ''));
+  const resolvedCode = schoolCode || (isSmp ? 'SMPITA' : 'SMKITA');
+  const resolvedPrincipal = principalName || (isSmp ? 'Yangyang Budiman, S.Pd.' : 'Dian Nurhamdani, S.Pd.');
 
   return `
 ${modeDirective}
@@ -322,9 +353,10 @@ ${JSON.stringify(currentSnapshot, null, 2)}
 INSTRUKSI PENGEDITAN / PENAMBAHAN / PERBAIKAN DARI PENGGUNA:
 "${userInstruction}"
 
-Konteks Sekolah:
-- Nama Sekolah: ${schoolName || 'SMK IT Al-Hawari'}
-- Kepala Sekolah: ${principalName || 'Dian Nurhadian, S.Pd.'}
+Konteks Sekolah (UNIT TARGET):
+- Nama Sekolah: ${schoolName || (isSmp ? 'SMP IT AL-HAWARI - CIBIUK' : 'SMK IT AL-HAWARI')}
+- Kode Penomoran Unit: ${resolvedCode}
+- Kepala Sekolah: ${resolvedPrincipal}
 - Tanggal Hari Ini: ${dateStr || '14 November 2026'}
 
 Kembalikan HANYA objek JSON valid sesuai sistem prompt (utamakan "editScope": "surgical" + "patches").

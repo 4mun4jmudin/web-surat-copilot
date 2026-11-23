@@ -23,6 +23,7 @@ import {
 } from '../letters/verification.js';
 import {
   canSignWithRole,
+  canSwitchUnits,
   getSelectableSignerRoles,
   resolveDefaultAllowedSignerRole
 } from '../auth/permissions.js';
@@ -120,7 +121,8 @@ export async function authorizeAndRecordOutgoing({
   clearAfterSave = false
 } = {}) {
   const st = store.getState();
-  const effectiveSchool = school || st.schoolProfile || {};
+  const effectiveSchool = school || store.getEffectiveSchoolForDocument(entryBase?.document) || st.schoolProfile || {};
+  const cloudUnitOverride = canSwitchUnits(st.authUser) ? (effectiveSchool?.unitId || '') : '';
   const effectiveRole = signerRole || resolveDefaultAllowedSignerRole(st.authUser, st.authPermissions);
 
   if (authorizeSah) {
@@ -166,9 +168,11 @@ export async function authorizeAndRecordOutgoing({
           ...draftEntry,
           documentSnapshot: entryBase.document || null
         }
-      });
+      }, cloudUnitOverride);
       if (cloudSave.ok && cloudSave.item) {
-        const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+        const recorded = (!cloudUnitOverride || cloudUnitOverride === store.getActiveUnitId())
+          ? store.upsertOutgoingLetterFromCloud(cloudSave.item)
+          : cloudSave.item;
         if (!clearAfterSave && syncActiveDocMode) {
           store.setActiveDocumentVerification(null, syncActiveDocMode);
         } else if (clearAfterSave) {
@@ -235,7 +239,7 @@ export async function authorizeAndRecordOutgoing({
         documentSnapshot: entryBase.document || null
       },
       verificationPayload: payload
-    });
+    }, cloudUnitOverride);
 
     if (cloudSave.forbidden) {
       showToast(cloudSave.error || 'Akses pengesahan ditolak server.', 'error');
@@ -243,7 +247,9 @@ export async function authorizeAndRecordOutgoing({
     }
 
     if (cloudSave.ok && cloudSave.item) {
-      const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+      const recorded = (!cloudUnitOverride || cloudUnitOverride === store.getActiveUnitId())
+        ? store.upsertOutgoingLetterFromCloud(cloudSave.item)
+        : cloudSave.item;
       if (cloudSave.syncRev) setLastKnownSyncRev(cloudSave.syncRev);
       if (clearAfterSave) {
         store.syncActiveDocumentNumberToNextOutgoing(true);
@@ -565,7 +571,9 @@ export async function requestAccForOutgoing({
   syncActiveDocMode = 'standard',
   clearAfterSave = false
 } = {}) {
-  const effectiveSchool = school || store.getState().schoolProfile || {};
+  const stNow = store.getState();
+  const effectiveSchool = school || store.getEffectiveSchoolForDocument(entryBase?.document) || stNow.schoolProfile || {};
+  const cloudUnitOverride = canSwitchUnits(stNow.authUser) ? (effectiveSchool?.unitId || '') : '';
   const signerInfo = buildSignerSelectionInfo(effectiveSchool, requestedSignerRole);
   const authToken = getStoredAuthToken();
 
@@ -601,13 +609,15 @@ export async function requestAccForOutgoing({
         ...pendingEntry,
         documentSnapshot: entryBase.document || null
       }
-    });
+    }, cloudUnitOverride);
 
     if (!cloudSave.ok || !cloudSave.item) {
       throw new Error(cloudSave.error || 'Gagal mengirim pengajuan ACC ke Kepala Sekolah.');
     }
 
-    const recorded = store.upsertOutgoingLetterFromCloud(cloudSave.item);
+    const recorded = (!cloudUnitOverride || cloudUnitOverride === store.getActiveUnitId())
+      ? store.upsertOutgoingLetterFromCloud(cloudSave.item)
+      : cloudSave.item;
     if (cloudSave.syncRev) setLastKnownSyncRev(cloudSave.syncRev);
 
     if (clearAfterSave) {
@@ -650,6 +660,7 @@ export function openPrintSignatureChoiceModal({
   defaultSignerRole = 'kepala_sekolah',
   signerLabel = 'Kepala Sekolah',
   signerName = '',
+  school = null,
   onChooseQr,
   onChooseManual,
   onAuthorizeAndQr,
@@ -754,14 +765,16 @@ export function openPrintSignatureChoiceModal({
                 ${(() => {
                   const opts = getSelectableSignerRoles(stNow.authUser, stNow.authPermissions, SIGNER_ROLE_OPTIONS);
                   const defRole = resolveDefaultAllowedSignerRole(stNow.authUser, stNow.authPermissions, defaultSignerRole);
+                  const effectiveChoiceSchool = school || store.getEffectiveSchoolForDocument() || stNow.schoolProfile || {};
                   return opts.map(opt => {
+                    const rolePreviewInfo = buildSignerSelectionInfo(effectiveChoiceSchool, opt.id);
                     const allowOpt = opt.allowed || canRequestAccRole;
                     const reqAcc = !opt.allowed && canRequestAccRole ? '1' : '0';
                     const optText = opt.allowed
-                      ? `${opt.label} ${opt.delegated ? '(Izin Delegasi Aktif)' : `— ${opt.description}`}`
+                      ? `${opt.label} (${rolePreviewInfo.signerName}) ${opt.delegated ? '(Izin Delegasi Aktif)' : ''}`
                       : (canRequestAccRole
-                          ? `${opt.label} 📨 (Minta ACC Kepala Sekolah)`
-                          : `${opt.label} 🔒 (Perlu Izin Kepsek/Admin)`);
+                          ? `${opt.label} (${rolePreviewInfo.signerName}) 📨 Minta ACC`
+                          : `${opt.label} (${rolePreviewInfo.signerName}) 🔒 Perlu Izin`);
                     return `<option value="${escPrintHtml(opt.id)}" data-requires-acc="${reqAcc}" ${opt.id === defRole ? 'selected' : ''} ${allowOpt ? '' : 'disabled'}>${escPrintHtml(optText)}</option>`;
                   }).join('');
                 })()}

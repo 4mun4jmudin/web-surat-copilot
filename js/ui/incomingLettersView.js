@@ -35,6 +35,7 @@ import {
   exportIncomingLettersCsv,
   buildPrintableAgendaHtml
 } from '../letters/agenda.js';
+import { uiIcon } from './icons.js';
 
 let incomingSearchQuery = '';
 let incomingKindFilter = 'all';
@@ -85,12 +86,12 @@ function formatReadableDate(val = '') {
 function getKindMeta(item = {}) {
   const k = item.fileKind || (String(item.mimeType || '').includes('pdf') ? 'pdf' : 'image');
   if (k === 'pdf') {
-    return { label: 'PDF', icon: '📄', chipClass: 'incoming-chip-pdf' };
+    return { label: 'PDF', icon: uiIcon('filePdf', 12), rowIcon: uiIcon('filePdf', 20), chipClass: 'incoming-chip-pdf' };
   }
   if (k === 'photo' || item.captureSource === 'camera_photo') {
-    return { label: 'Foto Kamera', icon: '📷', chipClass: 'incoming-chip-photo' };
+    return { label: 'Foto Kamera', icon: uiIcon('camera', 12), rowIcon: uiIcon('camera', 20), chipClass: 'incoming-chip-photo' };
   }
-  return { label: 'Gambar', icon: '🖼️', chipClass: 'incoming-chip-img' };
+  return { label: 'Gambar', icon: uiIcon('gallery', 12), rowIcon: uiIcon('gallery', 20), chipClass: 'incoming-chip-img' };
 }
 
 function getFilteredIncomingLetters() {
@@ -148,8 +149,8 @@ export function renderIncomingLettersView(container) {
   }).length;
 
   const yearsInUse = collectAvailableAgendaYears(allIncoming, (item) => item.tanggalSurat || item.receivedAt || item.createdAt);
-  const SVG_INBOX = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#156c3b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`;
-  const SVG_SEARCH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
+  const SVG_INBOX = uiIcon('inbox', 24);
+  const SVG_SEARCH = uiIcon('search', 15);
 
   container.innerHTML = `
     <div class="view-atmosphere">
@@ -163,7 +164,7 @@ export function renderIncomingLettersView(container) {
               <h2 class="view-title">
                 <span>Arsip &amp; Daftar Surat Masuk</span>
                 <span class="status-chip ${drive.configured ? 'status-chip-green' : 'status-chip-amber'}">
-                  ${drive.configured ? '☁️ Sync Google Drive Aktif' : '☁️ Bridge Drive Menunggu Webhook'}
+                  ${drive.configured ? `${uiIcon('cloudCheck', 12)}<span>Sync Google Drive Aktif</span>` : `${uiIcon('clock', 12)}<span>Bridge Drive Menunggu Webhook</span>`}
                 </span>
               </h2>
               <p class="view-subtitle" style="max-width: 740px;">
@@ -172,26 +173,32 @@ export function renderIncomingLettersView(container) {
             </div>
           </div>
 
-          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0;">
+          <div class="view-header-actions">
             <button type="button" id="btn-in-open-upload" class="btn btn-primary" style="font-size: 13px; padding: 9px 15px; border-radius: 8px;">
-              📤 Upload Gambar / PDF
+              ${uiIcon('upload', 14)}
+              <span>Upload Gambar / PDF</span>
             </button>
             <button type="button" id="btn-in-open-camera" class="btn btn-blue-cta" style="font-size: 13px; padding: 9px 15px; border-radius: 8px;">
-              📷 Foto Langsung
+              ${uiIcon('camera', 14)}
+              <span>Foto Langsung</span>
             </button>
             ${pendingDriveCount > 0 ? `
               <button type="button" id="btn-in-sync-all-drive" class="btn btn-sm btn-secondary" style="border-color:#93c5fd; background:#eff6ff; color:#1d4ed8; font-weight:700;" title="Kirim ulang seluruh surat yang masih menunggu ke Google Drive">
-                🔄 Kirim Semua (${pendingDriveCount}) ke Drive
+                ${uiIcon('refresh', 13)}
+                <span>Kirim Semua (${pendingDriveCount}) ke Drive</span>
               </button>
             ` : ''}
             <button type="button" id="btn-in-export-csv" class="btn btn-sm btn-secondary" title="Unduh Buku Agenda Surat Masuk ke Excel/CSV">
-              📊 Ekspor Excel/CSV
+              ${uiIcon('spreadsheet', 13)}
+              <span>Ekspor Excel/CSV</span>
             </button>
             <button type="button" id="btn-in-print-rekap" class="btn btn-sm btn-secondary" title="Cetak Rekap Buku Agenda Surat Masuk resmi">
-              🖨️ Cetak Rekap
+              ${uiIcon('printer', 13)}
+              <span>Cetak Rekap</span>
             </button>
             <button type="button" id="btn-in-open-gas-guide" class="btn btn-sm btn-secondary" title="Panduan &amp; Kode Google Apps Script (archive_incoming)">
-              ⚙️ Script Drive
+              ${uiIcon('settings', 13)}
+              <span>Script Drive</span>
             </button>
           </div>
         </div>
@@ -200,46 +207,46 @@ export function renderIncomingLettersView(container) {
         <div class="kpi-grid-4">
           <div class="kpi-card accent-left-green">
             <div class="kpi-icon-box kpi-icon-green">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+              ${uiIcon('inbox', 18)}
             </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Total Surat Masuk</div>
-              <div style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 3px;">${allIncoming.length}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.2; margin-top: 3px;">${allIncoming.length}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Kode berikutnya: <strong>${escapeHtml(nextCode.kodeSurat)}</strong></div>
             </div>
           </div>
 
           <div class="kpi-card accent-left-blue">
             <div class="kpi-icon-box kpi-icon-blue">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+              ${uiIcon('cloud', 18)}
             </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Tersimpan di Google Drive</div>
-              <div style="font-size: 26px; font-weight: 800; color: #1d4ed8; line-height: 1.2; margin-top: 3px;">${syncedCount}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #1d4ed8; line-height: 1.2; margin-top: 3px;">${syncedCount}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">
-                <a href="${escapeHtml(drive.rootFolderUrl || `https://drive.google.com/drive/folders/${drive.rootFolderId || '19nFdoJ4VOEgFmUe_heAFxoFEt-9U9Crw'}`)}" target="_blank" rel="noopener" style="color:#1d4ed8; font-weight:600; text-decoration:none;">Buka Folder Drive ↗</a>
+                <a href="${escapeHtml(drive.rootFolderUrl || `https://drive.google.com/drive/folders/${drive.rootFolderId || '19nFdoJ4VOEgFmUe_heAFxoFEt-9U9Crw'}`)}" target="_blank" rel="noopener" style="color:#1d4ed8; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:4px;"><span>Buka Folder Drive</span>${uiIcon('externalLink', 11)}</a>
               </div>
             </div>
           </div>
 
           <div class="kpi-card accent-left-amber">
             <div class="kpi-icon-box kpi-icon-amber">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              ${uiIcon('calendar', 18)}
             </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Surat Masuk Bulan Ini</div>
-              <div style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 3px;">${monthCount}</div>
+              <div class="kpi-value" style="font-size: 26px; font-weight: 800; color: #b45309; line-height: 1.2; margin-top: 3px;">${monthCount}</div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Periode bulan berjalan</div>
             </div>
           </div>
 
           <div class="kpi-card accent-left-purple">
             <div class="kpi-icon-box kpi-icon-purple">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              ${uiIcon('folder', 18)}
             </div>
             <div style="flex: 1; min-width: 0;">
               <div style="font-size: 12px; color: #475569; font-weight: 600;">Komposisi Berkas</div>
-              <div style="font-size: 22px; font-weight: 800; color: #6d28d9; line-height: 1.25; margin-top: 3px;">${photoImgCount} <span style="font-size:12px;font-weight:600;color:#64748b;">Foto/Img</span> · ${pdfCount} <span style="font-size:12px;font-weight:600;color:#64748b;">PDF</span></div>
+              <div class="kpi-value" style="font-size: 22px; font-weight: 800; color: #6d28d9; line-height: 1.25; margin-top: 3px;">${photoImgCount} <span style="font-size:12px;font-weight:600;color:#64748b;">Foto/Img</span> · ${pdfCount} <span style="font-size:12px;font-weight:600;color:#64748b;">PDF</span></div>
               <div style="font-size: 11px; color: #64748b; margin-top: 3px;">Pratinjau &amp; unduhan siap pakai</div>
             </div>
           </div>
@@ -248,30 +255,30 @@ export function renderIncomingLettersView(container) {
         <!-- FILTER & PENCARIAN -->
         <div class="filter-bar-card">
           <div class="icon-input-wrap" style="flex: 1; min-width: 240px;">
-            <span class="icon-input-leading">${SVG_SEARCH}</span>
+            <span class="icon-input-leading" style="color:#64748b;">${SVG_SEARCH}</span>
             <input type="text" id="input-incoming-search" class="icon-input-control"
               value="${escapeHtml(incomingSearchQuery)}"
               placeholder="Cari kode surat, nama surat, pengirim, nomor asli, atau catatan...">
           </div>
           <div class="icon-input-wrap" style="width: 185px;">
-            <span class="icon-input-leading">📎</span>
+            <span class="icon-input-leading">${uiIcon('paperclip', 14)}</span>
             <select id="select-incoming-kind" class="icon-input-control" style="cursor: pointer;">
               <option value="all" ${incomingKindFilter === 'all' ? 'selected' : ''}>Semua Jenis Berkas</option>
-              <option value="photo" ${incomingKindFilter === 'photo' ? 'selected' : ''}>📷 Foto Kamera</option>
-              <option value="image" ${incomingKindFilter === 'image' ? 'selected' : ''}>🖼️ Gambar (JPG/PNG)</option>
-              <option value="pdf" ${incomingKindFilter === 'pdf' ? 'selected' : ''}>📄 Dokumen PDF</option>
+              <option value="photo" ${incomingKindFilter === 'photo' ? 'selected' : ''}>Foto Kamera</option>
+              <option value="image" ${incomingKindFilter === 'image' ? 'selected' : ''}>Gambar (JPG/PNG)</option>
+              <option value="pdf" ${incomingKindFilter === 'pdf' ? 'selected' : ''}>Dokumen PDF</option>
             </select>
           </div>
           <div class="icon-input-wrap" style="width: 195px;">
-            <span class="icon-input-leading">☁️</span>
+            <span class="icon-input-leading">${uiIcon('cloud', 14)}</span>
             <select id="select-incoming-drive" class="icon-input-control" style="cursor: pointer;">
               <option value="all" ${incomingDriveFilter === 'all' ? 'selected' : ''}>Semua Status Drive</option>
-              <option value="synced" ${incomingDriveFilter === 'synced' ? 'selected' : ''}>✓ Tersimpan di Drive</option>
-              <option value="pending" ${incomingDriveFilter === 'pending' ? 'selected' : ''}>⏳ Belum Sync Drive</option>
+              <option value="synced" ${incomingDriveFilter === 'synced' ? 'selected' : ''}>Tersimpan di Drive</option>
+              <option value="pending" ${incomingDriveFilter === 'pending' ? 'selected' : ''}>Belum Sync Drive</option>
             </select>
           </div>
           <div class="icon-input-wrap filter-ctrl-sm">
-            <span class="icon-input-leading">🗓️</span>
+            <span class="icon-input-leading">${uiIcon('calendar', 14)}</span>
             <select id="select-incoming-month" class="icon-input-control" style="cursor: pointer;">
               <option value="all" ${incomingMonthFilter === 'all' ? 'selected' : ''}>Semua Bulan</option>
               ${AGENDA_MONTH_LABELS.map((mName, idx) => {
@@ -281,14 +288,14 @@ export function renderIncomingLettersView(container) {
             </select>
           </div>
           <div class="icon-input-wrap filter-ctrl-xs">
-            <span class="icon-input-leading">#</span>
+            <span class="icon-input-leading">${uiIcon('hash', 14)}</span>
             <select id="select-incoming-year" class="icon-input-control" style="cursor: pointer;">
               <option value="all" ${incomingYearFilter === 'all' ? 'selected' : ''}>Semua Tahun</option>
               ${yearsInUse.map(y => `<option value="${escapeHtml(y)}" ${incomingYearFilter === y ? 'selected' : ''}>${escapeHtml(y)}</option>`).join('')}
             </select>
           </div>
-          <div class="icon-input-wrap" style="width: 195px;">
-            <span class="icon-input-leading">⇅</span>
+          <div class="icon-input-wrap" style="width: 205px;">
+            <span class="icon-input-leading">${uiIcon('sort', 14)}</span>
             <select id="select-incoming-sort" class="icon-input-control" style="cursor: pointer;">
               <option value="newest" ${incomingSortMode === 'newest' ? 'selected' : ''}>Urut: Terbaru Diterima</option>
               <option value="oldest" ${incomingSortMode === 'oldest' ? 'selected' : ''}>Urut: Terlama</option>
@@ -309,18 +316,18 @@ export function renderIncomingLettersView(container) {
       <div class="modal-card" style="max-width: 760px; width: 95%; max-height: 92vh; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
           <div>
-            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">📥 Tambah &amp; Arsipkan Surat Masuk ke Drive</h3>
+            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">${uiIcon('inbox', 17)}<span>Tambah &amp; Arsipkan Surat Masuk ke Drive</span></h3>
             <div style="font-size: 12px; color: #64748b; margin-top: 2px;">Pilih berkas Gambar, PDF, atau langsung Foto menggunakan kamera perangkat</div>
           </div>
-          <button type="button" id="btn-close-add-incoming" class="btn btn-sm btn-secondary">&times;</button>
+          <button type="button" id="btn-close-add-incoming" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 15)}</button>
         </div>
 
         <form id="form-add-incoming" style="flex: 1; overflow-y: auto; padding: 14px 2px; display: grid; gap: 14px;">
           <!-- PILIH SUMBER BERKAS (3 MODE) -->
           <div class="incoming-source-tabs">
-            <button type="button" class="incoming-src-btn active" data-in-src="upload_image">🖼️ Upload Gambar</button>
-            <button type="button" class="incoming-src-btn" data-in-src="upload_pdf">📄 Upload Dokumen PDF</button>
-            <button type="button" class="incoming-src-btn" data-in-src="camera_photo">📷 Foto Langsung Kamera</button>
+            <button type="button" class="incoming-src-btn active" data-in-src="upload_image">${uiIcon('gallery', 14)}<span>Upload Gambar</span></button>
+            <button type="button" class="incoming-src-btn" data-in-src="upload_pdf">${uiIcon('filePdf', 14)}<span>Upload Dokumen PDF</span></button>
+            <button type="button" class="incoming-src-btn" data-in-src="camera_photo">${uiIcon('camera', 14)}<span>Foto Langsung Kamera</span></button>
           </div>
 
           <input type="file" id="input-in-file-image" accept="image/*" class="hidden" />
@@ -330,10 +337,10 @@ export function renderIncomingLettersView(container) {
           <!-- PANEL FILE / KAMERA & PREVIEW -->
           <div id="in-upload-dropzone" class="incoming-dropzone">
             <div id="in-dropzone-idle" class="incoming-dropzone-idle">
-              <div style="font-size: 28px;" id="in-drop-icon">🖼️</div>
+              <div style="color:#156c3b; display:inline-flex;" id="in-drop-icon">${uiIcon('gallery', 30)}</div>
               <div style="font-weight: 700; color: #0f172a; font-size: 13.5px;" id="in-drop-title">Pilih atau tarik berkas Gambar surat ke sini</div>
               <div style="font-size: 11.5px; color: #64748b;" id="in-drop-sub">Format JPG, PNG, WEBP — otomatis dioptimalkan agar tajam &amp; ringan masuk Drive</div>
-              <button type="button" id="btn-in-pick-file" class="btn btn-sm btn-primary" style="margin-top: 6px;">📂 Pilih Berkas dari Perangkat</button>
+              <button type="button" id="btn-in-pick-file" class="btn btn-sm btn-primary" style="margin-top: 6px;">${uiIcon('folder', 13)}<span>Pilih Berkas dari Perangkat</span></button>
             </div>
 
             <div id="in-camera-stage" class="incoming-camera-stage hidden">
@@ -342,9 +349,9 @@ export function renderIncomingLettersView(container) {
                 Kamera web belum diizinkan atau tidak terdeteksi. Gunakan tombol <strong>Buka Kamera HP / Pilih Foto</strong> di bawah.
               </div>
               <div class="incoming-camera-controls">
-                <button type="button" id="btn-in-snap-photo" class="btn btn-primary btn-sm">📸 Jepret Foto Sekarang</button>
-                <button type="button" id="btn-in-switch-cam" class="btn btn-secondary btn-sm">🔄 Ganti Kamera</button>
-                <button type="button" id="btn-in-native-cam" class="btn btn-secondary btn-sm">📱 Buka Kamera Native HP</button>
+                <button type="button" id="btn-in-snap-photo" class="btn btn-primary btn-sm">${uiIcon('camera', 13)}<span>Jepret Foto Sekarang</span></button>
+                <button type="button" id="btn-in-switch-cam" class="btn btn-secondary btn-sm">${uiIcon('refresh', 13)}<span>Ganti Kamera</span></button>
+                <button type="button" id="btn-in-native-cam" class="btn btn-secondary btn-sm">${uiIcon('smartphone', 13)}<span>Buka Kamera Native HP</span></button>
               </div>
             </div>
 
@@ -356,8 +363,8 @@ export function renderIncomingLettersView(container) {
                 <div id="in-ocr-status" style="font-size: 11.5px; color: #15803d; margin-top: 3px; font-weight: 600;" class="hidden"></div>
               </div>
               <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-                <button type="button" id="btn-in-ai-scan" class="btn btn-sm btn-primary" title="Baca isi foto/PDF dengan AI OCR &amp; isi otomatis">✨ Scan AI (OCR)</button>
-                <button type="button" id="btn-in-retake-change" class="btn btn-sm btn-secondary">🔄 Ganti / Foto Ulang</button>
+                <button type="button" id="btn-in-ai-scan" class="btn btn-sm btn-primary" title="Baca isi foto/PDF dengan AI OCR &amp; isi otomatis">${uiIcon('sparkle', 13)}<span>Scan AI (OCR)</span></button>
+                <button type="button" id="btn-in-retake-change" class="btn btn-sm btn-secondary">${uiIcon('refresh', 13)}<span>Ganti / Foto Ulang</span></button>
               </div>
             </div>
           </div>
@@ -406,7 +413,8 @@ export function renderIncomingLettersView(container) {
           <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
             <button type="button" id="btn-cancel-add-incoming" class="btn btn-secondary">Batal</button>
             <button type="submit" id="btn-submit-add-incoming" class="btn btn-primary" style="font-weight: 700;">
-              ☁️ Simpan &amp; Arsipkan ke Google Drive
+              ${uiIcon('cloudUpload', 14)}
+              <span>Simpan &amp; Arsipkan ke Google Drive</span>
             </button>
           </div>
         </form>
@@ -421,14 +429,14 @@ export function renderIncomingLettersView(container) {
             <h3 id="modal-in-prev-title" style="margin: 0; font-size: 16px; color: #0f172a;">Pratinjau Surat Masuk</h3>
             <div id="modal-in-prev-sub" style="font-size: 12px; color: #64748b; margin-top: 2px;"></div>
           </div>
-          <button type="button" id="btn-close-in-prev" class="btn btn-sm btn-secondary">✕ Tutup</button>
+          <button type="button" id="btn-close-in-prev" class="btn btn-sm btn-secondary">${uiIcon('x', 13)}<span>Tutup</span></button>
         </div>
         <div id="modal-in-prev-body" style="flex: 1; overflow-y: auto; padding: 14px; background: #f1f5f9; border-radius: 6px; margin: 12px 0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 360px;"></div>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0;">
           <div id="modal-in-prev-drive-status" style="font-size: 12px; color: #475569;"></div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <a id="btn-in-prev-open-drive" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-secondary hidden">↗ Buka di Google Drive</a>
-            <button type="button" id="btn-in-prev-download" class="btn btn-sm btn-primary">⬇️ Unduh Berkas</button>
+            <a id="btn-in-prev-open-drive" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-secondary hidden">${uiIcon('externalLink', 12)}<span>Buka di Google Drive</span></a>
+            <button type="button" id="btn-in-prev-download" class="btn btn-sm btn-primary">${uiIcon('download', 13)}<span>Unduh Berkas</span></button>
           </div>
         </div>
       </div>
@@ -438,8 +446,8 @@ export function renderIncomingLettersView(container) {
     <div id="modal-confirm-delete-in" class="modal-overlay hidden">
       <div class="modal-card" style="max-width: 440px; width: 92%;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
-          <h3 style="margin: 0; font-size: 16px; color: #b91c1c;">🗑️ Konfirmasi Hapus Surat Masuk</h3>
-          <button type="button" id="btn-close-del-in" class="btn btn-sm btn-secondary">&times;</button>
+          <h3 style="margin: 0; font-size: 16px; color: #b91c1c;">${uiIcon('trash', 16)}<span>Konfirmasi Hapus Surat Masuk</span></h3>
+          <button type="button" id="btn-close-del-in" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 14)}</button>
         </div>
         <div style="padding: 14px 0; font-size: 13px; color: #334155;">
           <p style="margin: 0 0 10px 0;">Anda yakin ingin menghapus catatan Surat Masuk berikut dari daftar?</p>
@@ -447,7 +455,7 @@ export function renderIncomingLettersView(container) {
         </div>
         <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
           <button type="button" id="btn-cancel-del-in" class="btn btn-secondary">Batal</button>
-          <button type="button" id="btn-confirm-del-in" class="btn btn-danger" style="font-weight: 700;">🗑️ Hapus Surat Masuk</button>
+          <button type="button" id="btn-confirm-del-in" class="btn btn-danger" style="font-weight: 700;">${uiIcon('trash', 13)}<span>Hapus Surat Masuk</span></button>
         </div>
       </div>
     </div>
@@ -457,34 +465,34 @@ export function renderIncomingLettersView(container) {
       <div class="modal-card" style="max-width: 780px; width: 95%; max-height: 92vh; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0;">
           <div>
-            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">⚙️ Update Google Apps Script (<code>Code.gs</code>) untuk Surat Masuk</h3>
+            <h3 style="margin: 0; font-size: 16px; color: #0f172a;">${uiIcon('settings', 16)}<span>Update Google Apps Script (<code>Code.gs</code>) untuk Surat Masuk</span></h3>
             <div style="font-size: 12px; color: #64748b; margin-top: 2px;">Diperlukan satu kali agar <code>script.google.com</code> mengenali perintah <code>archive_incoming</code> &amp; menyimpan file ke folder <strong>03_Surat_Masuk</strong></div>
           </div>
-          <button type="button" id="btn-close-gas-guide" class="btn btn-sm btn-secondary">&times;</button>
+          <button type="button" id="btn-close-gas-guide" class="btn btn-sm btn-secondary btn-square-sm" aria-label="Tutup">${uiIcon('x', 14)}</button>
         </div>
         <div style="flex: 1; overflow-y: auto; padding: 12px 0; font-size: 12.5px; color: #334155; display: grid; gap: 10px;">
           <div id="in-gas-reason-banner" class="hidden" style="background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.45;">
-            <strong>⚠️ Kenapa muncul pesan &ldquo;Aksi tidak dikenali: archive_incoming&rdquo;?</strong><br>
+            <strong style="display:inline-flex;align-items:center;gap:6px;">${uiIcon('alertTriangle', 14)}<span>Kenapa muncul pesan &ldquo;Aksi tidak dikenali: archive_incoming&rdquo;?</span></strong><br>
             Web App Google Apps Script Anda masih memakai kode lama (hanya ada Surat Keluar/Gudang/Kop). Berkas Surat Masuk Anda <strong>sudah aman di Cloud Server</strong> &mdash; silakan ikuti 3 langkah di bawah agar masuk ke Google Drive:
           </div>
           <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5;">
             <strong>Langkah Update di <code>script.google.com</code> (1 Menit):</strong>
             <ol style="margin: 4px 0 0 18px; padding: 0;">
-              <li>Buka <a href="https://script.google.com/" target="_blank" rel="noopener" style="color:#15803d;font-weight:700;">script.google.com ↗</a> (login akun <code>tuancraf1@gmail.com</code>) dan buka project Bridge Drive Anda.</li>
+              <li>Buka <a href="https://script.google.com/" target="_blank" rel="noopener" style="color:#15803d;font-weight:700;">script.google.com</a> (login akun <code>tuancraf1@gmail.com</code>) dan buka project Bridge Drive Anda.</li>
               <li>Salin kode dari tab <strong>Sisipkan ke Code.gs Lama</strong> di bawah (paling aman karena Secret Anda tidak berubah). Tempelkan 2 baris <code>if (action === 'archive_incoming')</code> tepat sebelum pesan <em>Aksi tidak dikenali</em>, dan fungsi pembantunya di paling bawah file.</li>
-              <li>Klik tombol biru <strong>Deploy &rarr; Kelola deployment &rarr; ikon Pensil (Edit) &rarr; pilih Versi baru &rarr; Terapkan</strong>. Setelah selesai, klik tombol <strong>🔄 Kirim ke Drive</strong> pada daftar Surat Masuk!</li>
+              <li>Klik tombol biru <strong>Deploy &rarr; Kelola deployment &rarr; ikon Pensil (Edit) &rarr; pilih Versi baru &rarr; Terapkan</strong>. Setelah selesai, klik tombol <strong>Kirim ke Drive</strong> pada daftar Surat Masuk!</li>
             </ol>
           </div>
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-sm btn-primary gas-tab-btn active" data-gas-tab="snippet">🧩 Sisipkan ke Code.gs Lama (Direkomendasikan)</button>
-            <button type="button" class="btn btn-sm btn-secondary gas-tab-btn" data-gas-tab="full">📄 Kode Code.gs Lengkap (All-in-One)</button>
+            <button type="button" class="btn btn-sm btn-primary gas-tab-btn active" data-gas-tab="snippet">${uiIcon('puzzle', 13)}<span>Sisipkan ke Code.gs Lama (Direkomendasikan)</span></button>
+            <button type="button" class="btn btn-sm btn-secondary gas-tab-btn" data-gas-tab="full">${uiIcon('code', 13)}<span>Kode Code.gs Lengkap (All-in-One)</span></button>
           </div>
           <pre id="pre-gas-incoming-code" style="margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; border-radius: 8px; font-size: 11px; line-height: 1.45; overflow-x: auto; max-height: 300px;">${escapeHtml(APPS_SCRIPT_INCOMING_SNIPPET)}</pre>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 10px;">
-          <a href="https://script.google.com/" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">🌐 Buka script.google.com ↗</a>
+          <a href="https://script.google.com/" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">${uiIcon('globe', 13)}<span>Buka script.google.com</span>${uiIcon('externalLink', 11)}</a>
           <div style="display: flex; gap: 8px;">
-            <button type="button" id="btn-copy-gas-incoming" class="btn btn-primary btn-sm">📋 Salin Kode Aktif</button>
+            <button type="button" id="btn-copy-gas-incoming" class="btn btn-primary btn-sm">${uiIcon('clipboard', 13)}<span>Salin Kode Aktif</span></button>
             <button type="button" id="btn-done-gas-guide" class="btn btn-secondary btn-sm">Tutup</button>
           </div>
         </div>
@@ -506,14 +514,14 @@ function updateIncomingListInPlace(container) {
   if (totalCount === 0) {
     listArea.innerHTML = `
       <div class="ui-card" style="padding: 46px 24px; text-align: center; display: grid; gap: 12px; justify-items: center;">
-        <div style="width: 58px; height: 58px; border-radius: 16px; background: #ecfdf5; border: 1px solid #bbf7d0; display: grid; place-items: center; font-size: 28px;">📥</div>
+        <div class="view-header-badge" style="width: 58px; height: 58px; border-radius: 16px;">${uiIcon('inbox', 26)}</div>
         <div style="font-size: 16px; font-weight: 800; color: #0f172a;">Belum Ada Surat Masuk Tersimpan</div>
         <div style="font-size: 13px; color: #475569; max-width: 520px;">
           Mulai arsipkan surat masuk sekolah dengan mengunggah <strong>Gambar</strong>, file <strong>PDF</strong>, atau langsung <strong>Foto dengan Kamera</strong>. Dokumen akan langsung diunggah ke Google Drive dan kodenya muncul dalam daftar.
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 4px;">
-          <button type="button" class="btn btn-primary btn-sm" id="btn-empty-in-upload">📤 Upload Gambar / PDF</button>
-          <button type="button" class="btn btn-blue-cta btn-sm" id="btn-empty-in-cam">📷 Foto Langsung</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-empty-in-upload">${uiIcon('upload', 13)}<span>Upload Gambar / PDF</span></button>
+          <button type="button" class="btn btn-blue-cta btn-sm" id="btn-empty-in-cam">${uiIcon('camera', 13)}<span>Foto Langsung</span></button>
         </div>
       </div>
     `;
@@ -537,7 +545,7 @@ function updateIncomingListInPlace(container) {
   listArea.innerHTML = `
     <div class="ui-card" style="overflow: hidden; padding: 0;">
       <div style="overflow-x: auto;">
-        <table class="incoming-list-table">
+        <table class="enterprise-table incoming-list-table">
           <thead>
             <tr>
               <th style="width: 68px;">Berkas</th>
@@ -553,19 +561,19 @@ function updateIncomingListInPlace(container) {
               const kind = getKindMeta(item);
               const thumbHtml = item.previewThumbDataUrl
                 ? `<img src="${escapeHtml(item.previewThumbDataUrl)}" alt="${escapeHtml(item.namaSurat)}" class="incoming-row-thumb" />`
-                : `<div class="incoming-row-icon ${kind.chipClass}">${kind.icon}</div>`;
+                : `<div class="incoming-row-icon ${kind.chipClass}">${kind.rowIcon}</div>`;
 
               const driveHtml = item.driveSynced
                 ? `
                   <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">
-                    <span class="status-chip status-chip-green" style="font-size:11px; padding:2px 8px;">☁️ Tersimpan di Drive</span>
-                    ${item.driveUrl ? `<a href="${escapeHtml(item.driveUrl)}" target="_blank" rel="noopener" style="font-size:11px; color:#15803d; font-weight:600; text-decoration:none;">Buka di Drive ↗</a>` : ''}
+                    <span class="status-chip status-chip-green" style="font-size:11px; padding:2px 8px;">${uiIcon('cloudCheck', 12)}<span>Tersimpan di Drive</span></span>
+                    ${item.driveUrl ? `<a href="${escapeHtml(item.driveUrl)}" target="_blank" rel="noopener" style="font-size:11px; color:#15803d; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:3px;"><span>Buka di Drive</span>${uiIcon('externalLink', 11)}</a>` : ''}
                   </div>
                 `
                 : `
                   <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">
-                    <span class="status-chip status-chip-amber" style="font-size:11px; padding:2px 8px;" title="${escapeHtml(item.driveError || 'Belum tersinkron ke Google Drive')}">⏳ Cloud Lokal / Belum Drive</span>
-                    <button type="button" class="btn btn-sm btn-secondary btn-in-sync-drive" data-id="${escapeHtml(item.id)}" style="font-size:10.5px; padding:2px 7px;">🔄 Kirim ke Drive</button>
+                    <span class="status-chip status-chip-amber" style="font-size:11px; padding:2px 8px;" title="${escapeHtml(item.driveError || 'Belum tersinkron ke Google Drive')}">${uiIcon('clock', 12)}<span>Cloud Lokal / Belum Drive</span></span>
+                    <button type="button" class="btn btn-sm btn-secondary btn-in-sync-drive" data-id="${escapeHtml(item.id)}" style="font-size:10.5px; padding:3px 8px;">${uiIcon('refresh', 11)}<span>Kirim ke Drive</span></button>
                   </div>
                 `;
 
@@ -579,7 +587,7 @@ function updateIncomingListInPlace(container) {
                   <td>
                     <div style="font-family: Consolas, monospace; font-weight: 800; color: #0f172a; font-size: 13px;">${escapeHtml(item.kodeSurat || '-')}</div>
                     <div style="margin-top: 4px;">
-                      <span class="incoming-kind-pill ${kind.chipClass}">${kind.icon} ${escapeHtml(kind.label)}</span>
+                      <span class="incoming-kind-pill ${kind.chipClass}">${kind.icon}<span>${escapeHtml(kind.label)}</span></span>
                     </div>
                   </td>
                   <td>
@@ -599,10 +607,10 @@ function updateIncomingListInPlace(container) {
                   </td>
                   <td>${driveHtml}</td>
                   <td style="text-align: right; white-space: nowrap;">
-                    <div style="display: inline-flex; gap: 5px; align-items: center; justify-content: flex-end;">
-                      <button type="button" class="btn btn-sm btn-secondary btn-in-preview" data-id="${escapeHtml(item.id)}" title="Lihat Pratinjau Berkas">👁️ Lihat</button>
-                      <button type="button" class="btn btn-sm btn-secondary btn-in-download" data-id="${escapeHtml(item.id)}" title="Unduh Berkas">⬇️</button>
-                      ${canDelete ? `<button type="button" class="btn btn-sm btn-danger btn-in-delete" data-id="${escapeHtml(item.id)}" title="Hapus Surat Masuk">🗑️</button>` : ''}
+                    <div class="table-action-group">
+                      <button type="button" class="btn btn-sm btn-secondary btn-in-preview" data-id="${escapeHtml(item.id)}" title="Lihat Pratinjau Berkas">${uiIcon('eye', 13)}<span>Lihat</span></button>
+                      <button type="button" class="btn btn-sm btn-secondary btn-square-sm btn-in-download" data-id="${escapeHtml(item.id)}" title="Unduh Berkas">${uiIcon('download', 13)}</button>
+                      ${canDelete ? `<button type="button" class="btn btn-sm btn-danger btn-square-sm btn-in-delete" data-id="${escapeHtml(item.id)}" title="Hapus Surat Masuk">${uiIcon('trash', 13)}</button>` : ''}
                     </div>
                   </td>
                 </tr>
@@ -735,12 +743,12 @@ function bindIncomingViewEvents(container) {
 
     if (btnAiScan) {
       btnAiScan.disabled = true;
-      btnAiScan.textContent = '⏳ Memindai AI...';
+      btnAiScan.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Memindai AI...</span>`;
     }
     if (ocrStatusEl) {
       ocrStatusEl.classList.remove('hidden');
       ocrStatusEl.style.color = '#1d4ed8';
-      ocrStatusEl.textContent = '✨ AI OCR sedang membaca pengirim, nomor asli, tanggal & perihal surat...';
+      ocrStatusEl.textContent = 'AI OCR sedang membaca pengirim, nomor asli, tanggal & perihal surat...';
     }
 
     try {
@@ -775,18 +783,18 @@ function bindIncomingViewEvents(container) {
 
       if (ocrStatusEl) {
         ocrStatusEl.style.color = '#15803d';
-        ocrStatusEl.textContent = '✓ AI OCR berhasil mengisi kolom metadata. Silakan periksa & simpan!';
+        ocrStatusEl.textContent = 'AI OCR berhasil mengisi kolom metadata. Silakan periksa & simpan!';
       }
       if (!silentError) {
-        showToast('✓ AI OCR selesai membaca isi surat masuk!', 'success');
+        showToast('AI OCR selesai membaca isi surat masuk!', 'success');
       }
     } catch (err) {
       if (myCtrl.signal.aborted) return;
       if (ocrStatusEl) {
         ocrStatusEl.style.color = '#b45309';
         ocrStatusEl.textContent = silentError
-          ? 'ℹ️ Pemindaian AI dilewati (silakan isi manual atau klik Scan AI).'
-          : `⚠️ Gagal Scan AI: ${err.message}`;
+          ? 'Pemindaian AI dilewati (silakan isi manual atau klik Scan AI).'
+          : `Gagal Scan AI: ${err.message}`;
       }
       if (!silentError) {
         showToast(`Gagal Scan AI: ${err.message}`, 'warning');
@@ -794,7 +802,7 @@ function bindIncomingViewEvents(container) {
     } finally {
       if (btnAiScan) {
         btnAiScan.disabled = false;
-        btnAiScan.textContent = '✨ Scan AI (OCR)';
+        btnAiScan.innerHTML = `${uiIcon('sparkle', 13)}<span>Scan AI (OCR)</span>`;
       }
     }
   };
@@ -816,7 +824,7 @@ function bindIncomingViewEvents(container) {
     previewMetaEl.textContent = `${payload.fileKind === 'pdf' ? 'Dokumen PDF' : payload.fileKind === 'photo' ? 'Foto Kamera' : 'Gambar'} · ${formatFileSizeLabel(payload.fileSizeBytes)}`;
 
     if (payload.fileKind === 'pdf') {
-      previewThumbWrap.innerHTML = `<div class="incoming-row-icon incoming-chip-pdf" style="width:52px;height:52px;font-size:24px;">📄</div>`;
+      previewThumbWrap.innerHTML = `<div class="incoming-row-icon incoming-chip-pdf" style="width:52px;height:52px;">${uiIcon('filePdf', 24)}</div>`;
     } else {
       const thumbSrc = payload.previewThumbDataUrl || payload.localDataUrl;
       previewThumbWrap.innerHTML = `<img src="${escapeHtml(thumbSrc)}" alt="Pratinjau" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #cbd5e1;" />`;
@@ -883,11 +891,11 @@ function bindIncomingViewEvents(container) {
     idleBox?.classList.remove('hidden');
 
     if (mode === 'upload_pdf') {
-      dropIconEl.textContent = '📄';
+      dropIconEl.innerHTML = uiIcon('filePdf', 30);
       dropTitleEl.textContent = 'Pilih atau tarik berkas Dokumen PDF surat ke sini';
       dropSubEl.textContent = 'Format .pdf (maksimal 3,8 MB) — disimpan langsung ke Google Drive';
     } else {
-      dropIconEl.textContent = '🖼️';
+      dropIconEl.innerHTML = uiIcon('gallery', 30);
       dropTitleEl.textContent = 'Pilih atau tarik berkas Gambar scan/foto surat ke sini';
       dropSubEl.textContent = 'Format JPG, PNG, WEBP — otomatis dioptimalkan agar tajam & ringan masuk Drive';
     }
@@ -1027,7 +1035,7 @@ function bindIncomingViewEvents(container) {
 
     const origBtnHtml = submitBtn.innerHTML;
     submitBtn.disabled = true;
-    submitBtn.innerHTML = '⏳ Mengunggah ke Server &amp; Google Drive...';
+    submitBtn.innerHTML = `${uiIcon('loader', 14, 'spin-icon')}<span>Mengunggah ke Server &amp; Google Drive...</span>`;
 
     try {
       const id = `in-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -1161,7 +1169,7 @@ function bindIncomingViewEvents(container) {
     if (pendingList.length === 0) return;
 
     btnSyncAll.disabled = true;
-    btnSyncAll.textContent = `⏳ Mengirim 0/${pendingList.length}...`;
+    btnSyncAll.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Mengirim 0/${pendingList.length}...</span>`;
     let okCount = 0;
     let needUpdate = false;
     let lastErr = '';
@@ -1169,7 +1177,7 @@ function bindIncomingViewEvents(container) {
     try {
       for (let idx = 0; idx < pendingList.length; idx++) {
         const target = pendingList[idx];
-        btnSyncAll.textContent = `⏳ Mengirim ${idx + 1}/${pendingList.length}...`;
+        btnSyncAll.innerHTML = `${uiIcon('loader', 13, 'spin-icon')}<span>Mengirim ${idx + 1}/${pendingList.length}...</span>`;
         const cached = await store.getIncomingFileCache(target.id);
         const res = await syncIncomingDriveCloud(target.id, cached?.fileBase64 || '');
         if (res.ok) {
@@ -1203,6 +1211,7 @@ function bindIncomingViewEvents(container) {
     } finally {
       if (document.body.contains(btnSyncAll)) {
         btnSyncAll.disabled = false;
+        btnSyncAll.innerHTML = `${uiIcon('refresh', 13)}<span>Kirim Semua (${store.getIncomingLetters().filter(i => !i.driveSynced).length}) ke Drive</span>`;
       }
     }
   });
@@ -1277,14 +1286,14 @@ function bindIncomingRowActions(container) {
       cleanupPreviewObjUrl();
       prevTitle.textContent = `${item.kodeSurat} — ${item.namaSurat}`;
       prevSub.textContent = `${item.pengirim ? `Pengirim: ${item.pengirim} · ` : ''}Tanggal: ${formatReadableDate(item.tanggalSurat || item.receivedAt)} · ${item.fileName}`;
-      prevBody.innerHTML = `<div style="color:#475569;font-size:13px;">⏳ Memuat berkas pratinjau...</div>`;
+      prevBody.innerHTML = `<div style="color:#475569;font-size:13px;display:inline-flex;align-items:center;gap:8px;">${uiIcon('loader', 15, 'spin-icon')}<span>Memuat berkas pratinjau...</span></div>`;
 
       if (item.driveSynced && item.driveUrl) {
-        prevDriveStatus.innerHTML = `<span class="status-chip status-chip-green">☁️ Tersimpan di Google Drive</span>`;
+        prevDriveStatus.innerHTML = `<span class="status-chip status-chip-green">${uiIcon('cloudCheck', 12)}<span>Tersimpan di Google Drive</span></span>`;
         btnPrevDriveLink.href = item.driveUrl;
         btnPrevDriveLink.classList.remove('hidden');
       } else {
-        prevDriveStatus.innerHTML = `<span class="status-chip status-chip-amber">⏳ Tersimpan di Cloud Lokal (Belum masuk Drive)</span>`;
+        prevDriveStatus.innerHTML = `<span class="status-chip status-chip-amber">${uiIcon('clock', 12)}<span>Tersimpan di Cloud Lokal (Belum masuk Drive)</span></span>`;
         btnPrevDriveLink.classList.add('hidden');
       }
 
@@ -1347,7 +1356,7 @@ function bindIncomingRowActions(container) {
         return;
       }
       btn.disabled = true;
-      btn.textContent = '⏳ Mengirim...';
+      btn.innerHTML = `${uiIcon('loader', 11, 'spin-icon')}<span>Mengirim...</span>`;
       try {
         const cached = await store.getIncomingFileCache(id);
         const res = await syncIncomingDriveCloud(id, cached?.fileBase64 || '');
@@ -1372,11 +1381,11 @@ function bindIncomingRowActions(container) {
           store.upsertIncomingLetterLocal(res.item);
         }
         renderIncomingLettersView(container);
-        showToast(`✓ "${item.kodeSurat}" berhasil disimpan ke Google Drive!`, 'success');
+        showToast(`"${item.kodeSurat}" berhasil disimpan ke Google Drive!`, 'success');
       } finally {
         if (document.body.contains(btn)) {
           btn.disabled = false;
-          btn.textContent = '🔄 Kirim ke Drive';
+          btn.innerHTML = `${uiIcon('refresh', 11)}<span>Kirim ke Drive</span>`;
         }
       }
     });

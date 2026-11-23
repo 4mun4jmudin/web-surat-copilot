@@ -5,11 +5,41 @@
  */
 
 const TOKEN_STORAGE_KEY = 'ai_docbuilder_auth_token';
+const ACTIVE_UNIT_STORAGE_KEY = 'ai_docbuilder_active_unit';
 
 let unauthorizedCallback = null;
+let inMemoryActiveUnitId = '';
 
 export function onWorkspaceUnauthorized(cb) {
   unauthorizedCallback = typeof cb === 'function' ? cb : null;
+}
+
+export function getActiveWorkspaceUnitId() {
+  if (inMemoryActiveUnitId) return inMemoryActiveUnitId;
+  if (typeof localStorage === 'undefined') return 'smk';
+  try {
+    const val = String(localStorage.getItem(ACTIVE_UNIT_STORAGE_KEY) || '').trim().toLowerCase();
+    return val === 'smp' ? 'smp' : 'smk';
+  } catch {
+    return 'smk';
+  }
+}
+
+export function setActiveWorkspaceUnitId(unitId = 'smk') {
+  const clean = String(unitId || '').trim().toLowerCase() === 'smp' ? 'smp' : 'smk';
+  inMemoryActiveUnitId = clean;
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(ACTIVE_UNIT_STORAGE_KEY, clean);
+  } catch {}
+}
+
+export function clearActiveWorkspaceUnitId() {
+  inMemoryActiveUnitId = '';
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(ACTIVE_UNIT_STORAGE_KEY);
+  } catch {}
 }
 
 export function getStoredAuthToken() {
@@ -51,7 +81,7 @@ export async function blobToBase64(blob) {
   return '';
 }
 
-async function requestWorkspace(action, { method = 'GET', query = null, body = null, requireAuth = true, timeoutMs = 20000 } = {}) {
+async function requestWorkspace(action, { method = 'GET', query = null, body = null, requireAuth = true, timeoutMs = 20000, unitId = '' } = {}) {
   if (typeof fetch !== 'function') {
     return { ok: false, status: 0, error: 'Fetch tidak tersedia.' };
   }
@@ -69,6 +99,12 @@ async function requestWorkspace(action, { method = 'GET', query = null, body = n
     if (body !== null) headers['Content-Type'] = 'application/json';
 
     const params = new URLSearchParams({ action });
+    if (requireAuth && unitId !== false) {
+      const effectiveUnit = String(unitId || getActiveWorkspaceUnitId() || '').trim().toLowerCase();
+      if (effectiveUnit === 'smp' || effectiveUnit === 'smk') {
+        params.set('unit', effectiveUnit);
+      }
+    }
     if (query && typeof query === 'object') {
       for (const [k, v] of Object.entries(query)) {
         if (v !== undefined && v !== null) params.set(k, String(v));
@@ -134,8 +170,21 @@ export function fetchSessionInfo() {
   return requestWorkspace('session', { method: 'GET' });
 }
 
-export function fetchWorkspaceBootstrap() {
-  return requestWorkspace('bootstrap', { method: 'GET', timeoutMs: 25000 });
+export function fetchWorkspaceBootstrap(unitId = '') {
+  return requestWorkspace('bootstrap', { method: 'GET', timeoutMs: 25000, ...(unitId ? { unitId } : {}) });
+}
+
+export function fetchPrivateWorkspaceCloud(unitId = '') {
+  return requestWorkspace('get_private_workspace', { method: 'GET', timeoutMs: 20000, ...(unitId ? { unitId } : {}) });
+}
+
+export function savePrivateWorkspaceCloud(privateWorkspace, unitId = '') {
+  return requestWorkspace('save_private_workspace', {
+    method: 'POST',
+    body: { privateWorkspace },
+    timeoutMs: 25000,
+    ...(unitId ? { unitId } : {})
+  });
 }
 
 export function saveWorkspaceStatePatch(patch) {
@@ -146,12 +195,22 @@ export function migrateLocalStateCloud(localData) {
   return requestWorkspace('migrate_local', { method: 'POST', body: localData, timeoutMs: 30000 });
 }
 
-export function recordOutgoingCloud(payload) {
-  return requestWorkspace('record_outgoing', { method: 'POST', body: payload, timeoutMs: 30000 });
+export function recordOutgoingCloud(payload, unitId = '') {
+  return requestWorkspace('record_outgoing', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 30000,
+    ...(unitId ? { unitId } : {})
+  });
 }
 
-export function authorizeOutgoingCloud(payload) {
-  return requestWorkspace('authorize_outgoing', { method: 'POST', body: payload, timeoutMs: 25000 });
+export function authorizeOutgoingCloud(payload, unitId = '') {
+  return requestWorkspace('authorize_outgoing', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 25000,
+    ...(unitId ? { unitId } : {})
+  });
 }
 
 export function revokeOutgoingCloud(payload) {
@@ -182,16 +241,25 @@ export function syncDriveCloud(payload = {}) {
   return requestWorkspace('sync_drive', { method: 'POST', body: payload, timeoutMs: 35000 });
 }
 
-export function pollWorkspaceUpdates(sinceRev = 0) {
+export function pollWorkspaceUpdates(sinceRev = 0, { lite = true, unitId = '' } = {}) {
   return requestWorkspace('poll_updates', {
     method: 'GET',
-    query: { since: Number(sinceRev) || 0 },
+    query: {
+      since: Number(sinceRev) || 0,
+      ...(lite ? { lite: '1' } : {})
+    },
+    ...(unitId ? { unitId } : {}),
     timeoutMs: 12000
   });
 }
 
-export function requestAccCloud(payload) {
-  return requestWorkspace('request_acc', { method: 'POST', body: payload, timeoutMs: 25000 });
+export function requestAccCloud(payload, unitId = '') {
+  return requestWorkspace('request_acc', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 25000,
+    ...(unitId ? { unitId } : {})
+  });
 }
 
 export function approveAccCloud(payload) {

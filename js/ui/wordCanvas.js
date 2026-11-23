@@ -13,9 +13,27 @@ import { renderDocx } from '../docx/render.js';
 import { parseDocxForEditing, applyCanvasEditsToDocx, convertDocxToDocumentModel } from '../docx/patch.js';
 import { polishMessyDocumentWithAi, editDocumentWithAi, convertAiBlocksToDocumentBlocks } from '../ai/client.js';
 import { shouldAllowLayoutRestructure, buildSurgicalIndexFromDocModel, applySurgicalPatchesToDocModel } from '../ai/surgicalEdit.js';
+import {
+  SUPPORTED_FONT_FAMILIES,
+  PAGE_NUMBERING_DEFAULT,
+  getListStyleSpec,
+  formatPageNumberLabel,
+  normalizePageNumbering,
+  normalizePageSetupOptions,
+  extractPageSetupFromAiPayload
+} from '../letters/wordFormat.js';
 import { summarizeKnowledgeBaseStats, describeAiMatchFeedback } from '../ai/knowledgeBase.js';
-import { renderCanvasVaultBadge, openLockedMasterSaveChoiceModal } from './vaultSaveHelper.js';
+import { renderCanvasVaultBadge, openLockedMasterSaveChoiceModal, buildMetaAutoScanBarHtml, wireMetaAutoScanBar } from './vaultSaveHelper.js';
+import { mountCompactChatDrawer } from './aiChatWorkspace.js';
 import { LETTER_TYPE_CODES, formatSmartNomorSurat } from '../letters/numbering.js';
+import { extractDocumentMetadata, buildDocumentDownloadFilename } from '../letters/smartNaming.js';
+import {
+  getSchoolCodeFromProfile,
+  detectTargetUnitFromText,
+  resolveSchoolProfileForUnit,
+  resolveDocumentSchoolProfile,
+  adaptDocumentModelForUnit
+} from '../letters/schoolProfile.js';
 import { applySignatureModeToDocModel, buildSignerSelectionInfo, formatSignerNipLine } from '../letters/verification.js';
 import { buildSuratTugasSppdDocModel } from '../letters/templates/suratTugasSppd.js';
 import { attachInteractiveTables } from './tableInteraction.js';
@@ -76,13 +94,15 @@ export function renderWordCanvas(container) {
   store.syncActiveDocumentNumberToNextOutgoing(false);
   const freshState = store.getState();
   const doc = freshState.document;
-  const paperSize = state.letterOptions?.paperSize || 'a4';
-  const orientation = state.letterOptions?.orientation || 'portrait';
-  const customMargins = state.letterOptions?.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
-  const fontFamily = state.letterOptions?.fontFamily || 'Times New Roman';
-  const fontSize = state.letterOptions?.fontSize || '12';
-  const lineSpacing = state.letterOptions?.lineSpacing || '1.15';
-  const showKop = state.letterOptions?.showKop !== false;
+  const opts = normalizePageSetupOptions(state.letterOptions || {});
+  const paperSize = opts.paperSize || 'a4';
+  const orientation = opts.orientation || 'portrait';
+  const customMargins = opts.margins || { top: 2.0, bottom: 2.0, left: 2.5, right: 2.0 };
+  const fontFamily = opts.fontFamily || 'Times New Roman';
+  const fontSize = opts.fontSize || '12';
+  const lineSpacing = opts.lineSpacing || '1.15';
+  const pageNumbering = opts.pageNumbering || PAGE_NUMBERING_DEFAULT;
+  const showKop = opts.showKop !== false;
   const zoomLevel = state.zoomUserAdjusted ? (state.zoomLevel || 100) : computeDefaultDesktopZoom();
   const apiVault = store.getApiVault();
   const activeApi = store.getActiveApi();
@@ -113,7 +133,7 @@ export function renderWordCanvas(container) {
         dateIndex: -1,
         title: 'Kepala Sekolah',
         titleIndex: -1,
-        signer: activeDocx.parsedMeta?.signer || 'Dian Nurhadian, S.Pd.',
+        signer: activeDocx.parsedMeta?.signer || store.getEffectiveSchoolForDocument()?.principalName || 'Dian Nurhamdani, S.Pd.',
         signerIndex: -1,
         nip: '-',
         nipIndex: -1
@@ -128,19 +148,20 @@ export function renderWordCanvas(container) {
   const docxBodyList = structured?.bodyParagraphs || [];
   const docxIdentityRows = structured?.identityRows || [];
   const docxClosing = structured?.closing;
+  const effectiveDocSchool = store.getEffectiveSchoolForDocument(doc);
   const docxSig = structured?.signature || {
     date: 'Garut, 14 November 2026',
     dateIndex: -1,
     title: 'Kepala Sekolah',
     titleIndex: -1,
-    signer: 'Dian Nurhadian, S.Pd.',
+    signer: effectiveDocSchool?.principalName || 'Dian Nurhamdani, S.Pd.',
     signerIndex: -1,
     nip: '-',
     nipIndex: -1
   };
 
   const kopBlock = (doc.blocks || []).find(b => b.type === 'letterKop');
-  const kopImageUrl = kopBlock?.image || state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL;
+  const kopImageUrl = kopBlock?.image || effectiveDocSchool?.kopImage || state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL;
 
   // Temukan blok-blok surat (tanpa mengisi dummy otomatis saat lembar masih kosong)
   const rawTitleBlock = (doc.blocks || []).find(b => b.type === 'letterTitle');
@@ -360,11 +381,11 @@ export function renderWordCanvas(container) {
               <button class="ribbon-btn-icon" id="cmd-numbered-list" type="button" title="Daftar Bernomor (Numbering)">${ICON_LIST_NUMBER}</button>
               <button class="ribbon-btn-icon" id="cmd-outdent" type="button" title="Kurangi Inden (Geser Kiri)">${ICON_OUTDENT}</button>
               <button class="ribbon-btn-icon" id="cmd-indent" type="button" title="Tambah Inden (Geser Kanan)">${ICON_INDENT}</button>
-              <select id="ribbon-line-spacing" class="ribbon-select" style="width: 90px;" title="Jarak Spasi Baris">
-                <option value="1.0" ${lineSpacing === '1.0' ? 'selected' : ''}>Spasi 1.0</option>
-                <option value="1.15" ${lineSpacing === '1.15' ? 'selected' : ''}>Spasi 1,15</option>
-                <option value="1.5" ${lineSpacing === '1.5' ? 'selected' : ''}>Spasi 1.5</option>
-                <option value="2.0" ${lineSpacing === '2.0' ? 'selected' : ''}>Spasi 2.0</option>
+              <select id="ribbon-line-spacing" class="ribbon-select" title="Jarak Spasi Baris">
+                <option value="1.0" ${lineSpacing === '1.0' ? 'selected' : ''}>1,0</option>
+                <option value="1.15" ${lineSpacing === '1.15' ? 'selected' : ''}>1,15</option>
+                <option value="1.5" ${lineSpacing === '1.5' ? 'selected' : ''}>1,5</option>
+                <option value="2.0" ${lineSpacing === '2.0' ? 'selected' : ''}>2,0</option>
               </select>
             </div>
           </div>
@@ -373,36 +394,42 @@ export function renderWordCanvas(container) {
         <!-- KELOMPOK: SISIPKAN -->
         <div class="ribbon-group" title="Sisipkan Elemen Kop Surat &amp; Tabel">
           <span class="ribbon-label">Sisipkan</span>
-          <div class="ribbon-tiles-row">
-            <button id="btn-open-kop-gallery" class="ribbon-tile" type="button" title="Galeri Kop Surat: Pilih template kop resmi tersimpan">
-              ${ICON_GALLERY}
-              <span>Kop</span>
-              <span class="badge-count badge-floating">${store.getKopGallery().length}</span>
-            </button>
-            <button id="btn-ribbon-insert-table" class="ribbon-tile" type="button" data-canvas-insert="table" title="Sisipkan Tabel Rincian Tanpa Garis (Nama : ...)">
-              ${ICON_TABLE}
-              <span>Rincian</span>
-            </button>
-            <button id="btn-ribbon-insert-grid-table" class="ribbon-tile" type="button" data-canvas-insert="grid-table" title="Sisipkan Tabel Grid Berbingkai (No | Nama | Jabatan)">
-              ${ICON_TABLE}
-              <span>Tabel Grid</span>
-            </button>
-            <button id="btn-ribbon-add-pagebreak" class="ribbon-tile" type="button" data-canvas-insert="pagebreak" title="Sisipkan Pindah Halaman Baru (Page Break)">
-              ${ICON_PLUS}
-              <span>Hal Baru</span>
-            </button>
-            <button id="btn-open-st-sppd-pro" class="ribbon-tile smart-ribbon-highlight" type="button" title="Buka Paket Resmi 3 Halaman Surat Tugas &amp; SPPD (1:1 MS Word) di Word Pro">
+          <div class="ribbon-hybrid-row">
+            <div class="ribbon-rows-wrapper ribbon-compact-rows">
+              <div class="ribbon-row">
+                <button id="btn-open-kop-gallery" class="ribbon-tile is-compact-row" type="button" title="Galeri Kop Surat: Pilih template kop resmi tersimpan">
+                  ${ICON_GALLERY}
+                  <span>Kop</span>
+                  <span class="badge-count badge-floating">${store.getKopGallery().length}</span>
+                </button>
+                <button id="btn-ribbon-insert-table" class="ribbon-tile is-compact-row" type="button" data-canvas-insert="table" title="Sisipkan Tabel Rincian Tanpa Garis (Nama : ...)">
+                  ${ICON_TABLE}
+                  <span>Rincian</span>
+                </button>
+                <button id="btn-ribbon-insert-grid-table" class="ribbon-tile is-compact-row" type="button" data-canvas-insert="grid-table" title="Sisipkan Tabel Grid Berbingkai (No | Nama | Jabatan)">
+                  ${ICON_TABLE}
+                  <span>Tabel</span>
+                </button>
+              </div>
+              <div class="ribbon-row">
+                <button id="btn-ribbon-add-pagebreak" class="ribbon-tile is-compact-row" type="button" data-canvas-insert="pagebreak" title="Sisipkan Pindah Halaman Baru (Page Break)">
+                  ${ICON_PLUS}
+                  <span>+ Hal</span>
+                </button>
+                <input type="file" id="input-quick-kop-file" accept="image/png,image/jpeg,image/svg+xml" class="hidden">
+                <button id="btn-quick-upload-kop" class="ribbon-tile is-compact-row" type="button" title="Unggah Berkas Gambar Kop Baru (PNG/JPG/SVG)">
+                  ${ICON_UPLOAD}
+                  <span>Unggah</span>
+                </button>
+                <button id="btn-toggle-kop" class="ribbon-tile is-compact-row ${showKop ? 'active' : ''}" type="button" title="${showKop ? 'Sembunyikan Kop Surat' : 'Tampilkan Kop Surat'}">
+                  ${showKop ? ICON_EYE : ICON_EYE_OFF}
+                  <span>Tampil</span>
+                </button>
+              </div>
+            </div>
+            <button id="btn-open-st-sppd-pro" class="ribbon-tile is-hero smart-ribbon-highlight" type="button" title="Buka Paket Resmi 3 Halaman Surat Tugas &amp; SPPD (1:1 MS Word) di Word Pro">
               ${ICON_TARGET}
               <span>ST + SPPD</span>
-            </button>
-            <input type="file" id="input-quick-kop-file" accept="image/png,image/jpeg,image/svg+xml" class="hidden">
-            <button id="btn-quick-upload-kop" class="ribbon-tile" type="button" title="Unggah Berkas Gambar Kop Baru (PNG/JPG/SVG)">
-              ${ICON_UPLOAD}
-              <span>Unggah</span>
-            </button>
-            <button id="btn-toggle-kop" class="ribbon-tile ${showKop ? 'active' : ''}" type="button" title="${showKop ? 'Sembunyikan Kop Surat' : 'Tampilkan Kop Surat'}">
-              ${showKop ? ICON_EYE : ICON_EYE_OFF}
-              <span>Tampil</span>
             </button>
           </div>
         </div>
@@ -410,37 +437,40 @@ export function renderWordCanvas(container) {
         <!-- KELOMPOK: DOKUMEN -->
         <div class="ribbon-group" title="Simpan, Riwayat Edit, Impor Berkas &amp; AI Copilot">
           <span class="ribbon-label">Dokumen</span>
-          <div class="ribbon-tiles-row">
-            <button id="btn-save-to-vault" class="ribbon-tile" type="button" title="Simpan perubahan ke dokumen aktif di Gudang Surat (Ctrl+S)">
-              ${ICON_SAVE}
-              <span>Simpan</span>
-            </button>
-            <button id="btn-save-as-vault" class="ribbon-tile" type="button" title="Save As / Duplikat sebagai dokumen baru di Gudang Surat (Ctrl+Shift+S / F12)">
-              ${ICON_COPY_DOC}
-              <span>Save As</span>
-            </button>
-            <button id="btn-refresh-canvas" class="ribbon-tile" type="button" title="Refresh / Kosongkan Kertas Kerja ke Lembaran Baru">
-              ${ICON_REFRESH}
-              <span>Refresh</span>
-            </button>
-            <button id="btn-toggle-word-qr-canvas" class="ribbon-tile hidden" type="button" title="Tampilkan / Sembunyikan Barcode QR di Kanvas (tetap tercetak saat Print &amp; Surat Keluar)">
-              ${ICON_CLIPBOARD_CHECK}
-              <span data-qr-btn-label="1">Tampil QR</span>
-            </button>
-            <button id="cmd-undo" class="ribbon-tile" type="button" title="Urungkan Perubahan (Ctrl+Z)">
-              ${ICON_UNDO}
-              <span>Undo</span>
-            </button>
-            <button id="cmd-redo" class="ribbon-tile" type="button" title="Ulangi Perubahan (Ctrl+Y)">
-              ${ICON_REDO}
-              <span>Redo</span>
-            </button>
-            <input type="file" id="input-upload-docx-word" accept=".docx" class="hidden">
-            <button id="btn-upload-docx-word" class="ribbon-tile" type="button" title="Buka / Impor Berkas Word (.docx) dari Komputer">
-              ${ICON_DOC_UPLOAD}
-              <span>Impor</span>
-            </button>
-            <button id="btn-toggle-copilot" class="ribbon-tile ${isCopilotOpen ? 'active' : ''}" type="button" title="Buka / Tutup Panel AI Copilot Persuratan">
+          <div class="ribbon-hybrid-row">
+            <div class="ribbon-rows-wrapper ribbon-compact-rows">
+              <div class="ribbon-row">
+                <button id="btn-save-to-vault" class="ribbon-tile is-compact-row" type="button" title="Simpan perubahan ke dokumen aktif di Gudang Surat (Ctrl+S)">
+                  ${ICON_SAVE}
+                  <span>Simpan</span>
+                </button>
+                <button id="btn-save-as-vault" class="ribbon-tile is-compact-row" type="button" title="Save As / Duplikat sebagai dokumen baru di Gudang Surat (Ctrl+Shift+S / F12)">
+                  ${ICON_COPY_DOC}
+                  <span>Save As</span>
+                </button>
+              </div>
+              <div class="ribbon-row">
+                <button id="cmd-undo" class="ribbon-btn-icon-sq" type="button" title="Urungkan Perubahan (Ctrl+Z)">
+                  ${ICON_UNDO}
+                </button>
+                <button id="cmd-redo" class="ribbon-btn-icon-sq" type="button" title="Ulangi Perubahan (Ctrl+Y)">
+                  ${ICON_REDO}
+                </button>
+                <button id="btn-refresh-canvas" class="ribbon-btn-icon-sq" type="button" title="Reset / Kosongkan Kertas Kerja ke Lembaran Baru">
+                  ${ICON_REFRESH}
+                </button>
+                <button id="btn-toggle-word-qr-canvas" class="ribbon-tile is-compact-row hidden" type="button" title="Tampilkan / Sembunyikan Barcode QR di Kanvas (tetap tercetak saat Print &amp; Surat Keluar)">
+                  ${ICON_CLIPBOARD_CHECK}
+                  <span data-qr-btn-label="1">QR</span>
+                </button>
+                <input type="file" id="input-upload-docx-word" accept=".docx" class="hidden">
+                <button id="btn-upload-docx-word" class="ribbon-tile is-compact-row" type="button" title="Buka / Impor Berkas Word (.docx) dari Komputer">
+                  ${ICON_DOC_UPLOAD}
+                  <span>Impor</span>
+                </button>
+              </div>
+            </div>
+            <button id="btn-toggle-copilot" class="ribbon-tile is-hero ${isCopilotOpen ? 'active' : ''}" type="button" title="Buka / Tutup Panel AI Copilot Persuratan">
               ${ICON_SPARKLE}
               <span>Copilot</span>
             </button>
@@ -562,7 +592,8 @@ export function renderWordCanvas(container) {
                   --margin-left: ${customMargins.left}cm;
                   --margin-right: ${customMargins.right}cm;
                   --printable-h-mm: ${computePrintableDimsMm({ paperSize, orientation, margins: customMargins }).printableHeightMm}mm;
-                  font-family: ${fontFamily};
+                  --doc-font: '${fontFamily}', serif;
+                  font-family: '${fontFamily}', serif;
                   font-size: ${fontSize}pt;
                 ">
               
@@ -675,6 +706,7 @@ export function renderWordCanvas(container) {
 
               </div>
               <div class="floating-qr-stage" data-qr-page="0"></div>
+              <div class="word-page-number-slot no-edit ${pageNumbering?.enabled ? `is-${pageNumbering.position}` : 'hidden'}" aria-hidden="true">${pageNumbering?.enabled ? formatPageNumberLabel(pageNumbering.startAt || 1, pageNumbering.format) : ''}</div>
             </div>
             </div>
           `}
@@ -798,25 +830,22 @@ export function renderWordCanvas(container) {
 
           <!-- PENGATURAN TIPOGRAFI & SPASI -->
           <div class="form-group" style="margin-bottom: 16px;">
-            <label style="font-weight: 700; color: #1e293b; font-size: 13px;">3. Tipografi & Jarak Spasi Baris:</label>
+            <label style="font-weight: 700; color: #1e293b; font-size: 13px;">3. Tipografi & Jarak Spasi Baris / Paragraf:</label>
             <div class="form-row" style="margin-top: 6px;">
               <div class="col">
                 <label style="font-size: 11px;">Jenis Font Utama:</label>
                 <select id="modal-set-font-family" class="form-control">
-                  <option value="Times New Roman" ${fontFamily === 'Times New Roman' ? 'selected' : ''}>Times New Roman (Baku)</option>
-                  <option value="Arial" ${fontFamily === 'Arial' ? 'selected' : ''}>Arial</option>
-                  <option value="Calibri" ${fontFamily === 'Calibri' ? 'selected' : ''}>Calibri</option>
-                  <option value="Segoe UI" ${fontFamily === 'Segoe UI' ? 'selected' : ''}>Segoe UI</option>
-                  <option value="Georgia" ${fontFamily === 'Georgia' ? 'selected' : ''}>Georgia</option>
+                  ${SUPPORTED_FONT_FAMILIES.map(f =>
+                    `<option value="${f}" ${fontFamily === f ? 'selected' : ''}>${f}${f === 'Times New Roman' ? ' (Baku)' : ''}</option>`
+                  ).join('')}
                 </select>
               </div>
               <div class="col">
                 <label style="font-size: 11px;">Ukuran Font:</label>
                 <select id="modal-set-font-size" class="form-control">
-                  <option value="10" ${fontSize === '10' ? 'selected' : ''}>10 pt</option>
-                  <option value="11" ${fontSize === '11' ? 'selected' : ''}>11 pt</option>
-                  <option value="12" ${fontSize === '12' ? 'selected' : ''}>12 pt (Standar Dinas)</option>
-                  <option value="14" ${fontSize === '14' ? 'selected' : ''}>14 pt</option>
+                  ${['9', '10', '11', '12', '13', '14', '16', '18'].map(sz =>
+                    `<option value="${sz}" ${String(fontSize) === sz ? 'selected' : ''}>${sz} pt${sz === '12' ? ' (Standar Dinas)' : ''}</option>`
+                  ).join('')}
                 </select>
               </div>
               <div class="col">
@@ -828,12 +857,53 @@ export function renderWordCanvas(container) {
                   <option value="2.0" ${lineSpacing === '2.0' ? 'selected' : ''}>2.0 (Ganda)</option>
                 </select>
               </div>
+              <div class="col">
+                <label style="font-size: 11px;">Jarak Paragraf:</label>
+                <select id="modal-set-para-spacing" class="form-control">
+                  ${['0', '3', '6', '8', '12'].map(pt =>
+                    `<option value="${pt}" ${String(opts.paragraphSpacing ?? '6') === pt ? 'selected' : ''}>${pt} pt${pt === '6' ? ' (Standar)' : ''}</option>`
+                  ).join('')}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- NOMOR HALAMAN WORD -->
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label style="font-weight: 700; color: #1e293b; font-size: 13px;">4. Penomoran Halaman (Page Numbering):</label>
+            <div style="margin-top: 6px; padding: 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px;">
+              <label style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; cursor: pointer; margin-bottom: 8px;">
+                <input type="checkbox" id="modal-set-pn-enabled" ${pageNumbering?.enabled ? 'checked' : ''} style="width: 17px; height: 17px; cursor: pointer;">
+                <span>Tampilkan Nomor Halaman pada Dokumen &amp; Ekspor .docx</span>
+              </label>
+              <div class="form-row">
+                <div class="col">
+                  <label style="font-size: 11px;">Posisi Nomor:</label>
+                  <select id="modal-set-pn-pos" class="form-control">
+                    <option value="bottom-center" ${pageNumbering?.position === 'bottom-center' ? 'selected' : ''}>Bawah Tengah</option>
+                    <option value="bottom-right" ${pageNumbering?.position === 'bottom-right' ? 'selected' : ''}>Bawah Kanan</option>
+                    <option value="top-right" ${pageNumbering?.position === 'top-right' ? 'selected' : ''}>Atas Kanan</option>
+                  </select>
+                </div>
+                <div class="col">
+                  <label style="font-size: 11px;">Format Angka:</label>
+                  <select id="modal-set-pn-fmt" class="form-control">
+                    <option value="decimal" ${pageNumbering?.format === 'decimal' ? 'selected' : ''}>1, 2, 3 (Angka)</option>
+                    <option value="lowerRoman" ${pageNumbering?.format === 'lowerRoman' ? 'selected' : ''}>i, ii, iii (Romawi Kecil)</option>
+                    <option value="upperRoman" ${pageNumbering?.format === 'upperRoman' ? 'selected' : ''}>I, II, III (Romawi Besar)</option>
+                  </select>
+                </div>
+                <div class="col">
+                  <label style="font-size: 11px;">Mulai Dari:</label>
+                  <input type="number" min="1" max="999" id="modal-set-pn-start" class="form-control" value="${pageNumbering?.startAt || 1}">
+                </div>
+              </div>
             </div>
           </div>
 
           <!-- KOP SURAT -->
           <div class="form-group" style="margin-bottom: 20px;">
-            <label style="font-weight: 700; color: #1e293b; font-size: 13px;">4. Kop Surat Sekolah:</label>
+            <label style="font-weight: 700; color: #1e293b; font-size: 13px;">5. Kop Surat Sekolah:</label>
             <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; padding: 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px;">
               <div>
                 <strong style="font-size: 12.5px; color: var(--dark);">Tampilkan Kop Surat pada Dokumen</strong>
@@ -851,113 +921,8 @@ export function renderWordCanvas(container) {
         </div>
       </div>
 
-      <!-- 5. PANEL AI COPILOT (DOCKED KANAN DI DESKTOP, SLIDE-OVER DI LAYAR KECIL) -->
-      <aside class="copilot-drawer ${isCopilotOpen ? '' : 'hidden'}" id="copilot-drawer">
-        <div class="copilot-header">
-          <div class="copilot-title">
-            <span style="display: inline-flex;">${ICON_BOT_SPARK}</span>
-            <h4>AI Copilot Surat Sekolah</h4>
-          </div>
-          <button id="btn-close-copilot" class="copilot-close-btn" type="button" title="Tutup Panel AI Copilot">&times;</button>
-        </div>
-
-        <div class="copilot-body">
-          
-          <!-- PEMILIH MODEL DARI GUDANG API -->
-          <div class="copilot-model-card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-              <label style="font-size: 11.5px; font-weight: 700; color: #1e293b;">Model AI dari Gudang API</label>
-              <a href="javascript:void(0)" id="link-open-vault-from-copilot" style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--primary); font-weight: 600; text-decoration: none;">
-                ${ICON_SETTINGS} <span>Gudang API</span>
-              </a>
-            </div>
-            <select id="select-copilot-model" class="form-control" style="font-size: 12px; font-weight: 600; background: #ffffff;">
-              ${apiVault.map(v => `
-                <option value="${v.id}" ${v.id === activeApi?.id ? 'selected' : ''}>
-                  [${v.provider.toUpperCase()}] ${escapeHtml(v.label)}
-                </option>
-              `).join('')}
-            </select>
-          </div>
-
-          <!-- BASIS PENGETAHUAN / KNOWLEDGE BASE DARI GUDANG SURAT -->
-          <div class="copilot-kb-card">
-            <div style="display: flex; align-items: flex-start; gap: 7px; min-width: 0;">
-              <span style="color: #15803d; display: inline-flex; margin-top: 1px;">${ICON_OPEN_BOOK}</span>
-              <span><strong>Basis Pengetahuan:</strong> ${kbStats.totalActive} arsip aktif dipelajari AI (${kbStats.masterCount} ⭐ Master Terkunci)</span>
-            </div>
-            <a href="javascript:void(0)" id="link-open-vault-from-copilot-kb" class="copilot-kb-btn">
-              Kelola<br>Gudang
-            </a>
-          </div>
-
-          <p class="copilot-desc">
-            Ketik jenis surat apa pun yang ingin Anda buat dalam kalimat bebas. AI akan otomatis merangkai isi dokumen dan menampilkannya langsung di lembar kerja Word Anda.
-          </p>
-
-          <!-- CHIPS TEMPLATE CEPAT (GRID 2 KOLOM) -->
-          <div class="copilot-chips">
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Undangan Rapat Dinas Pleno Dewan Guru membahas evaluasi pembelajaran (Kode UND)">
-              <span class="copilot-chip-icon" style="color: #16a34a;">${ICON_MAIL}</span><span>Undangan Rapat (UND)</span>
-            </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat dari Tata Usaha (TU) tentang pemberitahuan pengumpulan berkas administrasi kelas (Kode TU)">
-              <span class="copilot-chip-icon" style="color: #d97706;">${ICON_FOLDER}</span><span>Surat Tata Usaha (TU)</span>
-            </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keputusan Kepala Sekolah tentang penetapan panitia kegiatan sekolah (Kode KEP)">
-              <span class="copilot-chip-icon" style="color: #0284c7;">${ICON_BUILDING}</span><span>SK Kepala Sekolah (KEP)</span>
-            </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Keterangan Siswa Aktif untuk keperluan beasiswa kuliah (Kode KET)">
-              <span class="copilot-chip-icon" style="color: #0f766e;">${ICON_ID_CARD}</span><span>Ket. Siswa Aktif (KET)</span>
-            </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Tugas Guru SMK IT Al-Hawari beserta lampiran SPPD 8 poin dan halaman Keterangan perjalanan dinas (Kode ST)">
-              <span class="copilot-chip-icon" style="color: #b45309;">${ICON_BRIEFCASE}</span><span>Surat Tugas + SPPD</span>
-            </button>
-            <button type="button" class="copilot-chip" data-prompt="Buatkan Surat Panggilan Orang Tua/Wali Siswa terkait pembinaan kedisiplinan siswa (Kode PGL)">
-              <span class="copilot-chip-icon" style="color: #334155;">${ICON_USERS}</span><span>Panggilan Ortu (PGL)</span>
-            </button>
-          </div>
-
-          <div class="form-group" style="margin-top: 4px;">
-            <label class="copilot-prompt-label">${ICON_PENCIL_NOTE} <span>Perintah Pembuatan Baru atau Instruksi Edit Surat Terbuka</span></label>
-            <textarea id="copilot-prompt-input" class="form-control" rows="4" spellcheck="false"
-              placeholder="Ketik instruksi edit untuk surat yang sedang terbuka (misal: Tambahkan baris Waktu: 09.00 WIB, ganti nama siswa, perbaiki kalimat...) ATAU perintah buat surat baru..."></textarea>
-          </div>
-
-          <div style="display: flex; flex-direction: column; gap: 7px;">
-            <button type="button" id="btn-edit-open-copilot" class="btn copilot-primary-cta" title="Terapkan penambahan data, koreksi, atau perbaikan kata pada surat yang sedang terbuka di lembar kerja (bukan buat dari awal)">
-              ${ICON_PENCIL_NOTE} <span>Edit / Tambah pada Surat Terbuka</span>
-            </button>
-            <button type="button" id="btn-run-copilot" class="btn copilot-secondary-cta" title="Buat surat baru dari awal sesuai perintah">
-              ${ICON_DOC} <span>Buat Surat Baru dari Awal</span>
-            </button>
-          </div>
-
-          <div id="copilot-status" class="copilot-status-area hidden">
-            <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
-              <div class="spinner" style="width: 16px; height: 16px; margin: 0; border-width: 2px;"></div>
-              <span id="copilot-status-text" style="font-weight: 600;">AI sedang merangkai surat...</span>
-              <button id="btn-cancel-copilot" type="button" class="btn btn-sm btn-secondary" style="padding: 1px 8px; font-size: 11px; margin-left: 4px; height: 22px; border-color: #cbd5e1;">Batal</button>
-            </div>
-            <div id="copilot-status-tip" style="margin-top: 6px; font-size: 11px; color: #475569; display: none;">
-              Tips: Jika Gemini terasa lambat di jam sibuk, Anda dapat memilih <b>Groq (~0.2 detik)</b> di dropdown atas.
-            </div>
-          </div>
-
-          <hr style="margin: 14px 0; border-color: #e2e8f0;"/>
-          <h5 class="copilot-quick-title">${ICON_SPARKLE} <span>Aksi Cepat AI Copilot:</span></h5>
-          <div class="btn-group-vertical" style="display: flex; flex-direction: column; gap: 6px;">
-            <button type="button" id="btn-copilot-polish-messy" class="copilot-quick-btn copilot-quick-btn-polish">
-              <span style="color: #15803d; display: inline-flex;">${ICON_SPARKLE}</span> <span>Rapihkan Dokumen yang Berantakan (AI)</span>
-            </button>
-            <button type="button" id="btn-copilot-formalize" class="copilot-quick-btn">
-              <span style="color: #475569; display: inline-flex;">${ICON_OPEN_BOOK}</span> <span>Rapikan Bahasa ke Standar Dinas Baku (PUEBI)</span>
-            </button>
-            <button type="button" id="btn-copilot-today-date" class="copilot-quick-btn">
-              <span style="color: #475569; display: inline-flex;">${ICON_CALENDAR}</span> <span>Perbarui Tanggal Surat ke Hari Ini</span>
-            </button>
-          </div>
-        </div>
-      </aside>
+      <!-- 5. PANEL AI COPILOT PERCAKAPAN MULTI-TURN (TERHUBUNG DENGAN AI ASISTEN) -->
+      <aside class="copilot-drawer ${isCopilotOpen ? '' : 'hidden'}" id="copilot-drawer"></aside>
       </div> <!-- /.word-main-stage -->
 
       <!-- 6. MODAL KONFIRMASI CATAT SURAT KELUAR (ARSIP TETAP TERKUNCI & NOMOR BERURUTAN) -->
@@ -968,8 +933,11 @@ export function renderWordCanvas(container) {
             <button type="button" id="btn-close-outgoing-modal" class="btn btn-sm btn-secondary">&times;</button>
           </div>
           <div class="modal-body" style="padding: 14px 0;">
-            <div style="background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 10px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 14px;">
+            <div style="background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 10px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 12px;">
               <strong>🔒 Perhatian:</strong> Surat yang dicatat ke <b>Surat Keluar</b> akan <b>terkunci permanen (tidak bisa diedit lagi)</b> dan dicatat dengan nomor urut tersusun di Buku Catatan Surat Keluar.
+            </div>
+            <div id="word-out-scan-bar-slot">
+              ${buildMetaAutoScanBarHtml()}
             </div>
             <div class="form-group" style="margin-bottom: 10px;">
               <label style="font-size: 12px; font-weight: 700;">Nomor Urut &amp; Nomor Surat Tersusun Otomatis:</label>
@@ -985,23 +953,31 @@ export function renderWordCanvas(container) {
               </div>
             </div>
             <div class="form-group" style="margin-bottom: 10px;">
-              <label style="font-size: 12px; font-weight: 700;">Judul Surat:</label>
-              <input type="text" id="input-out-title" class="form-control" placeholder="Misal: SURAT KETERANGAN SISWA AKTIF">
+              <label style="font-size: 12px; font-weight: 700;">Judul Surat (Terformat Otomatis):</label>
+              <input type="text" id="input-out-title" class="form-control" placeholder="Jenis Surat — Nama Penerima — Keperluan (Tanggal)">
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 165px; gap: 8px; margin-bottom: 10px;">
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 12px; font-weight: 700;">Atas Nama / Tujuan Penerima:</label>
+                <input type="text" id="input-out-recipient" class="form-control" placeholder="Nama siswa, guru, atau instansi...">
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 12px; font-weight: 700;">Tanggal Surat:</label>
+                <input type="text" id="input-out-date" class="form-control" placeholder="23 November 2026">
+              </div>
             </div>
             <div class="form-group" style="margin-bottom: 10px;">
-              <label style="font-size: 12px; font-weight: 700;">Atas Nama / Tujuan Penerima:</label>
-              <input type="text" id="input-out-recipient" class="form-control" placeholder="Nama siswa, guru, atau instansi penerima surat...">
+              <label style="font-size: 12px; font-weight: 700;">Keperluan / Perihal Surat:</label>
+              <input type="text" id="input-out-perihal" class="form-control" placeholder="Perihal atau keperluan kegiatan...">
             </div>
-            <div class="form-group" style="margin-bottom: 10px;">
-              <label style="font-size: 12px; font-weight: 700;">Perihal / Keterangan Singkat:</label>
-              <input type="text" id="input-out-perihal" class="form-control" placeholder="Perihal surat...">
+            <div id="word-outgoing-signer-slot">
+              ${buildSignerRoleSelectorHtml({
+                radioName: 'out-signer-role',
+                checkboxId: 'chk-out-authorize-sah',
+                defaultRole: doc?.verification?.signerRole || 'kepala_sekolah',
+                school: effectiveDocSchool
+              })}
             </div>
-            ${buildSignerRoleSelectorHtml({
-              radioName: 'out-signer-role',
-              checkboxId: 'chk-out-authorize-sah',
-              defaultRole: doc?.verification?.signerRole || 'kepala_sekolah',
-              school: state.schoolProfile
-            })}
           </div>
           <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
             <button type="button" id="btn-cancel-record-outgoing" class="btn btn-secondary">Batal</button>
@@ -1968,7 +1944,14 @@ function bindDocSettingsModal(container) {
       const fontFamily = modal.querySelector('#modal-set-font-family').value;
       const fontSize = modal.querySelector('#modal-set-font-size').value;
       const lineSpacing = modal.querySelector('#modal-set-line-spacing').value;
+      const paragraphSpacing = modal.querySelector('#modal-set-para-spacing')?.value || '6';
       const showKop = modal.querySelector('#modal-set-show-kop').checked;
+      const pageNumbering = {
+        enabled: Boolean(modal.querySelector('#modal-set-pn-enabled')?.checked),
+        position: modal.querySelector('#modal-set-pn-pos')?.value || 'bottom-center',
+        format: modal.querySelector('#modal-set-pn-fmt')?.value || 'decimal',
+        startAt: Math.max(1, parseInt(modal.querySelector('#modal-set-pn-start')?.value || '1', 10) || 1)
+      };
 
       store.updateLetterOptions({
         paperSize,
@@ -1977,11 +1960,14 @@ function bindDocSettingsModal(container) {
         fontFamily,
         fontSize,
         lineSpacing,
+        paragraphSpacing,
+        pageNumbering,
         showKop
       });
+      syncGlobalPrintPageStyle(store.getLetterOptions());
 
       closeModal();
-      showToast('✓ Pengaturan format & tata letak dokumen berhasil diterapkan!', 'success');
+      showToast('✓ Pengaturan format, tipografi & nomor halaman berhasil diterapkan!', 'success');
       renderWordCanvas(container);
     });
   }
@@ -2095,24 +2081,40 @@ function bindCopilotDrawer(container) {
       );
 
       if (hasExistingContent) {
-        const indexObj = buildSurgicalIndexFromDocModel(currentDocModel);
+        const curOpts = normalizePageSetupOptions(store.getLetterOptions());
+        const indexObj = buildSurgicalIndexFromDocModel(currentDocModel, { letterOptions: curOpts });
+        const effectiveDocSchool = store.getEffectiveSchoolForDocument(currentDocModel);
+        const explicitSwitchUnit = detectTargetUnitFromText(cleanInstruction, null);
         const editedData = await editDocumentWithAi(indexObj.snapshot, cleanInstruction, {
-          schoolProfile: store.getSchoolProfile(),
+          schoolProfile: effectiveDocSchool,
           preferredApiId: selectedApiId,
           allowLayoutRestructure,
           signal: copilotAbortController.signal
         });
 
-        const patchResult = applySurgicalPatchesToDocModel(currentDocModel, editedData, { allowLayoutRestructure });
+        const patchResult = applySurgicalPatchesToDocModel(currentDocModel, editedData, {
+          allowLayoutRestructure,
+          letterOptions: curOpts
+        });
+        if (patchResult.pageSetupUpdates) {
+          store.updateLetterOptions(patchResult.pageSetupUpdates);
+          syncGlobalPrintPageStyle(store.getLetterOptions());
+        }
         if (patchResult.mode === 'restructure_needed') {
           const fallbackSnap = extractCanvasSnapshot(container);
-          applyEditedResultToCanvas(container, editedData, fallbackSnap);
+          applyEditedResultToCanvas(container, { ...editedData, ...(explicitSwitchUnit ? { _targetUnitId: explicitSwitchUnit } : {}) }, fallbackSnap);
         } else {
-          const patchedDoc = {
+          let patchedDoc = {
             ...patchResult.docModel,
             ...(state.document?.verification ? { verification: state.document.verification } : {}),
             ...(state.document?.qrPlacement ? { qrPlacement: state.document.qrPlacement } : {})
           };
+          if (explicitSwitchUnit) {
+            patchedDoc = adaptDocumentModelForUnit(patchedDoc, explicitSwitchUnit, {
+              activeSchoolProfile: state.schoolProfile,
+              kopGallery: state.kopGallery || []
+            });
+          }
           store.clearActiveUploadedDocx();
           store.setState({ document: patchedDoc, docxViewMode: 'canvas' }, true);
           renderWordCanvas(container);
@@ -2125,14 +2127,18 @@ function bindCopilotDrawer(container) {
         showToast(`✓ ${changeNote}`, 'success');
       } else {
         const currentSnapshot = extractCanvasSnapshot(container);
+        const explicitTargetUnit = detectTargetUnitFromText(cleanInstruction, null);
+        const targetQuickSchool = explicitTargetUnit
+          ? resolveSchoolProfileForUnit(explicitTargetUnit, state.schoolProfile, state.kopGallery || [])
+          : store.getEffectiveSchoolForDocument();
         const editedData = await editDocumentWithAi(currentSnapshot, cleanInstruction, {
-          schoolProfile: store.getSchoolProfile(),
+          schoolProfile: targetQuickSchool,
           preferredApiId: selectedApiId,
           allowLayoutRestructure,
           signal: copilotAbortController.signal
         });
 
-        applyEditedResultToCanvas(container, editedData, currentSnapshot);
+        applyEditedResultToCanvas(container, { ...editedData, ...(explicitTargetUnit ? { _targetUnitId: explicitTargetUnit } : {}) }, currentSnapshot);
         const changeNote = editedData.summaryOfChanges || 'Instruksi penambahan/perbaikan berhasil diterapkan!';
         showToast(`✓ ${changeNote}`, 'success');
       }
@@ -2158,8 +2164,10 @@ function bindCopilotDrawer(container) {
       executePromptEditOnOpenDoc(quickEditInput.value, true);
     });
     quickEditInput.addEventListener('keydown', (e) => {
+      if (e.isComposing) return;
       if (e.key === 'Enter') {
         e.preventDefault();
+        e.stopPropagation();
         executePromptEditOnOpenDoc(quickEditInput.value, true);
       }
     });
@@ -2242,152 +2250,119 @@ function bindCopilotDrawer(container) {
     }
   }
 
-  // Tombol Batal
-  if (btnCancel) {
-    btnCancel.addEventListener('click', () => {
-      if (copilotAbortController) {
-        copilotAbortController.abort();
-        copilotAbortController = null;
-        showToast('Pembuatan surat dibatalkan.', 'info');
-      }
-    });
-  }
-
-  // Shortcut ke tab pengaturan gudang API
-  linkVault.addEventListener('click', () => {
-    const settingsTabBtn = document.querySelector('.nav-tab[data-tab="settings"]');
-    if (settingsTabBtn) settingsTabBtn.click();
-  });
-
-  // Chips click
-  container.querySelectorAll('.copilot-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      promptInput.value = chip.dataset.prompt;
-      promptInput.focus();
-    });
-  });
-
-  // Jalankan AI Copilot
-  btnRun.addEventListener('click', async () => {
-    const userPrompt = promptInput.value.trim();
-    if (!userPrompt) {
-      showToast('Ketik perintah pembuatan surat terlebih dahulu.', 'warning');
-      return;
-    }
-
-    const selectedApiId = modelSelect.value;
-    const vault = store.getApiVault();
-    const activeEntry = vault.find(v => v.id === selectedApiId) || store.getActiveApi();
-    const modelLabel = activeEntry?.label || activeEntry?.model || 'AI';
-
-    copilotAbortController = new AbortController();
-    btnRun.disabled = true;
-    statusArea.classList.remove('hidden');
-    if (statusTip) statusTip.style.display = 'none';
-
-    let elapsed = 0;
-    statusText.textContent = `Menghubungkan ke ${modelLabel}... (0d)`;
-
-    const timerInterval = setInterval(() => {
-      elapsed++;
-      statusText.textContent = `Merangkai draf dokumen (${modelLabel})... (${elapsed}d)`;
-      if (elapsed >= 4 && statusTip) {
-        statusTip.style.display = 'block';
-      }
-    }, 1000);
-
-    try {
-      const { callAiWithValidation } = await import('../ai/client.js');
-      const { COPILOT_SYSTEM_PROMPT, buildCopilotUserPrompt } = await import('../ai/prompts.js');
-
-      const state = store.getState();
-      const kbSelection = store.getSmartAiReferencesForPrompt(userPrompt, 3);
-      const prompt = buildCopilotUserPrompt({
-        userPrompt,
-        schoolName: state.schoolProfile?.schoolName,
-        principalName: state.schoolProfile?.principalName,
-        dateStr: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-        references: kbSelection.references,
-        matchMode: kbSelection.matchMode,
-        totalKnowledgeCount: kbSelection.totalKnowledgeCount
-      });
-
-      const aiResult = await callAiWithValidation({
-        prompt,
-        systemPrompt: COPILOT_SYSTEM_PROMPT,
-        preferredApiId: selectedApiId,
-        signal: copilotAbortController.signal,
-        validator: (data) => {
-          if (!data || !data.letterTitle || !Array.isArray(data.blocks)) {
-            return { valid: false, errors: ['Output AI harus menyertakan letterTitle dan blocks'] };
-          }
-          return { valid: true, errors: [] };
+  // Pasang Antarmuka AI Copilot Percakapan Multi-Turn gaya ChatGPT yang sinkron dengan Tab AI Asisten
+  const copilotDrawerEl = container.querySelector('#copilot-drawer');
+  if (copilotDrawerEl) {
+    mountCompactChatDrawer(copilotDrawerEl, {
+      editorKind: 'canvas',
+      title: 'AI Copilot Surat Sekolah',
+      getSnapshot: () => {
+        const hasDomCanvas = Boolean(container.querySelector('#editable-doc-title') || container.querySelector('#sheet-dynamic-blocks'));
+        const curDoc = hasDomCanvas ? buildModelFromCanvas(container) : store.getState().document;
+        const hasExisting = curDoc && !curDoc.isBlankDraft && (curDoc.blocks || []).some(
+          b => b && (b.type === 'table' || b.type === 'identityTable' || b.type === 'list' || (b.type === 'paragraph' && String(b.text || b.runs?.map(r => r.text).join('') || '').trim()))
+        );
+        if (!hasExisting) return null;
+        return buildSurgicalIndexFromDocModel(curDoc, { letterOptions: store.getLetterOptions() }).snapshot;
+      },
+      onApplyCreateDraft: (draft, unitCtx = {}) => {
+        const prevDoc = store.getState().document ? JSON.parse(JSON.stringify(store.getState().document)) : null;
+        const prevOpts = store.getLetterOptions();
+        const mergedDraft = {
+          ...draft,
+          ...(unitCtx.targetUnitId && !draft?._targetUnitId ? { _targetUnitId: unitCtx.targetUnitId } : {}),
+          ...(unitCtx.schoolProfile && !draft?._targetSchoolProfile ? { _targetSchoolProfile: unitCtx.schoolProfile } : {})
+        };
+        store.setActiveVaultId(null, 'standard');
+        store.clearActiveUploadedDocx();
+        if (!container.querySelector('#editable-doc-title') || !container.querySelector('#sheet-dynamic-blocks')) {
+          store.setState({ docxViewMode: 'canvas' }, false);
+          renderWordCanvas(container);
         }
-      });
-
-      // Terapkan hasil AI langsung ke lembar kerja Word sebagai dokumen baru!
-      store.setActiveVaultId(null, 'standard');
-      applyAiResultToCanvas(container, aiResult);
-      updateWordVaultBadge(container);
-      showToast(describeAiMatchFeedback(kbSelection), 'success');
-
-    } catch (err) {
-      if (copilotAbortController?.signal?.aborted || err.message.includes('dibatalkan')) {
-        // Abaikan atau telah dihandle toast pembatalan
-      } else {
-        showToast(`Gagal membuat surat: ${err.message}`, 'error');
+        applyAiResultToCanvas(container, mergedDraft);
+        updateWordVaultBadge(container);
+        return {
+          changes: [{ targetLabel: 'Surat Baru', before: '-', after: draft?.letterTitle || 'Draf diterapkan ke Lembar Kerja' }],
+          undoBackup: { workspace: 'canvas', prevDocument: prevDoc, prevOpts }
+        };
+      },
+      onApplySurgicalEdit: (editPlan, userInstruction, unitCtx = {}) => {
+        const stateNow = store.getState();
+        const hasDomCanvas = Boolean(container.querySelector('#editable-doc-title') || container.querySelector('#sheet-dynamic-blocks'));
+        const curDoc = hasDomCanvas ? buildModelFromCanvas(container) : JSON.parse(JSON.stringify(stateNow.document || buildModelFromCanvas(container)));
+        const prevDoc = JSON.parse(JSON.stringify(curDoc));
+        const prevOpts = store.getLetterOptions();
+        const allowLayoutRestructure = shouldAllowLayoutRestructure(userInstruction || '');
+        const explicitSwitchUnit = detectTargetUnitFromText(userInstruction || '', null);
+        const targetUnit = explicitSwitchUnit || unitCtx.targetUnitId || curDoc?.targetUnitId || '';
+        const patchResult = applySurgicalPatchesToDocModel(curDoc, editPlan, {
+          allowLayoutRestructure,
+          letterOptions: prevOpts
+        });
+        if (patchResult.pageSetupUpdates) {
+          store.updateLetterOptions(patchResult.pageSetupUpdates);
+          syncGlobalPrintPageStyle(store.getLetterOptions());
+        }
+        if (patchResult.mode === 'restructure_needed') {
+          const fallbackSnap = extractCanvasSnapshot(container);
+          applyEditedResultToCanvas(container, { ...editPlan, ...(targetUnit ? { _targetUnitId: targetUnit } : {}) }, fallbackSnap);
+        } else {
+          let patchedDoc = {
+            ...patchResult.docModel,
+            ...(stateNow.document?.verification ? { verification: stateNow.document.verification } : {}),
+            ...(stateNow.document?.qrPlacement ? { qrPlacement: stateNow.document.qrPlacement } : {})
+          };
+          if (explicitSwitchUnit) {
+            patchedDoc = adaptDocumentModelForUnit(patchedDoc, explicitSwitchUnit, {
+              activeSchoolProfile: stateNow.schoolProfile,
+              kopGallery: stateNow.kopGallery || []
+            });
+          }
+          store.clearActiveUploadedDocx();
+          store.setState({ document: patchedDoc, docxViewMode: 'canvas' }, true);
+          renderWordCanvas(container);
+        }
+        return {
+          changes: patchResult.changes || [],
+          undoBackup: { workspace: 'canvas', prevDocument: prevDoc, prevOpts }
+        };
+      },
+      onUndoAction: (backup) => {
+        if (backup?.prevOpts) {
+          store.updateLetterOptions(backup.prevOpts);
+          syncGlobalPrintPageStyle(store.getLetterOptions());
+        }
+        if (backup?.prevDocument) {
+          store.setState({ document: backup.prevDocument, docxViewMode: 'canvas' }, true);
+          renderWordCanvas(container);
+        }
+      },
+      onQuickAction: (act) => {
+        if (act === 'polish') {
+          triggerAiDocumentPolishing(container);
+        } else if (act === 'puebi') {
+          executePromptEditOnOpenDoc('Perbaiki seluruh kata, imbuhan, tanda baca, dan kalimat surat ini ke standar resmi kedinasan PUEBI tanpa mengubah substansi maupun rincian tabel.', true);
+        } else if (act === 'today') {
+          const sigDateEl = container.querySelector('#editable-sig-date');
+          if (sigDateEl) {
+            const city = store.getState().schoolProfile?.city || 'Garut';
+            const todayFormatted = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+            sigDateEl.innerText = `${city}, ${todayFormatted}`;
+            showToast('Tanggal surat diperbarui ke hari ini.', 'success');
+            scheduleSync(container);
+          }
+        }
+      },
+      onClose: () => {
+        copilotDrawerEl.classList.add('hidden');
+        isCopilotOpenState = false;
+        container.querySelector('#btn-toggle-copilot')?.classList.remove('active');
+      },
+      onOpenVault: () => {
+        document.querySelector('.nav-tab[data-tab="vault"]')?.click();
       }
-    } finally {
-      clearInterval(timerInterval);
-      copilotAbortController = null;
-      btnRun.disabled = false;
-      statusArea.classList.add('hidden');
-    }
-  });
-
-  // Aksi Rapihkan Dokumen yang Berantakan (AI Polisher)
-  const btnCopilotPolish = container.querySelector('#btn-copilot-polish-messy');
-  if (btnCopilotPolish) {
-    btnCopilotPolish.addEventListener('click', () => {
-      triggerAiDocumentPolishing(container);
     });
   }
-
-  // Aksi Rapikan Bahasa (PUEBI)
-  container.querySelector('#btn-copilot-formalize').addEventListener('click', async () => {
-    const currentDoc = buildModelFromCanvas(container);
-    const selectedApiId = modelSelect.value;
-    showToast('AI sedang menyempurnakan redaksi bahasa dinas (PUEBI)...', 'info');
-    try {
-      const { callAiApi, cleanJsonOutput } = await import('../ai/client.js');
-      const raw = await callAiApi({
-        prompt: `Rapikan redaksi kalimat dari surat dinas berikut agar menggunakan tata bahasa baku, resmi, sopan, dan sesuai PUEBI tanpa merubah fakta, nama, atau tanggal:\n${JSON.stringify(currentDoc.blocks)}`,
-        systemPrompt: 'Kembalikan format JSON array blocks yang telah disempurnakan redaksinya.',
-        preferredApiId: selectedApiId
-      });
-      const parsed = JSON.parse(cleanJsonOutput(raw));
-      if (Array.isArray(parsed)) {
-        currentDoc.blocks = parsed;
-        store.setState({ document: currentDoc }, true);
-        renderWordCanvas(container);
-        showToast('Redaksi surat telah dirapikan.', 'success');
-      }
-    } catch (err) {
-      showToast(`Gagal merapikan bahasa: ${err.message}`, 'error');
-    }
-  });
-
-  // Aksi Perbarui Tanggal ke Hari Ini
-  container.querySelector('#btn-copilot-today-date').addEventListener('click', () => {
-    const sigDateEl = container.querySelector('#editable-sig-date');
-    if (sigDateEl) {
-      const city = store.getState().schoolProfile?.city || 'Garut';
-      const todayFormatted = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
-      sigDateEl.innerText = `${city}, ${todayFormatted}`;
-      showToast('Tanggal surat diperbarui ke hari ini.', 'success');
-      scheduleSync(container);
-    }
-  });
 }
 
 function applyNewMargins(container, margins) {
@@ -2490,7 +2465,8 @@ function bindCanvasLiveEditing(container) {
         const updatedNomor = formatSmartNomorSurat({
           rawNomor: currentNomor,
           forcedTypeCode: selectedCode,
-          sequenceNumber: store.getNextOutgoingSequence()
+          sequenceNumber: store.getNextOutgoingSequence(),
+          schoolCode: getSchoolCodeFromProfile(store.getSchoolProfile())
         });
         nomorEl.innerText = `Nomor: ${updatedNomor}`;
         showToast(`Kode nomor surat diubah ke ${selectedCode} (${updatedNomor})`, 'success');
@@ -2764,16 +2740,42 @@ function buildIdentityRowHtml(r = {}, colWidthsPct = null) {
  * Merender daftar blok dinamis untuk dokumen standar / hasil konversi / AI
  * Otomatis menyaring paragraf kosong bawaan agar tidak menimbulkan jarak renggang
  */
+function buildListBlockHtml(b = {}) {
+  const spec = getListStyleSpec(b.listStyle, b.ordered !== false);
+  const startNum = Math.max(1, parseInt(b.startAt || 1, 10) || 1);
+  const typeAttr = spec.htmlType ? ` type="${spec.htmlType}"` : '';
+  const startAttr = spec.htmlTag === 'ol' && startNum > 1 ? ` start="${startNum}"` : '';
+  const liHtml = (b.items || []).map((item) => {
+    const txt = typeof item === 'string'
+      ? item
+      : (Array.isArray(item) ? item.map(r => r.text || '').join('') : String(item?.text ?? ''));
+    return `<li>${preserveSpacesHtml(txt)}</li>`;
+  }).join('');
+
+  return `
+    <div class="canvas-block-item sheet-list-wrapper" data-block-type="list">
+      <div class="block-hover-tools no-print">
+        <button type="button" class="btn-block-tool" data-block-action="add-para-above" title="Tambah area teks di atas">+ Teks Atas</button>
+        <button type="button" class="btn-block-tool" data-block-action="add-para-below" title="Tambah area teks di bawah">+ Teks Bawah</button>
+        <button type="button" class="btn-block-tool btn-block-del" data-block-action="delete-block" title="Hapus daftar ini">✕ Hapus</button>
+      </div>
+      <${spec.htmlTag} contenteditable="true" class="editable-field word-dynamic-list" data-list-style="${spec.key}"${typeAttr}${startAttr} style="list-style-type: ${spec.cssType};" spellcheck="false">${liHtml || '<li>Poin pertama</li>'}</${spec.htmlTag}>
+    </div>
+  `;
+}
+
 function renderDynamicStandardBlocksHtml(doc) {
   const rawBlocks = Array.isArray(doc?.blocks) ? doc.blocks : [];
   const bodyItems = rawBlocks.filter(b =>
-    b.type === 'paragraph' || b.type === 'identityTable' || b.type === 'table' || b.type === 'pageBreak'
+    b.type === 'paragraph' || b.type === 'list' || b.type === 'identityTable' || b.type === 'table' || b.type === 'pageBreak'
   );
 
   const htmlParts = [];
   for (const b of bodyItems) {
     if (b.type === 'pageBreak') {
       htmlParts.push(buildPageBreakBlockHtml());
+    } else if (b.type === 'list') {
+      htmlParts.push(buildListBlockHtml(b));
     } else if (b.type === 'paragraph') {
       const text = (b.runs ? b.runs.map(r => r.text).join('') : (b.text || ''));
       if (!text.trim()) continue; // Abaikan kotak kosong bawaan supaya tidak ada celah jauh
@@ -2856,7 +2858,29 @@ function collectMergedDynamicItems(container) {
       items.push({ type: 'pageBreak' });
       continue;
     }
-    if (wrapper.classList.contains('paragraph-box-wrapper')) {
+    if (wrapper.classList.contains('sheet-list-wrapper')) {
+      const listEl = wrapper.querySelector('ol, ul');
+      if (listEl) {
+        const isOrdered = listEl.tagName.toLowerCase() === 'ol';
+        const rawType = listEl.getAttribute('data-list-style') || listEl.getAttribute('type') || '';
+        const listStyle = rawType === 'A'
+          ? 'upper-alpha'
+          : (rawType === 'I' ? 'upper-roman' : (rawType || (isOrdered ? 'decimal' : 'bullet')));
+        const startAt = Math.max(1, parseInt(listEl.getAttribute('start') || '1', 10) || 1);
+        const listItems = [...listEl.querySelectorAll('li')]
+          .map((li) => li.innerText.replace(/\u00a0/g, ' ').trim())
+          .filter(Boolean);
+        if (listItems.length > 0) {
+          items.push({
+            type: 'list',
+            ordered: listStyle !== 'bullet',
+            listStyle,
+            ...(startAt > 1 ? { startAt } : {}),
+            items: listItems
+          });
+        }
+      }
+    } else if (wrapper.classList.contains('paragraph-box-wrapper')) {
       const pBox = wrapper.querySelector('.paragraph-box');
       const rawText = pBox ? pBox.innerText.replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
       const text = rawText.trim() ? rawText : '';
@@ -3470,7 +3494,7 @@ function refreshWordFloatingQrOverlay(container) {
     verification,
     rawPlacement: doc.qrPlacement || null,
     docModel: doc,
-    school: st.schoolProfile || {},
+    school: store.getEffectiveSchoolForDocument(doc) || st.schoolProfile || {},
     getZoomScale: () => {
       const zPct = Number(container.querySelector('#input-zoom-slider')?.value || store.getState().zoomLevel || 100);
       return Math.max(0.4, zPct / 100);
@@ -3484,7 +3508,18 @@ function refreshWordFloatingQrOverlay(container) {
     }
   });
 
-  if (mounted && !doc.qrPlacement && verification?.isVerifiedSah) {
+  const prevQp = doc.qrPlacement;
+  const shouldSyncCalibrated = mounted && verification?.isVerifiedSah && (
+    !prevQp || (
+      !prevQp.customPositioned && (
+        mounted.pageIndex !== prevQp.pageIndex ||
+        Math.abs(mounted.xPct - prevQp.xPct) > 0.5 ||
+        Math.abs(mounted.yPct - prevQp.yPct) > 0.5 ||
+        mounted.sizePx !== prevQp.sizePx
+      )
+    )
+  );
+  if (shouldSyncCalibrated) {
     store.setActiveQrPlacement(mounted, 'standard');
   }
   updateCanvasQrToggleButton(toggleBtn, {
@@ -4237,7 +4272,16 @@ function buildModelFromCanvas(container) {
   const isSigVisible = Boolean(sigWrapperEl && !sigWrapperEl.classList.contains('hidden') && (sigDateStr || sigTitle || sigName || sigNip));
 
   const kopImgEl = container.querySelector('#sheet-kop-image');
-  const kopImageUrl = kopImgEl?.src || DEFAULT_KOP_DATA_URL;
+  const resolvedDocSchool = resolveDocumentSchoolProfile(
+    {
+      ...state.document,
+      nomorSurat: nomorText,
+      signerName: sigName
+    },
+    state.schoolProfile,
+    state.kopGallery || []
+  );
+  const kopImageUrl = kopImgEl?.src || resolvedDocSchool?.kopImage || DEFAULT_KOP_DATA_URL;
 
   // Twips conversion (1 cm ≈ 567 twips)
   const twipMargins = {
@@ -4253,6 +4297,7 @@ function buildModelFromCanvas(container) {
   if (showKop) {
     blocks.push({
       type: 'letterKop',
+      school: resolvedDocSchool,
       image: kopImageUrl,
       widthCm: 16.5,
       heightCm: 3.3
@@ -4287,6 +4332,15 @@ function buildModelFromCanvas(container) {
         text: item.text,
         runs: Array.isArray(item.runs) && item.runs.length > 0 ? item.runs : [{ text: item.text }]
       });
+    } else if (item.type === 'list') {
+      bodyBlocksAdded += 1;
+      blocks.push({
+        type: 'list',
+        ordered: item.ordered,
+        listStyle: item.listStyle,
+        ...(item.startAt > 1 ? { startAt: item.startAt } : {}),
+        items: item.items
+      });
     } else if (item.type === 'identityTable') {
       bodyBlocksAdded += 1;
       blocks.push({
@@ -4315,10 +4369,10 @@ function buildModelFromCanvas(container) {
   if (isSigVisible) {
     blocks.push({
       type: 'letterSignature',
-      city: sigDateStr.split(',')[0]?.trim() || state.schoolProfile?.city || 'Garut',
+      city: sigDateStr.split(',')[0]?.trim() || resolvedDocSchool?.city || state.schoolProfile?.city || 'Garut',
       date: sigDateStr.split(',')[1]?.trim() || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
       title: sigTitle || 'Kepala Sekolah',
-      name: sigName || state.schoolProfile?.principalName || 'Dian Nurhadian, S.Pd.',
+      name: sigName || resolvedDocSchool?.principalName || state.schoolProfile?.principalName || 'Dian Nurhamdani, S.Pd.',
       nip: sigNip
     });
   }
@@ -4333,19 +4387,32 @@ function buildModelFromCanvas(container) {
     });
   }
 
+  const normSetup = normalizePageSetupOptions(state.letterOptions || {});
+
   return {
+    targetUnitId: resolvedDocSchool?.unitId || state.schoolProfile?.unitId || 'smk',
     meta: {
       title: rawTitleText || titleText,
-      author: sigName || state.schoolProfile?.principalName || 'SMK IT Al-Hawari',
+      author: resolvedDocSchool?.schoolName || sigName || state.schoolProfile?.principalName || 'SMK IT Al-Hawari',
       year: new Date().getFullYear().toString()
     },
     profile: paperSize,
+    paperSize: normSetup.paperSize,
+    orientation: normSetup.orientation,
     customMargins: twipMargins,
+    fontFamily: normSetup.fontFamily,
+    fontSize: normSetup.fontSize,
+    lineSpacing: normSetup.lineSpacing,
+    paragraphSpacing: normSetup.paragraphSpacing,
+    pageNumbering: normSetup.pageNumbering,
+    pageSetup: normSetup,
     isBlankDraft: !hasAnyContent,
     ...(state.document?.verification ? { verification: state.document.verification } : {}),
     letterData: {
+      schoolProfile: resolvedDocSchool,
       kopImage: kopImageUrl,
-      metaRecipientDeleted: metaRecipientData.isDeleted
+      metaRecipientDeleted: metaRecipientData.isDeleted,
+      options: normSetup
     },
     blocks
   };
@@ -4396,24 +4463,47 @@ function buildMetaRecipientInnerHtml(metaRows = [], recipientLines = []) {
  * Memasukkan hasil AI Copilot langsung ke lembar kerja Word secara dinamis (tanpa meninggalkan kotak kosong)
  */
 function applyAiResultToCanvas(container, aiResult) {
+  const stForUnit = store.getState();
+  const baseSchool = stForUnit.schoolProfile;
+  const aiUnitId = aiResult?._targetUnitId
+    || aiResult?.targetUnit
+    || detectTargetUnitFromText(`${aiResult?.letterTitle || ''} ${aiResult?.nomorSurat || ''} ${aiResult?.signer?.name || ''}`, null)
+    || baseSchool?.unitId
+    || 'smk';
+  const targetSchool = aiResult?._targetSchoolProfile
+    || resolveSchoolProfileForUnit(aiUnitId, baseSchool, stForUnit.kopGallery || []);
+
   if (aiResult?.templatePreset === 'surat_tugas_sppd') {
-    const stNow = store.getState();
     const optsNow = store.getLetterOptions();
     const sppdDoc = buildSuratTugasSppdDocModel(
       aiResult.formData || aiResult,
-      stNow.schoolProfile,
+      targetSchool,
       { ...optsNow, paperSize: aiResult.paperSize || 'f4' }
     );
+    sppdDoc.targetUnitId = targetSchool.unitId;
     store.setState({
       smartDocument: {
         pages: [],
         pendingDocModel: sppdDoc,
+        targetUnitId: targetSchool.unitId,
+        schoolProfile: targetSchool,
         meta: sppdDoc.meta || { title: 'SURAT TUGAS & SPPD' }
       }
     }, false);
-    showToast('Paket Surat Tugas & SPPD (3 Halaman 1:1 Word) dibuka otomatis di Editor Word Pro!', 'success');
+    showToast(`Paket Surat Tugas & SPPD (${targetSchool.unitLabel || targetSchool.schoolName}) dibuka otomatis di Editor Word Pro!`, 'success');
     document.querySelector('.nav-tab[data-tab="smart-canvas"]')?.click();
     return;
+  }
+
+  const extractedSetup = extractPageSetupFromAiPayload(aiResult, store.getLetterOptions());
+  if (extractedSetup) {
+    store.updateLetterOptions(extractedSetup.partial);
+    syncGlobalPrintPageStyle(store.getLetterOptions());
+  }
+
+  const kopImgEl = container.querySelector('#sheet-kop-image');
+  if (kopImgEl && targetSchool?.kopImage) {
+    kopImgEl.src = targetSchool.kopImage;
   }
 
   const titleSectionEl = container.querySelector('.sheet-section-title');
@@ -4425,7 +4515,8 @@ function applyAiResultToCanvas(container, aiResult) {
     rawNomor: aiResult.nomorSurat || '',
     contextText: `${letterTitle} ${aiResult.hal || ''} ${aiResult.perihal || ''} ${aiResult.title || ''}`,
     forcedTypeCode: aiResult.kodeJenisSurat || '',
-    sequenceNumber: store.getNextOutgoingSequence()
+    sequenceNumber: store.getNextOutgoingSequence(),
+    schoolCode: getSchoolCodeFromProfile(targetSchool)
   });
 
   if (titleSectionEl) titleSectionEl.classList.remove('hidden');
@@ -4515,28 +4606,50 @@ function applyAiResultToCanvas(container, aiResult) {
     }
   }
 
-  // Update date & pastikan blok TTD terlihat serta terisi dari profil sekolah bila kanvas sebelumnya kosong
-  const schoolSig = store.getState().schoolProfile || {};
+  // Update date & pastikan blok TTD terlihat serta terisi dari profil sekolah target unit AI (SMP/SMK)
+  const schoolSig = targetSchool || store.getState().schoolProfile || {};
+  const aiSig = aiResult?.signer || {};
   const sigDateEl = container.querySelector('#editable-sig-date');
   const sigTitleEl = container.querySelector('#editable-sig-title');
   const sigNameEl = container.querySelector('#editable-sig-name');
   const sigNipEl = container.querySelector('#editable-sig-nip');
   if (sigWrapperEl) sigWrapperEl.classList.remove('hidden');
-  const dateText = aiResult.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
-  const cityText = schoolSig.city || 'Garut';
-  if (sigDateEl && (aiResult.tanggalSurat || !sigDateEl.innerText.trim())) {
+  const dateText = aiSig.date || aiResult.tanggalSurat || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+  const cityText = aiSig.city || schoolSig.city || 'Garut';
+  if (sigDateEl && (aiSig.date || aiResult.tanggalSurat || !sigDateEl.innerText.trim())) {
     sigDateEl.innerText = `${cityText}, ${dateText}`;
   }
-  if (sigTitleEl && !sigTitleEl.innerText.trim()) sigTitleEl.innerText = 'Kepala Sekolah,';
-  if (sigNameEl && !sigNameEl.innerText.trim()) sigNameEl.innerText = schoolSig.principalName || 'Dian Nurhadian, S.Pd.';
-  if (sigNipEl && !sigNipEl.innerText.trim()) {
-    sigNipEl.innerText = formatSignerNipLine(schoolSig.principalNip);
+  if (sigTitleEl) {
+    sigTitleEl.innerText = `${aiSig.title || schoolSig.principalTitle || 'Kepala Sekolah'},`;
+  }
+  if (sigNameEl) {
+    sigNameEl.innerText = aiSig.name || schoolSig.principalName || 'Dian Nurhamdani, S.Pd.';
+  }
+  if (sigNipEl) {
+    sigNipEl.innerText = formatSignerNipLine(aiSig.nip && aiSig.nip !== '-' ? aiSig.nip : schoolSig.principalNip);
   }
 
   container.querySelector('[data-canvas-insert="title"]')?.classList.add('hidden');
   container.querySelector('[data-canvas-insert="meta"]')?.classList.add('hidden');
   container.querySelector('[data-canvas-insert="sig"]')?.classList.add('hidden');
 
+  const syncedModel = buildModelFromCanvas(container);
+  syncedModel.targetUnitId = schoolSig.unitId || aiUnitId;
+  syncedModel.letterData = {
+    ...(syncedModel.letterData || {}),
+    schoolProfile: schoolSig,
+    kopImage: schoolSig.kopImage || syncedModel.letterData?.kopImage
+  };
+  const kopIdx = (syncedModel.blocks || []).findIndex(b => b.type === 'letterKop');
+  if (kopIdx >= 0) {
+    syncedModel.blocks[kopIdx] = {
+      ...syncedModel.blocks[kopIdx],
+      school: schoolSig,
+      image: schoolSig.kopImage || syncedModel.blocks[kopIdx].image
+    };
+  }
+  store.clearActiveUploadedDocx();
+  store.setState({ document: syncedModel, docxViewMode: 'canvas' }, true);
   scheduleSync(container);
   updateWordCount(container);
   reflowWordCanvasPagination(container);
@@ -4574,11 +4687,11 @@ function extractCanvasSnapshot(container) {
 
   const blocks = collectMergedDynamicItems(container);
 
-  const school = store.getSchoolProfile();
+  const school = store.getEffectiveSchoolForDocument();
   const todayId = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
   const sigDateStr = container.querySelector('#editable-sig-date')?.innerText.trim() || `${school.city || 'Garut'}, ${todayId}`;
   const sigTitle = container.querySelector('#editable-sig-title')?.innerText.trim().replace(/,$/, '') || 'Kepala Sekolah';
-  const sigName = container.querySelector('#editable-sig-name')?.innerText.trim() || school.principalName || 'Dian Nurhadian, S.Pd.';
+  const sigName = container.querySelector('#editable-sig-name')?.innerText.trim() || school.principalName || 'Dian Nurhamdani, S.Pd.';
   const sigNip = container.querySelector('#editable-sig-nip')?.innerText.trim() || (school.principalNip || '-');
 
   return {
@@ -4604,15 +4717,27 @@ function extractCanvasSnapshot(container) {
  */
 function applyEditedResultToCanvas(container, edited, prevSnapshot) {
   const state = store.getState();
-  const school = store.getSchoolProfile();
-  const opts = store.getLetterOptions();
+  const targetUnit = edited?._targetUnitId
+    || edited?.targetUnit
+    || detectTargetUnitFromText(`${edited?.letterTitle || ''} ${edited?.nomorSurat || ''} ${edited?.signer?.name || ''}`, null);
+  const school = targetUnit
+    ? resolveSchoolProfileForUnit(targetUnit, state.schoolProfile, state.kopGallery || [])
+    : store.getEffectiveSchoolForDocument();
+  const baseOpts = store.getLetterOptions();
+  const extractedSetup = extractPageSetupFromAiPayload(edited, baseOpts);
+  if (extractedSetup) {
+    store.updateLetterOptions(extractedSetup.partial);
+    syncGlobalPrintPageStyle(store.getLetterOptions());
+  }
+  const opts = extractedSetup ? extractedSetup.full : normalizePageSetupOptions(baseOpts);
 
   const finalTitle = (edited.letterTitle || prevSnapshot.letterTitle || 'SURAT DINAS').trim();
   const rawNomor = (edited.nomorSurat || prevSnapshot.nomorSurat || '').trim();
   const nextSeq = store.getNextOutgoingSequence();
+  const schoolCode = getSchoolCodeFromProfile(school);
   const smartNomor = edited.kodeJenisSurat
-    ? formatSmartNomorSurat({ rawNomor, forcedTypeCode: edited.kodeJenisSurat, sequenceNumber: nextSeq })
-    : (rawNomor.replace(/^Nomor:\s*/i, '') || formatSmartNomorSurat({ rawNomor, contextText: finalTitle, sequenceNumber: nextSeq }));
+    ? formatSmartNomorSurat({ rawNomor, forcedTypeCode: edited.kodeJenisSurat, sequenceNumber: nextSeq, schoolCode })
+    : (rawNomor.replace(/^Nomor:\s*/i, '') || formatSmartNomorSurat({ rawNomor, contextText: finalTitle, sequenceNumber: nextSeq, schoolCode }));
 
   const hideMeta = edited.hideMetaRecipient !== undefined ? Boolean(edited.hideMetaRecipient) : Boolean(prevSnapshot.hideMetaRecipient);
   const sifatVal = edited.sifat || prevSnapshot.sifat || 'Penting';
@@ -4640,7 +4765,7 @@ function applyEditedResultToCanvas(container, edited, prevSnapshot) {
     newBlocks.push({
       type: 'letterKop',
       school,
-      image: state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL
+      image: school?.kopImage || state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL
     });
   }
 
@@ -4675,11 +4800,20 @@ function applyEditedResultToCanvas(container, edited, prevSnapshot) {
     paperSize: opts.paperSize || 'a4',
     orientation: opts.orientation || 'portrait',
     customMargins: opts.margins,
+    fontFamily: opts.fontFamily,
+    fontSize: opts.fontSize,
+    lineSpacing: opts.lineSpacing,
+    paragraphSpacing: opts.paragraphSpacing,
+    pageNumbering: opts.pageNumbering,
+    pageSetup: opts,
     ...(state.document?.verification ? { verification: state.document.verification } : {}),
     ...(state.document?.qrPlacement ? { qrPlacement: state.document.qrPlacement } : {}),
+    targetUnitId: school?.unitId || state.schoolProfile?.unitId || 'smk',
     letterData: {
-      kopImage: state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL,
-      metaRecipientDeleted: hideMeta
+      schoolProfile: school,
+      kopImage: school?.kopImage || state.schoolProfile?.kopImage || DEFAULT_KOP_DATA_URL,
+      metaRecipientDeleted: hideMeta,
+      options: opts
     },
     blocks: newBlocks
   };
@@ -4714,9 +4848,15 @@ function bindRecordOutgoingModal(container) {
   const selectType = container.querySelector('#select-out-type-code');
   const inputTitle = container.querySelector('#input-out-title');
   const inputRecipient = container.querySelector('#input-out-recipient');
+  const inputDate = container.querySelector('#input-out-date');
   const inputPerihal = container.querySelector('#input-out-perihal');
+  let cleanupOutScan = null;
 
   const closeModal = (resetClearFlag = true) => {
+    if (typeof cleanupOutScan === 'function') {
+      cleanupOutScan();
+      cleanupOutScan = null;
+    }
     modal.classList.add('hidden');
     if (resetClearFlag) {
       container.__clearCanvasAfterOutgoing = false;
@@ -4818,11 +4958,13 @@ function bindRecordOutgoingModal(container) {
     const titleVal = inputTitle?.value || '';
     const perihalVal = inputPerihal?.value || '';
     const rawNomor = extractBestNomorRaw();
+    const docSchool = store.getEffectiveSchoolForDocument();
     currentSeqInfo = store.getNextFormattedOutgoingNomor({
       title: titleVal,
       perihal: perihalVal,
       currentNomor: rawNomor,
-      forcedTypeCode: forcedCode
+      forcedTypeCode: forcedCode,
+      schoolProfile: docSchool
     });
     if (seqBadge) seqBadge.textContent = `#${String(currentSeqInfo.sequenceNumber).padStart(3, '0')}`;
     if (inputNomor) inputNomor.value = currentSeqInfo.nomorSurat;
@@ -4830,12 +4972,70 @@ function bindRecordOutgoingModal(container) {
   };
 
   const openOutgoingModal = () => {
-    const titleText = extractBestTitle();
-    if (inputTitle) inputTitle.value = titleText;
-    if (inputPerihal) inputPerihal.value = extractBestPerihal(titleText);
-    if (inputRecipient) inputRecipient.value = extractBestRecipient();
+    const docSnapshot = getActiveSnapshotOrDomModel();
+    const docSchool = store.getEffectiveSchoolForDocument(docSnapshot);
+    const activeDocx = store.getState().activeUploadedDocx;
+    const rawTitle = extractBestTitle();
+    const rawPerihal = extractBestPerihal(rawTitle);
+    const rawRecipient = extractBestRecipient();
+    const sigDateText = container.querySelector('#editable-sig-date')?.innerText.trim() || '';
 
-    refreshNomorPreview('');
+    const smartMeta = extractDocumentMetadata({
+      docModel: docSnapshot,
+      uploadedDocx: activeDocx || null,
+      schoolProfile: docSchool,
+      fallbackTitle: rawTitle,
+      fallbackNomor: extractBestNomorRaw(),
+      fallbackDate: sigDateText,
+      fallbackPerihal: rawPerihal,
+      fallbackRecipient: rawRecipient
+    });
+
+    if (inputTitle) inputTitle.value = smartMeta.formattedTitle || rawTitle;
+    if (inputPerihal) inputPerihal.value = smartMeta.perihal || rawPerihal;
+    if (inputRecipient) inputRecipient.value = smartMeta.recipientName || rawRecipient;
+    if (inputDate) inputDate.value = smartMeta.tanggalSurat || sigDateText;
+
+    const signerSlot = modal.querySelector('#word-outgoing-signer-slot');
+    if (signerSlot) {
+      signerSlot.innerHTML = buildSignerRoleSelectorHtml({
+        radioName: 'out-signer-role',
+        checkboxId: 'chk-out-authorize-sah',
+        defaultRole: store.getState().document?.verification?.signerRole || 'kepala_sekolah',
+        school: docSchool
+      });
+      modal.querySelectorAll('input[name="out-signer-role"], #chk-out-authorize-sah').forEach(el => {
+        el.addEventListener('change', syncConfirmBtnLabel);
+      });
+    }
+
+    refreshNomorPreview(smartMeta.typeCode || '');
+    if (typeof cleanupOutScan === 'function') cleanupOutScan();
+    const scanSlot = modal.querySelector('#word-out-scan-bar-slot');
+    if (scanSlot) {
+      cleanupOutScan = wireMetaAutoScanBar({
+        rootEl: scanSlot.closest('.modal-body') || modal,
+        getContext: () => ({
+          docModel: getActiveSnapshotOrDomModel(),
+          uploadedDocx: store.getState().activeUploadedDocx || null,
+          schoolProfile: store.getEffectiveSchoolForDocument(),
+          fallbackTitle: extractBestTitle(),
+          fallbackNomor: extractBestNomorRaw(),
+          fallbackDate: container.querySelector('#editable-sig-date')?.innerText.trim() || ''
+        }),
+        fields: {
+          titleEl: inputTitle,
+          recipientEl: inputRecipient,
+          perihalEl: inputPerihal,
+          dateEl: inputDate,
+          typeSelectEl: selectType
+        },
+        autoAiOnOpen: true,
+        onMetaApplied: (m) => {
+          if (m?.typeCode) refreshNomorPreview(m.typeCode);
+        }
+      });
+    }
     modal.classList.remove('hidden');
   };
 
@@ -4856,15 +5056,29 @@ function bindRecordOutgoingModal(container) {
   }
 
   const buildEntryBase = (forcedCode = '', overrideSignerRole = '') => {
-    const title = (inputTitle?.value || '').trim() || extractBestTitle() || 'SURAT DINAS';
-    const perihal = (inputPerihal?.value || '').trim() || extractBestPerihal(title) || title;
-    const recipientName = (inputRecipient?.value || '').trim() || extractBestRecipient() || 'Umum / Tanpa Nama Penerima';
+    const docSnapshot = getActiveSnapshotOrDomModel();
+    const school = store.getEffectiveSchoolForDocument(docSnapshot);
+    const activeDocx = store.getState().activeUploadedDocx;
+    const autoMeta = extractDocumentMetadata({
+      docModel: docSnapshot,
+      uploadedDocx: activeDocx || null,
+      schoolProfile: school,
+      fallbackTitle: extractBestTitle(),
+      fallbackNomor: extractBestNomorRaw(),
+      fallbackDate: container.querySelector('#editable-sig-date')?.innerText.trim() || '',
+      fallbackPerihal: extractBestPerihal(''),
+      fallbackRecipient: extractBestRecipient()
+    });
+    const title = (inputTitle?.value || '').trim() || autoMeta.formattedTitle || 'SURAT DINAS';
+    const perihal = (inputPerihal?.value || '').trim() || autoMeta.perihal || title;
+    const recipientName = (inputRecipient?.value || '').trim() || autoMeta.recipientName || 'Umum';
     const rawNomor = extractBestNomorRaw();
     const seqInfo = currentSeqInfo || store.getNextFormattedOutgoingNomor({
       title,
       perihal,
       currentNomor: rawNomor,
-      forcedTypeCode: forcedCode
+      forcedTypeCode: forcedCode || autoMeta.typeCode,
+      schoolProfile: school
     });
 
     const officialNomor = (inputNomor?.value || '').trim() || seqInfo?.nomorSurat || '';
@@ -4873,9 +5087,6 @@ function bindRecordOutgoingModal(container) {
       nomorEl.innerText = `Nomor: ${officialNomor}`;
     }
 
-    const activeDocx = store.getState().activeUploadedDocx;
-    const school = store.getState().schoolProfile || {};
-    const docSnapshot = getActiveSnapshotOrDomModel();
     const curQrPlacement = store.getState().document?.qrPlacement;
     if (curQrPlacement && docSnapshot && !docSnapshot.qrPlacement) {
       docSnapshot.qrPlacement = JSON.parse(JSON.stringify(curQrPlacement));
@@ -4918,7 +5129,9 @@ function bindRecordOutgoingModal(container) {
         title,
         recipientName,
         perihal,
-        tanggalSurat: sigDateEl?.innerText.trim()
+        tanggalSurat: (inputDate?.value || '').trim()
+          || autoMeta.tanggalSurat
+          || sigDateEl?.innerText.trim()
           || (sigBlock ? `${sigBlock.city || 'Garut'}, ${sigBlock.date || ''}` : '')
           || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
         signerName: sigNameEl?.innerText.trim() || sigBlock?.name || 'Kepala Sekolah',
@@ -4935,7 +5148,7 @@ function bindRecordOutgoingModal(container) {
     const { entryBase } = buildEntryBase('', signerRole);
     return authorizeAndRecordOutgoing({
       entryBase,
-      school: store.getState().schoolProfile,
+      school: store.getEffectiveSchoolForDocument(entryBase.document),
       signerRole,
       authorizeSah: true,
       syncActiveDocMode: 'standard',
@@ -4948,7 +5161,7 @@ function bindRecordOutgoingModal(container) {
     const { entryBase } = buildEntryBase('', signerRole);
     return requestAccForOutgoing({
       entryBase,
-      school: store.getState().schoolProfile,
+      school: store.getEffectiveSchoolForDocument(entryBase.document),
       requestedSignerRole: signerRole,
       syncActiveDocMode: 'standard',
       clearAfterSave
@@ -4990,10 +5203,11 @@ function bindRecordOutgoingModal(container) {
 
       try {
         const { entryBase } = buildEntryBase('', authorizeSah ? selectedRole : '');
+        const effectiveEntrySchool = store.getEffectiveSchoolForDocument(entryBase.document);
         if (requiresAcc) {
           const { recorded } = await requestAccForOutgoing({
             entryBase,
-            school: stNow.schoolProfile,
+            school: effectiveEntrySchool,
             requestedSignerRole: selectedRole,
             syncActiveDocMode: 'standard',
             clearAfterSave: shouldClearAfterSave
@@ -5015,7 +5229,7 @@ function bindRecordOutgoingModal(container) {
 
         const { recorded, cloudResult } = await authorizeAndRecordOutgoing({
           entryBase,
-          school: stNow.schoolProfile,
+          school: effectiveEntrySchool,
           signerRole: selectedRole,
           authorizeSah,
           syncActiveDocMode: 'standard',
@@ -5067,7 +5281,7 @@ export function triggerWordCanvasPrintWithChoice(container) {
     const holder = container.querySelector('.sheet-signature-wrapper .sig-space-holder');
     const sheetEls = [...container.querySelectorAll('.word-paper-sheet')];
     const postPrintBar = container.querySelector('#post-print-outgoing-bar');
-    const school = store.getState().schoolProfile || {};
+    const school = store.getEffectiveSchoolForDocument(latestDoc);
     const v = overrideVerif || verification;
     const effectiveRole = overrideRole || v?.signerRole || 'kepala_sekolah';
     const latestDoc = store.getState().document;
@@ -5108,6 +5322,7 @@ export function triggerWordCanvasPrintWithChoice(container) {
     defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
     signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
     signerName: verification?.signerName || '',
+    school: store.getEffectiveSchoolForDocument(doc),
     onChooseQr: () => runPrint('qr', verification.qrDataUrl, verification?.signerRole || 'kepala_sekolah'),
     onChooseManual: () => runPrint('manual'),
     onAuthorizeAndQr: async (selectedRole) => {
@@ -5157,7 +5372,7 @@ export function triggerWordCanvasDownloadWithChoice(container) {
   const runDownload = async (mode, overrideVerif = null) => {
     const v = overrideVerif || verification;
     const rawModel = buildModelFromCanvas(container);
-    const school = store.getState().schoolProfile || {};
+    const school = store.getEffectiveSchoolForDocument(rawModel);
     const signerInfo = v ? buildSignerSelectionInfo(school, v.signerRole) : null;
     const finalModel = applySignatureModeToDocModel(rawModel, {
       mode,
@@ -5171,11 +5386,20 @@ export function triggerWordCanvasDownloadWithChoice(container) {
     showToast(`Menyusun berkas Word .docx (${mode === 'qr' ? 'dengan Barcode QR' : 'kosongan TTD manual'})...`, 'info');
     try {
       const blob = await renderDocx(finalModel, 'blob');
-      const safeTitle = (finalModel.meta?.title || 'surat_dinas')
-        .replace(/[^a-zA-Z0-9_\-]/g, '_')
-        .slice(0, 45);
-      downloadFile(blob, `${safeTitle}.docx`);
-      showToast('Berkas .docx berhasil diunduh.', 'success');
+      const dlMeta = extractDocumentMetadata({ docModel: finalModel, schoolProfile: school });
+      const fileName = buildDocumentDownloadFilename({
+        kind: v?.outgoingId ? 'outgoing' : 'vault',
+        sequenceNumber: v?.sequenceNumber || 0,
+        typeCode: dlMeta.typeCode,
+        title: dlMeta.formattedTitle,
+        perihal: dlMeta.perihal,
+        recipientName: dlMeta.recipientName,
+        tanggalSurat: dlMeta.tanggalSurat,
+        unitId: school?.unitId,
+        schoolProfile: school
+      });
+      downloadFile(blob, fileName);
+      showToast(`Berkas ${fileName} berhasil diunduh.`, 'success');
     } catch (err) {
       showToast(`Gagal mengunduh: ${err.message}`, 'error');
     }
@@ -5194,12 +5418,13 @@ export function triggerWordCanvasDownloadWithChoice(container) {
     defaultSignerRole: verification?.signerRole || 'kepala_sekolah',
     signerLabel: verification?.roleLabel || verification?.signerTitle || 'Kepala Sekolah',
     signerName: verification?.signerName || '',
+    school: store.getEffectiveSchoolForDocument(doc),
     onChooseQr: () => runDownload('qr'),
     onChooseManual: () => runDownload('manual'),
     onAuthorizeAndQr: async (selectedRole) => {
       if (typeof container.__authorizeStandardLetter !== 'function') return;
       const result = await container.__authorizeStandardLetter(selectedRole, false);
-      const roleInfo = buildSignerSelectionInfo(store.getState().schoolProfile, selectedRole);
+      const roleInfo = buildSignerSelectionInfo(store.getEffectiveSchoolForDocument(doc), selectedRole);
       await runDownload('qr', {
         qrDataUrl: result.qrDataUrl,
         verificationUrl: result.payload?.verificationUrl,
@@ -5241,15 +5466,20 @@ async function buildWordCanvasVaultPayload(container) {
         store.setActiveUploadedDocx(nextUploaded);
       } catch {}
     }
+    const metaDoc = extractDocumentMetadata({
+      uploadedDocx: nextUploaded,
+      schoolProfile: store.getEffectiveSchoolForDocument(),
+      fallbackTitle: nextUploaded.fileName?.replace(/\.docx$/i, '') || 'Dokumen Word Impor'
+    });
     return {
       isImported: true,
-      title: nextUploaded.parsedMeta?.title || nextUploaded.fileName?.replace(/\.docx$/i, '') || 'Dokumen Word Impor',
-      nomorSurat: nextUploaded.parsedMeta?.nomor || '-',
-      tanggalSurat: nextUploaded.parsedMeta?.date || new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }),
-      category: 'Dokumen Impor',
-      targetPerson: nextUploaded.parsedMeta?.signer || '-',
-      perihal: nextUploaded.parsedMeta?.title || 'Dokumen Word Impor',
-      summary: `Dokumen .docx resmi diunggah: "${nextUploaded.fileName}". Preservasi format 100%.`,
+      title: metaDoc.formattedTitle || nextUploaded.parsedMeta?.title || 'Dokumen Word Impor',
+      nomorSurat: metaDoc.nomorSurat || nextUploaded.parsedMeta?.nomor || '-',
+      tanggalSurat: metaDoc.tanggalSurat,
+      category: metaDoc.category || 'Dokumen Impor',
+      targetPerson: metaDoc.recipientName || '-',
+      perihal: metaDoc.perihal || metaDoc.keperluan,
+      summary: metaDoc.summary || `Dokumen .docx resmi diunggah: "${nextUploaded.fileName}".`,
       isAiReference: true,
       source: 'upload',
       uploadedDocx: nextUploaded
@@ -5257,31 +5487,27 @@ async function buildWordCanvasVaultPayload(container) {
   }
 
   const docModel = buildModelFromCanvas(container);
+  const docSchool = store.getEffectiveSchoolForDocument(docModel);
   const titleEl = container.querySelector('#editable-doc-title');
   const nomorEl = container.querySelector('#editable-doc-nomor');
   const sigDateEl = container.querySelector('#editable-sig-date');
-  const allParas = collectMergedDynamicItems(container)
-    .filter(item => item.type === 'paragraph')
-    .map(item => item.text)
-    .filter(Boolean);
-  const firstTableVal = container.querySelector('.identity-table-word .id-val')?.innerText.replace(/^:\s*/, '').trim() || '-';
-
-  const title = (titleEl?.innerText.trim())
-    || (allParas[0]?.slice(0, 60))
-    || 'Dokumen Persuratan';
-  const nomor = nomorEl?.innerText.trim() || '-';
-  const dateText = sigDateEl?.innerText.trim() || new Date().toLocaleDateString('id-ID');
-  const summary = (allParas[1] || allParas[0] || 'Dokumen persuratan sekolah.').slice(0, 160);
+  const metaDoc = extractDocumentMetadata({
+    docModel,
+    schoolProfile: docSchool,
+    fallbackTitle: titleEl?.innerText.trim() || '',
+    fallbackNomor: nomorEl?.innerText.trim().replace(/^Nomor\s*:\s*/i, '') || '',
+    fallbackDate: sigDateEl?.innerText.trim() || ''
+  });
 
   return {
     isImported: false,
-    title,
-    nomorSurat: nomor,
-    tanggalSurat: dateText,
-    category: 'Surat Dinas',
-    targetPerson: firstTableVal,
-    perihal: title,
-    summary,
+    title: metaDoc.formattedTitle,
+    nomorSurat: metaDoc.nomorSurat || '-',
+    tanggalSurat: metaDoc.tanggalSurat,
+    category: metaDoc.category,
+    targetPerson: metaDoc.recipientName,
+    perihal: metaDoc.perihal,
+    summary: metaDoc.summary,
     isAiReference: true,
     source: 'created',
     document: docModel
@@ -5369,14 +5595,19 @@ async function openWordSaveVaultModal(container, { mode = 'save', clearAfterSave
         </div>
         <div class="modal-body" style="display: grid; gap: 10px;">
           ${isSaveAs && activeEntry ? `<div class="auth-alert" style="background:#eff6ff; border-color:#bfdbfe; color:#1e3a8a; font-size:12px;">Membuat salinan independen baru dari <strong>${escapeHtml(activeEntry.title)}</strong> agar file acuan asli tetap terjaga.</div>` : ''}
+          <div id="w-vault-scan-slot">${buildMetaAutoScanBarHtml()}</div>
           <div>
-            <label class="form-label">Judul Arsip</label>
+            <label class="form-label">Judul Arsip (Rapih Otomatis)</label>
             <input id="w-v-title" class="form-input" value="${escapeHtml(defaultTitle)}" />
             <div id="w-v-dup-warn" class="hidden" style="margin-top:6px; padding:7px 10px; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; font-size:11.5px; color:#92400e;"></div>
           </div>
-          <div><label class="form-label">Kategori</label><input id="w-v-cat" class="form-input" value="${escapeHtml(activeEntry?.category || payload.category)}" /></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <div><label class="form-label">Kategori</label><input id="w-v-cat" class="form-input" value="${escapeHtml(activeEntry?.category || payload.category)}" /></div>
+            <div><label class="form-label">Tanggal Surat</label><input id="w-v-date" class="form-input" value="${escapeHtml(payload.tanggalSurat || '')}" /></div>
+          </div>
+          <div><label class="form-label">Atas Nama / Pihak Terkait</label><input id="w-v-person" class="form-input" value="${escapeHtml(payload.targetPerson || '')}" /></div>
           <div><label class="form-label">Nomor Surat</label><input id="w-v-nomor" class="form-input" value="${escapeHtml(payload.nomorSurat)}" /></div>
-          <div><label class="form-label">Perihal</label><input id="w-v-hal" class="form-input" value="${escapeHtml(payload.perihal)}" /></div>
+          <div><label class="form-label">Perihal / Keperluan</label><input id="w-v-hal" class="form-input" value="${escapeHtml(payload.perihal)}" /></div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" id="w-save-modal-cancel">Batal</button>
@@ -5386,11 +5617,32 @@ async function openWordSaveVaultModal(container, { mode = 'save', clearAfterSave
       </div>
     </div>`;
 
-  const closeModal = () => { modalRoot.innerHTML = ''; };
   const titleInput = modalRoot.querySelector('#w-v-title');
   const dupWarnEl = modalRoot.querySelector('#w-v-dup-warn');
   const overwriteBtn = modalRoot.querySelector('#w-save-overwrite-btn');
   let matchedDup = null;
+
+  const cleanupVaultScan = wireMetaAutoScanBar({
+    rootEl: modalRoot.querySelector('.modal-body'),
+    getContext: () => ({
+      docModel: payload.document || buildModelFromCanvas(container),
+      uploadedDocx: payload.uploadedDocx || null,
+      schoolProfile: store.getEffectiveSchoolForDocument(payload.document || {})
+    }),
+    fields: {
+      titleEl: titleInput,
+      categoryEl: modalRoot.querySelector('#w-v-cat'),
+      dateEl: modalRoot.querySelector('#w-v-date'),
+      recipientEl: modalRoot.querySelector('#w-v-person'),
+      perihalEl: modalRoot.querySelector('#w-v-hal')
+    },
+    forTemplate: false,
+    autoAiOnOpen: !isSaveAs
+  });
+  const closeModal = () => {
+    cleanupVaultScan();
+    modalRoot.innerHTML = '';
+  };
 
   const checkDup = () => {
     const val = titleInput?.value.trim() || '';
@@ -5420,6 +5672,8 @@ async function openWordSaveVaultModal(container, { mode = 'save', clearAfterSave
     ...payload,
     title: titleVal,
     category: modalRoot.querySelector('#w-v-cat').value.trim() || payload.category,
+    tanggalSurat: modalRoot.querySelector('#w-v-date')?.value.trim() || payload.tanggalSurat,
+    targetPerson: modalRoot.querySelector('#w-v-person')?.value.trim() || payload.targetPerson,
     nomorSurat: modalRoot.querySelector('#w-v-nomor').value.trim() || '-',
     perihal: modalRoot.querySelector('#w-v-hal').value.trim() || titleVal
   });
